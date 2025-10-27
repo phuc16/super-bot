@@ -92,7 +92,6 @@ DISCORD_GUILD_ID=your-server-id
 
 # OpenAI Configuration
 OPENAI_API_KEY=sk-your_api_key_here
-OPENAI_ORG_ID=org-your_org_id_here
 GPT_MODEL=gpt-4-turbo-preview
 GPT_MAX_TOKENS=4096
 
@@ -107,12 +106,6 @@ DB_NAME=vcgsuperbot_dev
 APP_ENV=development
 LOG_LEVEL=debug
 PORT=8080
-
-# Feature Flags
-FEATURE_MESSAGE_EXPORT=true
-FEATURE_ACTIVITY_TRACKING=true
-FEATURE_WEEKLY_REPORTS=true
-FEATURE_ROLE_ASSIGNMENT=true
 
 # Rate Limiting
 RATE_LIMIT_EXPORT_PER_HOUR=10

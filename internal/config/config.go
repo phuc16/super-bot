@@ -36,7 +36,6 @@ type Config struct {
 
 	// OpenAI
 	OpenAIAPIKey string
-	OpenAIOrgID  string
 	GPTModel     string
 	GPTMaxTokens int
 
@@ -86,7 +85,6 @@ func Load() (*Config, error) {
 
 		// OpenAI
 		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
-		OpenAIOrgID:  getEnv("OPENAI_ORG_ID", ""),
 		GPTModel:     getEnv("GPT_MODEL", "gpt-4-turbo-preview"),
 		GPTMaxTokens: getEnvAsInt("GPT_MAX_TOKENS", 4096),
 
