@@ -30,7 +30,7 @@ services:
       mysql:
         condition: service_healthy
     env_file:
-      - ../env.example
+      - ../.env
     environment:
       DB_HOST: mysql
       DB_PORT: 3306
