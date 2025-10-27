@@ -1,0 +1,20 @@
+# Binaries
+bot
+
+# Environment
+.env
+.env.local
+
+# Data
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
