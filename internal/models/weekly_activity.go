@@ -27,7 +27,7 @@ type WeeklyActivity struct {
 	// Activity metrics
 	MessageCount int  `gorm:"not null" json:"message_count"`
 	VoiceMinutes int  `gorm:"default:0;not null" json:"voice_minutes"`
-	Rank         int  `gorm:"not null" json:"rank"` // 1-based rank for that week
+	Rank         int  `gorm:"type:int;column:rank_position;not null" json:"rank"` // 1-based rank for that week
 	ReceivedRole bool `gorm:"default:false;not null" json:"received_role"`
 
 	// Metadata

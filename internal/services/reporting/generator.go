@@ -63,7 +63,7 @@ func (g *Generator) GenerateWeeklyReport(ctx context.Context, guildID string, ye
 	var activities []models.WeeklyActivity
 	err := g.db.WithContext(ctx).
 		Where("guild_id = ? AND year = ? AND week_num = ?", guildID, year, weekNum).
-		Order("rank ASC, username ASC").
+		Order("rank_position ASC, username ASC").
 		Find(&activities).Error
 
 	if err != nil {
@@ -73,9 +73,13 @@ func (g *Generator) GenerateWeeklyReport(ctx context.Context, guildID string, ye
 	// Build report data
 	reportData := g.buildReportData(year, weekNum, weekStart, weekEnd, activities)
 
-	// Create report record
+	// Check if report already exists
+	var existing models.WeeklyReport
+	existingErr := g.db.WithContext(ctx).
+		Where("guild_id = ? AND year = ? AND week_num = ?", guildID, year, weekNum).
+		First(&existing).Error
+
 	report := &models.WeeklyReport{
-		ID:              uuid.New(),
 		GuildID:         guildID,
 		Year:            year,
 		WeekNum:         weekNum,
@@ -90,9 +94,23 @@ func (g *Generator) GenerateWeeklyReport(ctx context.Context, guildID string, ye
 		Top5Users:       g.extractTop5UserIDs(reportData.Rankings),
 	}
 
-	// Save to database
-	if err := g.db.WithContext(ctx).Create(report).Error; err != nil {
-		return nil, fmt.Errorf("failed to save report: %w", err)
+	// Save to database (update if exists, create if not)
+	if existingErr == gorm.ErrRecordNotFound {
+		// New report
+		report.ID = uuid.New()
+		if err := g.db.WithContext(ctx).Create(report).Error; err != nil {
+			return nil, fmt.Errorf("failed to create report: %w", err)
+		}
+		log.Info().Str("report_id", report.ID.String()).Msg("Created new weekly report")
+	} else if existingErr == nil {
+		// Update existing report
+		report.ID = existing.ID
+		if err := g.db.WithContext(ctx).Model(&existing).Updates(report).Error; err != nil {
+			return nil, fmt.Errorf("failed to update report: %w", err)
+		}
+		log.Info().Str("report_id", report.ID.String()).Msg("Updated existing weekly report")
+	} else {
+		return nil, fmt.Errorf("failed to query existing report: %w", existingErr)
 	}
 
 	duration := time.Since(start)
@@ -169,9 +187,13 @@ func (g *Generator) GenerateCurrentWeekReportFromActivity(ctx context.Context, g
 		Rankings:      rankings,
 	}
 
-	// Create report record
+	// Check if report already exists
+	var existing models.WeeklyReport
+	existingErr := g.db.WithContext(ctx).
+		Where("guild_id = ? AND year = ? AND week_num = ?", guildID, year, weekNum).
+		First(&existing).Error
+
 	report := &models.WeeklyReport{
-		ID:              uuid.New(),
 		GuildID:         guildID,
 		Year:            year,
 		WeekNum:         weekNum,
@@ -186,9 +208,23 @@ func (g *Generator) GenerateCurrentWeekReportFromActivity(ctx context.Context, g
 		Top5Users:       g.extractTop5UserIDs(reportData.Rankings),
 	}
 
-	// Save to database
-	if err := g.db.WithContext(ctx).Create(report).Error; err != nil {
-		return nil, fmt.Errorf("failed to save report: %w", err)
+	// Save to database (update if exists, create if not)
+	if existingErr == gorm.ErrRecordNotFound {
+		// New report
+		report.ID = uuid.New()
+		if err := g.db.WithContext(ctx).Create(report).Error; err != nil {
+			return nil, fmt.Errorf("failed to create report: %w", err)
+		}
+		log.Info().Str("report_id", report.ID.String()).Msg("Created new current week report")
+	} else if existingErr == nil {
+		// Update existing report
+		report.ID = existing.ID
+		if err := g.db.WithContext(ctx).Model(&existing).Updates(report).Error; err != nil {
+			return nil, fmt.Errorf("failed to update report: %w", err)
+		}
+		log.Info().Str("report_id", report.ID.String()).Msg("Updated existing current week report")
+	} else {
+		return nil, fmt.Errorf("failed to query existing report: %w", existingErr)
 	}
 
 	log.Info().

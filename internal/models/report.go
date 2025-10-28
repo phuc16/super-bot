@@ -30,8 +30,8 @@ type WeeklyReport struct {
 	GeneratedByUser string    `gorm:"type:varchar(100)" json:"generated_by_user,omitempty"` // Empty if automated
 
 	// Report content (JSON)
-	ReportContent JSONMap   `gorm:"type:json" json:"report_content"` // Full report data with rankings
-	Top5Users     JSONArray `gorm:"type:json" json:"top_5_users"`    // Top 5 user IDs for quick access
+	ReportContent JSONMap   `gorm:"type:json;column:report_content" json:"report_content"` // Full report data with rankings
+	Top5Users     JSONArray `gorm:"type:json;column:top_5_users" json:"top_5_users"`       // Top 5 user IDs for quick access
 
 	// Discord posting
 	ChannelID       string     `gorm:"type:varchar(100)" json:"channel_id,omitempty"`
