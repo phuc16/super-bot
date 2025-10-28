@@ -53,26 +53,26 @@ func (cmd *ExportCommand) Definition() *discordgo.ApplicationCommand {
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionInteger,
-				Name:        "count",
-				Description: "Last N messages (only for Recent type, default: 100, max: 500)",
+				Name:        "hours",
+				Description: "Last N hours (optional for Recent type, default: 1, max: 168)",
 				Required:    false,
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "from",
-				Description: "Start date/time (only for Date Range)",
+				Description: "Start date/time (required for Date Range) - Format: YYYY-MM-DD HH:MM or YYYY-MM-DD",
 				Required:    false,
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "end",
-				Description: "End date/time (only for Date Range)",
+				Description: "End date/time (optional for Date Range, defaults to now) - Format: YYYY-MM-DD HH:MM or YYYY-MM-DD",
 				Required:    false,
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "language",
-				Description: "Summary language (english or vietnamese)",
+				Description: "Summary language (optional: english or vietnamese, default vietnamese)",
 				Required:    false,
 				Choices: []*discordgo.ApplicationCommandOptionChoice{
 					{Name: "English", Value: "en"},
@@ -95,12 +95,12 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 		language = lang
 	}
 
-	// Get count option (default to 100 for recent type)
-	messageCount := 100
-	if count, ok := options["count"].(float64); ok {
-		messageCount = int(count)
-		if messageCount < 1 || messageCount > 500 {
-			respondError(s, i, "Message count must be between 1 and 500")
+	// Get hours option (default to 1 for recent type)
+	hours := 1
+	if hoursVal, ok := options["hours"].(float64); ok {
+		hours = int(hoursVal)
+		if hours < 1 || hours > 168 {
+			respondError(s, i, "Hours must be between 1 and 168 (7 days)")
 			return
 		}
 	}
@@ -138,13 +138,13 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 
 	// Parse export parameters
 	req := export.ExportRequest{
-		ChannelID:    channelID,
-		ChannelName:  channel.Name,
-		GuildID:      guildID,
-		UserID:       userID,
-		ExportType:   models.ExportType(exportType),
-		Language:     language,
-		MessageCount: messageCount,
+		ChannelID:   channelID,
+		ChannelName: channel.Name,
+		GuildID:     guildID,
+		UserID:      userID,
+		ExportType:  models.ExportType(exportType),
+		Language:    language,
+		Hours:       hours,
 	}
 
 	// Handle date-range type
@@ -153,9 +153,14 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 		fromStr, hasFrom := options["from"].(string)
 		endStr, hasEnd := options["end"].(string)
 
-		if !hasFrom || !hasEnd {
-			followUpError(s, i, "For date-range export, both 'from' and 'end' datetime are required.\nFormat: YYYY-MM-DD HH:MM or YYYY-MM-DD")
+		if !hasFrom {
+			followUpError(s, i, "For date-range export, 'from' datetime is required.\nFormat: YYYY-MM-DD HH:MM or YYYY-MM-DD")
 			return
+		}
+
+		// If end is not provided, default to now in the configured timezone
+		if !hasEnd {
+			endStr = time.Now().In(cmd.timezone).Format("2006-01-02 15:04")
 		}
 
 		// Validate date-time range using validation utility with timezone
@@ -167,6 +172,12 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 
 		req.StartTime = &fromTime
 		req.EndTime = &endTime
+	} else if exportType == string(models.ExportTypeRecent) {
+		now := time.Now().In(cmd.timezone)
+		startTime := now.Add(-time.Duration(hours) * time.Hour)
+
+		req.StartTime = &startTime
+		req.EndTime = &now
 	}
 
 	// Execute export asynchronously
