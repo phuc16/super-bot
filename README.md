@@ -73,13 +73,32 @@ docker-compose -f docker/docker-compose.yml logs -f bot
 
 | Command | Description | Permission |
 |---------|-------------|------------|
-| `/export` | Export and summarize messages | All users |
+| `/export` | Export messages with AI summarization (Date Range or Recent hours) | All users |
 | `/activity` | View user activity statistics | All users |
 | `/leaderboard` | View top 10 active users and your rank | All users |
 | `/report` | Generate/view weekly reports | Admin |
 | `/inactive` | Find inactive users | Admin |
 | `/config` | Manage server settings | Admin |
 | `/help` | Show command help | All users |
+
+### Command Details
+
+#### `/export`
+Export and summarize Discord messages using AI.
+
+**Options:**
+- `type` (required): `date_range` or `recent`
+- `hours` (for recent): Number of hours to go back (1-168, default: 1)
+- `from` (for date_range): Start date/time (required) - Format: `YYYY-MM-DD HH:MM` or `YYYY-MM-DD`
+- `end` (for date_range): End date/time (optional, defaults to now) - Format: `YYYY-MM-DD HH:MM` or `YYYY-MM-DD`
+- `language` (optional): `en` (English) or `vi` (Vietnamese, default)
+
+**Examples:**
+- `/export type:recent hours:24 language:vi` - Last 24 hours in Vietnamese
+- `/export type:date_range from:"2025-01-01" end:"2025-01-02"` - Specific date range
+- `/export type:date_range from:"2025-01-01"` - From specific date to now
+
+**Format:** `YYYY-MM-DD HH:MM` or `YYYY-MM-DD`
 
 ## Configuration
 
@@ -115,6 +134,7 @@ RATE_LIMIT_ACTIVITY_PER_MINUTE=20
 GPT_MAX_CONCURRENT_REQUESTS=3
 GPT_REQUEST_TIMEOUT_SECONDS=90
 GPT_DAILY_BUDGET_USD=10.0
+TIMEZONE=Asia/Ho_Chi_Minh
 
 # Development Settings
 DEBUG_MODE=true

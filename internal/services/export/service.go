@@ -34,15 +34,15 @@ func NewService(db *gorm.DB, session *discordgo.Session, gptQueue *gpt.Queue) *S
 
 // ExportRequest represents an export request
 type ExportRequest struct {
-	ChannelID    string
-	ChannelName  string
-	GuildID      string
-	UserID       string
-	ExportType   models.ExportType
-	StartTime    *time.Time
-	EndTime      *time.Time
-	Language     string // "vi" for Vietnamese, "en" for English
-	MessageCount int    // Number of recent messages to fetch (for recent type)
+	ChannelID   string
+	ChannelName string
+	GuildID     string
+	UserID      string
+	ExportType  models.ExportType
+	StartTime   *time.Time
+	EndTime     *time.Time
+	Language    string // "vi" for Vietnamese, "en" for English
+	Hours       int    // Number of hours to go back (for recent type)
 }
 
 // ExportResult represents the result of an export
@@ -92,7 +92,10 @@ func (s *Service) Export(ctx context.Context, req ExportRequest) (*ExportResult,
 		}
 		messages, err = s.fetcher.FetchDateRange(req.ChannelID, *req.StartTime, *req.EndTime)
 	case models.ExportTypeRecent:
-		messages, err = s.fetcher.FetchRecentMessages(req.ChannelID, req.MessageCount)
+		if req.StartTime == nil || req.EndTime == nil {
+			return nil, fmt.Errorf("start_time and end_time required for recent export")
+		}
+		messages, err = s.fetcher.FetchDateRange(req.ChannelID, *req.StartTime, *req.EndTime)
 	default:
 		return nil, fmt.Errorf("invalid export type: %s", req.ExportType)
 	}
