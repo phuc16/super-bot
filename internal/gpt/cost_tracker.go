@@ -93,6 +93,12 @@ func (ct *CostTracker) calculateCost(inputTokens, outputTokens int, model string
 	var inputCostPer1k, outputCostPer1k float64
 
 	switch model {
+	case "gpt-4o-mini", "gpt-4o-mini-2024-07-18":
+		inputCostPer1k = 0.00015
+		outputCostPer1k = 0.0006
+	case "gpt-4o", "gpt-4o-2024-11-20", "gpt-4o-2024-08-06":
+		inputCostPer1k = 0.0025
+		outputCostPer1k = 0.01
 	case "gpt-4-turbo-preview", "gpt-4-turbo":
 		inputCostPer1k = 0.01
 		outputCostPer1k = 0.03
@@ -100,9 +106,9 @@ func (ct *CostTracker) calculateCost(inputTokens, outputTokens int, model string
 		inputCostPer1k = 0.0015
 		outputCostPer1k = 0.002
 	default:
-		// Default to GPT-4-turbo pricing
-		inputCostPer1k = 0.01
-		outputCostPer1k = 0.03
+		// Default to gpt-4o-mini pricing as safe fallback
+		inputCostPer1k = 0.00015
+		outputCostPer1k = 0.0006
 	}
 
 	inputCost := (float64(inputTokens) / 1000.0) * inputCostPer1k

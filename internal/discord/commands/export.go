@@ -79,6 +79,12 @@ func (cmd *ExportCommand) Definition() *discordgo.ApplicationCommand {
 					{Name: "Tiếng Việt", Value: "vi"},
 				},
 			},
+			{
+				Type:        discordgo.ApplicationCommandOptionBoolean,
+				Name:        "public",
+				Description: "Show result to everyone in the channel (default: false — only you can see)",
+				Required:    false,
+			},
 		},
 	}
 }
@@ -93,6 +99,16 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 	language := "vi"
 	if lang, ok := options["language"].(string); ok {
 		language = lang
+	}
+
+	// Get public option (default to false — ephemeral)
+	isPublic := false
+	if pub, ok := options["public"].(bool); ok {
+		isPublic = pub
+	}
+	var msgFlags discordgo.MessageFlags
+	if !isPublic {
+		msgFlags = discordgo.MessageFlagsEphemeral
 	}
 
 	// Get hours option (default to 1 for recent type)
@@ -128,7 +144,7 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: "⏳ Exporting messages... This may take up to 60 seconds.",
-			Flags:   discordgo.MessageFlagsEphemeral,
+			Flags:   msgFlags,
 		},
 	})
 	if err != nil {
@@ -181,11 +197,11 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 	}
 
 	// Execute export asynchronously
-	go cmd.processExport(s, i, req)
+	go cmd.processExport(s, i, req, msgFlags)
 }
 
 // processExport handles the actual export processing
-func (cmd *ExportCommand) processExport(s *discordgo.Session, i *discordgo.InteractionCreate, req export.ExportRequest) {
+func (cmd *ExportCommand) processExport(s *discordgo.Session, i *discordgo.InteractionCreate, req export.ExportRequest, msgFlags discordgo.MessageFlags) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -197,16 +213,28 @@ func (cmd *ExportCommand) processExport(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
+	// Format time range
+	timeFormat := "02/01/2006 15:04"
+	timeRange := ""
+	if req.StartTime != nil && req.EndTime != nil {
+		timeRange = fmt.Sprintf("**Time**: %s → %s\n",
+			req.StartTime.In(cmd.timezone).Format(timeFormat),
+			req.EndTime.In(cmd.timezone).Format(timeFormat),
+		)
+	}
+
 	// Build response message
 	var content string
 	if result.SummaryStatus == models.SummaryStatusCompleted {
 		content = fmt.Sprintf("📊 **Message Export Complete**\n\n"+
 			"**Channel**: <#%s>\n"+
+			"%s"+
 			"**Messages Exported**: %d\n"+
 			"**Processing Time**: %.1fs\n\n"+
 			"**AI Summary**:\n%s\n\n"+
 			"_Export ID: %s | Tokens used: %d_",
 			req.ChannelID,
+			timeRange,
 			result.MessageCount,
 			float64(result.ProcessingDurationMs)/1000.0,
 			result.Summary,
@@ -216,10 +244,12 @@ func (cmd *ExportCommand) processExport(s *discordgo.Session, i *discordgo.Inter
 	} else if result.SummaryStatus == models.SummaryStatusSkipped {
 		content = fmt.Sprintf("📊 **Message Export Complete**\n\n"+
 			"**Channel**: <#%s>\n"+
+			"%s"+
 			"**Messages Exported**: %d\n\n"+
 			"%s\n\n"+
 			"_Export ID: %s_",
 			req.ChannelID,
+			timeRange,
 			result.MessageCount,
 			result.Summary,
 			result.ExportID.String()[:8],
@@ -228,10 +258,12 @@ func (cmd *ExportCommand) processExport(s *discordgo.Session, i *discordgo.Inter
 		// Failed
 		content = fmt.Sprintf("⚠️ **Message Export Completed with Issues**\n\n"+
 			"**Channel**: <#%s>\n"+
+			"%s"+
 			"**Messages Exported**: %d\n\n"+
 			"%s\n\n"+
 			"_Export ID: %s_",
 			req.ChannelID,
+			timeRange,
 			result.MessageCount,
 			result.Summary,
 			result.ExportID.String()[:8],
@@ -241,7 +273,7 @@ func (cmd *ExportCommand) processExport(s *discordgo.Session, i *discordgo.Inter
 	// Send follow-up response
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content: content,
-		Flags:   discordgo.MessageFlagsEphemeral,
+		Flags:   msgFlags,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send follow-up message")
@@ -264,7 +296,7 @@ func respondRateLimited(s *discordgo.Session, i *discordgo.InteractionCreate, mi
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: message,
-			Flags:   discordgo.MessageFlagsEphemeral,
+			Flags:   0,
 		},
 	})
 }

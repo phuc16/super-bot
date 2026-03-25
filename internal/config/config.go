@@ -1,4 +1,4 @@
-// Package config provides configuration management for VCG Super Bot.
+// Package config provides configuration management for Discord Super Bot.
 // It loads configuration from environment variables and validates all settings
 // on startup, failing fast if any required values are missing or invalid.
 //
@@ -91,9 +91,9 @@ func Load() (*Config, error) {
 		// Database
 		DBHost:     getEnv("DB_HOST", "localhost"),
 		DBPort:     getEnv("DB_PORT", "3306"),
-		DBUser:     getEnv("DB_USER", "vcgsuperbot"),
+		DBUser:     getEnv("DB_USER", "superbot"),
 		DBPassword: getEnv("DB_PASSWORD", ""),
-		DBName:     getEnv("DB_NAME", "vcgsuperbot_dev"),
+		DBName:     getEnv("DB_NAME", "superbot_dev"),
 
 		// Application
 		AppEnv:   getEnv("APP_ENV", "development"),
@@ -220,7 +220,7 @@ func (c *Config) Validate() error {
 // Format: user:password@tcp(host:port)/database?params
 //
 // Example output:
-// "vcgsuperbot:password@tcp(localhost:3306)/vcgsuperbot_dev?charset=utf8mb4&parseTime=True&loc=Local"
+// "superbot:password@tcp(localhost:3306)/superbot_dev?charset=utf8mb4&parseTime=True&loc=Local"
 func (c *Config) GetDSN() string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName)

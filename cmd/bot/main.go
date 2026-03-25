@@ -38,7 +38,7 @@ func main() {
 			runMigrations()
 			return
 		case "version":
-			fmt.Println("Discord Activity Bot v1.0.0")
+			fmt.Println("Discord Super Bot v1.0.0")
 			return
 		default:
 			fmt.Printf("Unknown command: %s\n", os.Args[1])
@@ -63,7 +63,7 @@ func run() error {
 
 	// Initialize logger
 	logger.Init(cfg.LogLevel)
-	log.Info().Msg("VCG Super Bot starting...")
+	log.Info().Msg("Discord Super Bot starting...")
 	log.Info().
 		Str("environment", cfg.AppEnv).
 		Str("log_level", cfg.LogLevel).
