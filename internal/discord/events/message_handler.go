@@ -1,21 +1,27 @@
 package events
 
 import (
+	"context"
+	"strings"
+
 	"github.com/bwmarrin/discordgo"
 	"github.com/rs/zerolog/log"
 
 	"github.com/phuc16/VCG-super-bot/internal/services/activity"
+	"github.com/phuc16/VCG-super-bot/internal/services/customcmd"
 )
 
 // MessageHandler handles Discord MESSAGE_CREATE events
 type MessageHandler struct {
-	tracker *activity.Tracker
+	tracker    *activity.Tracker
+	customcmds *customcmd.Service
 }
 
 // NewMessageHandler creates a new message handler
-func NewMessageHandler(tracker *activity.Tracker) *MessageHandler {
+func NewMessageHandler(tracker *activity.Tracker, customcmds *customcmd.Service) *MessageHandler {
 	return &MessageHandler{
-		tracker: tracker,
+		tracker:    tracker,
+		customcmds: customcmds,
 	}
 }
 
@@ -29,6 +35,29 @@ func (h *MessageHandler) Handle(s *discordgo.Session, m *discordgo.MessageCreate
 	// Skip DMs (messages without a GuildID)
 	if m.GuildID == "" {
 		return
+	}
+
+	// Check if message is a custom keyword command (e.g. "/Kami")
+	content := strings.TrimSpace(m.Content)
+	if strings.HasPrefix(content, "/") {
+		trigger := strings.ToLower(strings.TrimPrefix(content, "/"))
+		// Only treat as keyword if it's a single word (no spaces) — avoids clashing with real slash commands
+		if trigger != "" && !strings.Contains(trigger, " ") {
+			response, found, err := h.customcmds.GetResponse(context.Background(), m.GuildID, trigger)
+			if err != nil {
+				log.Error().Err(err).Str("guild_id", m.GuildID).Str("trigger", trigger).Msg("Failed to look up custom command")
+			} else if found {
+				ref := &discordgo.MessageReference{
+					MessageID: m.ID,
+					ChannelID: m.ChannelID,
+					GuildID:   m.GuildID,
+				}
+				if _, err := s.ChannelMessageSendReply(m.ChannelID, response, ref); err != nil {
+					log.Error().Err(err).Str("channel_id", m.ChannelID).Msg("Failed to send keyword reply")
+				}
+				// Still track activity below
+			}
+		}
 	}
 
 	// Create activity event

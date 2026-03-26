@@ -91,6 +91,12 @@ func (cmd *ExportCommand) Definition() *discordgo.ApplicationCommand {
 
 // Handle processes the command interaction
 func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Only admins (Manage Server / Administrator) can use this command
+	if !hasAdminPermission(i.Member) {
+		respondError(s, i, "Bạn cần quyền Administrator hoặc Manage Server để dùng lệnh này.")
+		return
+	}
+
 	// Parse options
 	options := parseOptions(i.ApplicationCommandData().Options)
 	exportType := options["type"].(string)

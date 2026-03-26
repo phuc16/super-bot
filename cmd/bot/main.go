@@ -21,7 +21,9 @@ import (
 	"github.com/phuc16/VCG-super-bot/internal/gpt"
 	"github.com/phuc16/VCG-super-bot/internal/scheduler"
 	"github.com/phuc16/VCG-super-bot/internal/services/activity"
+	aitopicService "github.com/phuc16/VCG-super-bot/internal/services/aitopic"
 	configService "github.com/phuc16/VCG-super-bot/internal/services/config"
+	"github.com/phuc16/VCG-super-bot/internal/services/customcmd"
 	"github.com/phuc16/VCG-super-bot/internal/services/export"
 	"github.com/phuc16/VCG-super-bot/internal/services/reporting"
 	"github.com/phuc16/VCG-super-bot/internal/services/roles"
@@ -97,12 +99,12 @@ func run() error {
 
 	// Initialize GPT client and queue
 	log.Info().Msg("Initializing GPT client...")
-	_, gptQueue := initializeGPT(cfg)
+	gptClient, gptQueue := initializeGPT(cfg)
 	defer gptQueue.Shutdown()
 
 	// Initialize services
 	log.Info().Msg("Initializing services...")
-	exportService, activityTracker, roleAnalyzer, _, reportGen, reportPoster, inactivityDetector, configSvc, taskScheduler := initializeServices(storage.GetDB(), discordClient, gptQueue, cfg)
+	exportService, activityTracker, roleAnalyzer, _, reportGen, reportPoster, inactivityDetector, configSvc, customcmdSvc, aiTopicSvc, taskScheduler := initializeServices(storage.GetDB(), discordClient, gptClient, gptQueue, cfg)
 
 	// Start activity tracker
 	log.Info().Msg("Starting activity tracker...")
@@ -110,7 +112,7 @@ func run() error {
 
 	// Register event handlers
 	log.Info().Msg("Registering event handlers...")
-	registerEventHandlers(discordClient, activityTracker)
+	registerEventHandlers(discordClient, activityTracker, customcmdSvc)
 
 	// Start scheduler
 	log.Info().Msg("Starting task scheduler...")
@@ -120,7 +122,7 @@ func run() error {
 
 	// Register commands
 	log.Info().Msg("Registering Discord commands...")
-	if err := registerCommands(discordClient, exportService, roleAnalyzer, reportGen, reportPoster, inactivityDetector, configSvc, cfg); err != nil {
+	if err := registerCommands(discordClient, exportService, roleAnalyzer, reportGen, reportPoster, inactivityDetector, configSvc, customcmdSvc, aiTopicSvc, cfg); err != nil {
 		return fmt.Errorf("failed to register commands: %w", err)
 	}
 
@@ -237,7 +239,7 @@ func initializeGPT(cfg *config.Config) (*gpt.Client, *gpt.Queue) {
 	return gptClient, queue
 }
 
-func initializeServices(db *gorm.DB, discordClient *discord.Client, gptQueue *gpt.Queue, cfg *config.Config) (*export.Service, *activity.Tracker, *roles.Analyzer, *roles.Assigner, *reporting.Generator, *reporting.Poster, *activity.InactivityDetector, *configService.Service, *scheduler.Scheduler) {
+func initializeServices(db *gorm.DB, discordClient *discord.Client, gptClient *gpt.Client, gptQueue *gpt.Queue, cfg *config.Config) (*export.Service, *activity.Tracker, *roles.Analyzer, *roles.Assigner, *reporting.Generator, *reporting.Poster, *activity.InactivityDetector, *configService.Service, *customcmd.Service, *aitopicService.Service, *scheduler.Scheduler) {
 	// Export service
 	exportService := export.NewService(db, discordClient.Session, gptQueue)
 
@@ -258,15 +260,21 @@ func initializeServices(db *gorm.DB, discordClient *discord.Client, gptQueue *gp
 	// Config service
 	configSvc := configService.NewService(db)
 
-	// Task scheduler (now uses config service and Discord session)
-	taskScheduler := scheduler.NewScheduler(db, discordClient.Session, roleAnalyzer, roleAssigner, reportGen, reportPoster, configSvc, cfg.DiscordGuildID)
+	// Custom command service
+	customcmdSvc := customcmd.NewService(db)
 
-	return exportService, activityTracker, roleAnalyzer, roleAssigner, reportGen, reportPoster, inactivityDetector, configSvc, taskScheduler
+	// AI topic service
+	aiTopicSvc := aitopicService.NewService(db)
+
+	// Task scheduler (now uses config service and Discord session)
+	taskScheduler := scheduler.NewScheduler(db, discordClient.Session, roleAnalyzer, roleAssigner, reportGen, reportPoster, configSvc, aiTopicSvc, gptClient, cfg.DiscordGuildID)
+
+	return exportService, activityTracker, roleAnalyzer, roleAssigner, reportGen, reportPoster, inactivityDetector, configSvc, customcmdSvc, aiTopicSvc, taskScheduler
 }
 
-func registerEventHandlers(discordClient *discord.Client, tracker *activity.Tracker) {
+func registerEventHandlers(discordClient *discord.Client, tracker *activity.Tracker, customcmdSvc *customcmd.Service) {
 	// Message event handler
-	messageHandler := events.NewMessageHandler(tracker)
+	messageHandler := events.NewMessageHandler(tracker, customcmdSvc)
 	messageHandler.Register(discordClient.Session)
 
 	// Voice event handler
@@ -274,7 +282,7 @@ func registerEventHandlers(discordClient *discord.Client, tracker *activity.Trac
 	voiceHandler.Register(discordClient.Session)
 }
 
-func registerCommands(discordClient *discord.Client, exportService *export.Service, roleAnalyzer *roles.Analyzer, reportGen *reporting.Generator, reportPoster *reporting.Poster, inactivityDetector *activity.InactivityDetector, configSvc *configService.Service, cfg *config.Config) error {
+func registerCommands(discordClient *discord.Client, exportService *export.Service, roleAnalyzer *roles.Analyzer, reportGen *reporting.Generator, reportPoster *reporting.Poster, inactivityDetector *activity.InactivityDetector, configSvc *configService.Service, customcmdSvc *customcmd.Service, aiTopicSvc *aitopicService.Service, cfg *config.Config) error {
 	// Create rate limiter for exports
 	rateLimiter := export.NewRateLimiter(cfg.RateLimitExportPerHour)
 
@@ -286,6 +294,12 @@ func registerCommands(discordClient *discord.Client, exportService *export.Servi
 	inactiveCmd := commands.NewInactiveCommand(inactivityDetector)
 	configCmd := commands.NewConfigCommand(configSvc)
 	helpCmd := commands.NewHelpCommand()
+	addcomCmd := commands.NewAddcomCommand(customcmdSvc)
+	delcomCmd := commands.NewDelcomCommand(customcmdSvc)
+	listcomCmd := commands.NewListcomCommand(customcmdSvc)
+	addtopicCmd := commands.NewAddtopicCommand(aiTopicSvc)
+	deltopicCmd := commands.NewDeltopicCommand(aiTopicSvc)
+	listtopicCmd := commands.NewListtopicCommand(aiTopicSvc)
 
 	// Register command definitions
 	if err := discordClient.RegisterCommand(exportCmd.Definition()); err != nil {
@@ -309,8 +323,26 @@ func registerCommands(discordClient *discord.Client, exportService *export.Servi
 	if err := discordClient.RegisterCommand(helpCmd.Definition()); err != nil {
 		return fmt.Errorf("failed to register /help command: %w", err)
 	}
+	if err := discordClient.RegisterCommand(addcomCmd.Definition()); err != nil {
+		return fmt.Errorf("failed to register /addcom command: %w", err)
+	}
+	if err := discordClient.RegisterCommand(delcomCmd.Definition()); err != nil {
+		return fmt.Errorf("failed to register /delcom command: %w", err)
+	}
+	if err := discordClient.RegisterCommand(listcomCmd.Definition()); err != nil {
+		return fmt.Errorf("failed to register /listcom command: %w", err)
+	}
+	if err := discordClient.RegisterCommand(addtopicCmd.Definition()); err != nil {
+		return fmt.Errorf("failed to register /addtopic command: %w", err)
+	}
+	if err := discordClient.RegisterCommand(deltopicCmd.Definition()); err != nil {
+		return fmt.Errorf("failed to register /deltopic command: %w", err)
+	}
+	if err := discordClient.RegisterCommand(listtopicCmd.Definition()); err != nil {
+		return fmt.Errorf("failed to register /listtopic command: %w", err)
+	}
 
-	log.Info().Msg("Registered 7 Discord commands: /export, /activity, /leaderboard, /report, /inactive, /config, /help")
+	log.Info().Msg("Registered 13 Discord commands: /export, /activity, /leaderboard, /report, /inactive, /config, /help, /addcom, /delcom, /listcom, /addtopic, /deltopic, /listtopic")
 
 	// Create middleware-wrapped command handlers with rate limiting
 	exportHandler := commands.ChainMiddleware(
@@ -401,6 +433,66 @@ func registerCommands(discordClient *discord.Client, exportService *export.Servi
 		},
 	)
 
+	addcomHandler := commands.ChainMiddleware(
+		addcomCmd.Handle,
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithRecovery("addcom", h)
+		},
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithLogging("addcom", h)
+		},
+	)
+
+	delcomHandler := commands.ChainMiddleware(
+		delcomCmd.Handle,
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithRecovery("delcom", h)
+		},
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithLogging("delcom", h)
+		},
+	)
+
+	listcomHandler := commands.ChainMiddleware(
+		listcomCmd.Handle,
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithRecovery("listcom", h)
+		},
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithLogging("listcom", h)
+		},
+	)
+
+	addtopicHandler := commands.ChainMiddleware(
+		addtopicCmd.Handle,
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithRecovery("addtopic", h)
+		},
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithLogging("addtopic", h)
+		},
+	)
+
+	deltopicHandler := commands.ChainMiddleware(
+		deltopicCmd.Handle,
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithRecovery("deltopic", h)
+		},
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithLogging("deltopic", h)
+		},
+	)
+
+	listtopicHandler := commands.ChainMiddleware(
+		listtopicCmd.Handle,
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithRecovery("listtopic", h)
+		},
+		func(h commands.CommandHandler) commands.CommandHandler {
+			return commands.WithLogging("listtopic", h)
+		},
+	)
+
 	// Add interaction handler with middleware
 	discordClient.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		// Only handle application commands
@@ -424,6 +516,18 @@ func registerCommands(discordClient *discord.Client, exportService *export.Servi
 			configHandler(s, i)
 		case "help":
 			helpHandler(s, i)
+		case "addcom":
+			addcomHandler(s, i)
+		case "delcom":
+			delcomHandler(s, i)
+		case "listcom":
+			listcomHandler(s, i)
+		case "addtopic":
+			addtopicHandler(s, i)
+		case "deltopic":
+			deltopicHandler(s, i)
+		case "listtopic":
+			listtopicHandler(s, i)
 		default:
 			log.Warn().Str("command", i.ApplicationCommandData().Name).Msg("Unknown command received")
 		}

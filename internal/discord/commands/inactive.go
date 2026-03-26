@@ -58,7 +58,7 @@ func (cmd *InactiveCommand) Handle(s *discordgo.Session, i *discordgo.Interactio
 
 	// Get threshold (default 30 days)
 	thresholdDays := 30
-	if days, ok := options["days"].(int64); ok {
+	if days, ok := options["days"].(float64); ok {
 		thresholdDays = int(days)
 	}
 
