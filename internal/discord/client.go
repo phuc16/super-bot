@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -28,6 +29,19 @@ func NewClient(token string, guildID string) (*Client, error) {
 		discordgo.IntentsGuildVoiceStates |
 		discordgo.IntentsMessageContent
 
+	// Use a persistent HTTP client with long-lived connections.
+	// Default IdleConnTimeout is 90s — connections from startup expire before
+	// the first user command arrives, forcing a new TLS handshake that pushes
+	// InteractionRespond past Discord's 3s acknowledgment window.
+	session.Client = &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 8,
+			IdleConnTimeout:     10 * time.Minute,
+			DisableKeepAlives:   false,
+		},
+		Timeout: 30 * time.Second,
+	}
+
 	return &Client{
 		Session: session,
 		GuildID: guildID,
@@ -39,7 +53,21 @@ func (c *Client) Connect() error {
 	// Add rate limit handler
 	AddRateLimitHandler(c.Session)
 
-	return c.ConnectWithRetry(5, 2*time.Second)
+	if err := c.ConnectWithRetry(5, 2*time.Second); err != nil {
+		return err
+	}
+
+	// Pre-warm the HTTP connection to Discord's REST API so the first
+	// interaction acknowledgment doesn't pay TCP+TLS handshake costs.
+	go func() {
+		if _, err := c.Session.Client.Get("https://discord.com/api/v10/gateway"); err != nil {
+			log.Debug().Err(err).Msg("Discord HTTP pre-warm request failed (non-fatal)")
+		} else {
+			log.Debug().Msg("Discord HTTP connection pre-warmed")
+		}
+	}()
+
+	return nil
 }
 
 // ConnectWithRetry attempts to connect with exponential backoff

@@ -58,8 +58,8 @@ func (f *Formatter) FormatForGPT(messages []models.DiscordMessage, channelName s
 		}
 
 		// Truncate very long messages
-		if len(content) > 500 {
-			content = content[:497] + "..."
+		if len(content) > 2000 {
+			content = content[:1997] + "..."
 		}
 
 		// Redact sensitive content

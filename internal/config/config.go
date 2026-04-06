@@ -85,7 +85,7 @@ func Load() (*Config, error) {
 
 		// OpenAI
 		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
-		GPTModel:     getEnv("GPT_MODEL", "gpt-4-turbo-preview"),
+		GPTModel:     getEnv("GPT_MODEL", "gpt-4o-mini"),
 		GPTMaxTokens: getEnvAsInt("GPT_MAX_TOKENS", 4096),
 
 		// Database
@@ -108,7 +108,7 @@ func Load() (*Config, error) {
 		// GPT
 		GPTMaxConcurrentRequests: getEnvAsInt("GPT_MAX_CONCURRENT_REQUESTS", 5),
 		GPTRequestTimeoutSeconds: getEnvAsInt("GPT_REQUEST_TIMEOUT_SECONDS", 90),
-		GPTDailyBudgetUSD:        getEnvAsFloat("GPT_DAILY_BUDGET_USD", 10.0),
+		GPTDailyBudgetUSD:        getEnvAsFloat("GPT_DAILY_BUDGET_USD", 0.034),
 
 		// Development
 		DebugMode:  getEnvAsBool("DEBUG_MODE", false),

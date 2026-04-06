@@ -44,11 +44,12 @@ func (cmd *ExportCommand) Definition() *discordgo.ApplicationCommand {
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "type",
-				Description: "Export type: date-range or recent",
+				Description: "Export type: date-range, recent, or since last export",
 				Required:    true,
 				Choices: []*discordgo.ApplicationCommandOptionChoice{
 					{Name: "Date Range", Value: "date_range"},
 					{Name: "Recent Messages", Value: "recent"},
+					{Name: "Since Last Export", Value: "since_last"},
 				},
 			},
 			{
@@ -131,13 +132,6 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 	channelID := i.ChannelID
 	guildID := i.GuildID
 
-	// Get channel info
-	channel, err := s.Channel(channelID)
-	if err != nil {
-		respondError(s, i, "Failed to get channel information")
-		return
-	}
-
 	// Check rate limit
 	allowed, minutesLeft, err := cmd.rateLimiter.Allow(userID)
 	if !allowed {
@@ -145,7 +139,7 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 
-	// Defer response (processing takes time)
+	// Defer response immediately — must happen within 3 seconds
 	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -158,10 +152,18 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 
+	// Resolve channel name from state cache (no API call); fall back to API if missing
+	channelName := channelID
+	if ch, err := s.State.Channel(channelID); err == nil {
+		channelName = ch.Name
+	} else if ch, err := s.Channel(channelID); err == nil {
+		channelName = ch.Name
+	}
+
 	// Parse export parameters
 	req := export.ExportRequest{
 		ChannelID:   channelID,
-		ChannelName: channel.Name,
+		ChannelName: channelName,
 		GuildID:     guildID,
 		UserID:      userID,
 		ExportType:  models.ExportType(exportType),
@@ -200,6 +202,21 @@ func (cmd *ExportCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 
 		req.StartTime = &startTime
 		req.EndTime = &now
+	} else if exportType == "since_last" {
+		lastEnd, err := cmd.service.GetLastExportEndTime(context.Background(), guildID, channelID)
+		if err != nil {
+			followUpError(s, i, "Không thể lấy thông tin export trước: "+err.Error())
+			return
+		}
+		if lastEnd == nil {
+			followUpError(s, i, "Chưa có export nào trước đó cho channel này. Hãy dùng **Date Range** hoặc **Recent Messages**.")
+			return
+		}
+		now := time.Now().In(cmd.timezone)
+		// Use date_range under the hood
+		req.ExportType = models.ExportTypeDateRange
+		req.StartTime = lastEnd
+		req.EndTime = &now
 	}
 
 	// Execute export asynchronously
@@ -229,61 +246,87 @@ func (cmd *ExportCommand) processExport(s *discordgo.Session, i *discordgo.Inter
 		)
 	}
 
-	// Build response message
-	var content string
-	if result.SummaryStatus == models.SummaryStatusCompleted {
-		content = fmt.Sprintf("📊 **Message Export Complete**\n\n"+
-			"**Channel**: <#%s>\n"+
-			"%s"+
-			"**Messages Exported**: %d\n"+
-			"**Processing Time**: %.1fs\n\n"+
-			"**AI Summary**:\n%s\n\n"+
-			"_Export ID: %s | Tokens used: %d_",
-			req.ChannelID,
-			timeRange,
-			result.MessageCount,
-			float64(result.ProcessingDurationMs)/1000.0,
-			result.Summary,
-			result.ExportID.String()[:8],
-			result.TokensUsed,
-		)
-	} else if result.SummaryStatus == models.SummaryStatusSkipped {
-		content = fmt.Sprintf("📊 **Message Export Complete**\n\n"+
-			"**Channel**: <#%s>\n"+
-			"%s"+
-			"**Messages Exported**: %d\n\n"+
-			"%s\n\n"+
-			"_Export ID: %s_",
-			req.ChannelID,
-			timeRange,
-			result.MessageCount,
-			result.Summary,
-			result.ExportID.String()[:8],
-		)
-	} else {
-		// Failed
-		content = fmt.Sprintf("⚠️ **Message Export Completed with Issues**\n\n"+
-			"**Channel**: <#%s>\n"+
-			"%s"+
-			"**Messages Exported**: %d\n\n"+
-			"%s\n\n"+
-			"_Export ID: %s_",
-			req.ChannelID,
-			timeRange,
-			result.MessageCount,
-			result.Summary,
-			result.ExportID.String()[:8],
-		)
+	params := &discordgo.WebhookParams{
+		Flags: msgFlags,
 	}
 
-	// Send follow-up response
-	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: content,
-		Flags:   msgFlags,
-	})
-	if err != nil {
+	const embedDescLimit = 4096
+
+	switch result.SummaryStatus {
+	case models.SummaryStatusCompleted:
+		// Build header embed with stats
+		headerEmbed := &discordgo.MessageEmbed{
+			Color: 0x5865F2,
+			Description: fmt.Sprintf("**Channel**: <#%s>\n%s**Messages**: %d | **Time**: %.1fs | **Tokens**: %d",
+				req.ChannelID,
+				timeRange,
+				result.MessageCount,
+				float64(result.ProcessingDurationMs)/1000.0,
+				result.TokensUsed,
+			),
+		}
+		params.Embeds = append(params.Embeds, headerEmbed)
+
+		// Split summary across embeds (4096 chars each), all in one message
+		for _, chunk := range splitByLines(result.Summary, embedDescLimit) {
+			params.Embeds = append(params.Embeds, &discordgo.MessageEmbed{
+				Color:       0x5865F2,
+				Description: chunk,
+			})
+		}
+
+	case models.SummaryStatusSkipped:
+		params.Embeds = []*discordgo.MessageEmbed{{
+			Color: 0xFEE75C,
+			Description: fmt.Sprintf("**Channel**: <#%s>\n%s**Messages**: %d\n\n%s",
+				req.ChannelID, timeRange, result.MessageCount, result.Summary),
+		}}
+
+	default:
+		params.Embeds = []*discordgo.MessageEmbed{{
+			Color: 0xED4245,
+			Description: fmt.Sprintf("**Channel**: <#%s>\n%s**Messages**: %d\n\n%s",
+				req.ChannelID, timeRange, result.MessageCount, result.Summary),
+		}}
+	}
+
+	if _, err = s.FollowupMessageCreate(i.Interaction, true, params); err != nil {
 		log.Error().Err(err).Msg("Failed to send follow-up message")
 	}
+}
+
+// splitByLines splits text into non-empty chunks no larger than maxLen, breaking on newlines.
+func splitByLines(text string, maxLen int) []string {
+	var chunks []string
+	for len(text) > 0 {
+		if len(text) <= maxLen {
+			if trimmed := trimRight(text); trimmed != "" {
+				chunks = append(chunks, trimmed)
+			}
+			break
+		}
+		cut := maxLen
+		for j := maxLen; j > 0; j-- {
+			if text[j-1] == '\n' {
+				cut = j
+				break
+			}
+		}
+		chunk := trimRight(text[:cut])
+		if chunk != "" {
+			chunks = append(chunks, chunk)
+		}
+		text = text[cut:]
+	}
+	return chunks
+}
+
+func trimRight(s string) string {
+	end := len(s)
+	for end > 0 && (s[end-1] == '\n' || s[end-1] == '\r' || s[end-1] == ' ') {
+		end--
+	}
+	return s[:end]
 }
 
 // parseOptions converts command options to a map for easier access

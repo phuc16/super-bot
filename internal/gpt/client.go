@@ -49,6 +49,38 @@ func NewClient(apiKey string, model string, maxTokens int, mockMode bool, costTr
 	}
 }
 
+// CreateChatCompletionWithParams sends a request to GPT with explicit temperature and maxTokens
+func (c *Client) CreateChatCompletionWithParams(ctx context.Context, messages []openai.ChatCompletionMessage, temperature float32, maxTokens int) (string, int, error) {
+	if c.mockMode {
+		return c.CreateChatCompletion(ctx, messages)
+	}
+	if c.costTracker != nil && !c.costTracker.CanProceed() {
+		return "", 0, fmt.Errorf("daily GPT budget exceeded")
+	}
+	req := openai.ChatCompletionRequest{
+		Model:            c.model,
+		Messages:         messages,
+		MaxTokens:        maxTokens,
+		Temperature:      float32(temperature),
+		TopP:             1.0,
+		FrequencyPenalty: 0.1,
+		PresencePenalty:  0.0,
+	}
+	resp, err := c.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return "", 0, fmt.Errorf("GPT API error: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", 0, fmt.Errorf("no completion choices returned")
+	}
+	content := resp.Choices[0].Message.Content
+	tokens := resp.Usage.TotalTokens
+	if c.costTracker != nil {
+		c.costTracker.RecordUsage(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Model)
+	}
+	return content, tokens, nil
+}
+
 // CreateChatCompletion sends a request to GPT and returns the response
 func (c *Client) CreateChatCompletion(ctx context.Context, messages []openai.ChatCompletionMessage) (string, int, error) {
 	// Mock mode - return fake response

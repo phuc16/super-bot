@@ -10,11 +10,12 @@ import (
 
 // Request represents a queued GPT summarization request
 type Request struct {
-	ID               uuid.UUID
-	FormattedMessage string
-	ChannelName      string
-	Language         string // "vi" or "en"
-	ResponseChan     chan Response
+	ID                uuid.UUID
+	FormattedMessage  string
+	ChannelName       string
+	Language          string // "vi" or "en"
+	HistoricalContext string // recent past summaries for context
+	ResponseChan      chan Response
 }
 
 // Response represents the result of a GPT request
@@ -59,20 +60,21 @@ func NewQueue(workers int, summarizer *Summarizer) *Queue {
 
 // Submit adds a request to the queue
 func (q *Queue) Submit(formattedMessage string, channelName string) (uuid.UUID, chan Response) {
-	return q.SubmitWithLanguage(formattedMessage, channelName, "vi") // Default to Vietnamese
+	return q.SubmitWithLanguage(formattedMessage, channelName, "vi", "")
 }
 
 // SubmitWithLanguage adds a request to the queue with specified language
-func (q *Queue) SubmitWithLanguage(formattedMessage string, channelName string, language string) (uuid.UUID, chan Response) {
+func (q *Queue) SubmitWithLanguage(formattedMessage string, channelName string, language string, historicalContext string) (uuid.UUID, chan Response) {
 	requestID := uuid.New()
 	responseChan := make(chan Response, 1)
 
 	req := Request{
-		ID:               requestID,
-		FormattedMessage: formattedMessage,
-		ChannelName:      channelName,
-		Language:         language,
-		ResponseChan:     responseChan,
+		ID:                requestID,
+		FormattedMessage:  formattedMessage,
+		ChannelName:       channelName,
+		Language:          language,
+		HistoricalContext: historicalContext,
+		ResponseChan:      responseChan,
 	}
 
 	// Non-blocking send (with timeout handled by caller)
@@ -129,6 +131,7 @@ func (q *Queue) processRequest(req Request) {
 		ctx,
 		req.FormattedMessage,
 		req.ChannelName,
+		req.HistoricalContext,
 	)
 
 	// Send response
@@ -140,11 +143,18 @@ func (q *Queue) processRequest(req Request) {
 	}
 	close(req.ResponseChan)
 
-	log.Debug().
-		Str("request_id", req.ID.String()).
-		Str("status", status).
-		Int("tokens", tokens).
-		Msg("GPT request completed")
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("request_id", req.ID.String()).
+			Msg("GPT request failed")
+	} else {
+		log.Debug().
+			Str("request_id", req.ID.String()).
+			Str("status", status).
+			Int("tokens", tokens).
+			Msg("GPT request completed")
+	}
 }
 
 // Shutdown gracefully stops the queue

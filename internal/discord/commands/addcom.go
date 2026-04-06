@@ -36,8 +36,14 @@ func (cmd *AddcomCommand) Definition() *discordgo.ApplicationCommand {
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "response",
-				Description: "Nội dung bot sẽ reply, ví dụ: Xinh đẹp",
-				Required:    true,
+				Description: "Nội dung bot sẽ reply (để trống nếu chỉ reply ảnh)",
+				Required:    false,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionAttachment,
+				Name:        "image",
+				Description: "Ảnh bot sẽ reply kèm theo (tùy chọn)",
+				Required:    false,
 			},
 		},
 	}
@@ -50,21 +56,32 @@ func (cmd *AddcomCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 
-	options := parseOptions(i.ApplicationCommandData().Options)
-	keyword, _ := options["keyword"].(string)
-	response, _ := options["response"].(string)
+	data := i.ApplicationCommandData()
+	options := parseOptions(data.Options)
 
+	keyword, _ := options["keyword"].(string)
 	keyword = strings.TrimPrefix(strings.TrimSpace(keyword), "/")
 	if keyword == "" {
 		respondError(s, i, "Keyword không được để trống.")
 		return
 	}
-	if response == "" {
-		respondError(s, i, "Response không được để trống.")
+
+	response, _ := options["response"].(string)
+
+	// Resolve image attachment URL if provided
+	var imageURL string
+	if attachID, ok := options["image"].(string); ok && attachID != "" {
+		if attach, ok := data.Resolved.Attachments[attachID]; ok {
+			imageURL = attach.URL
+		}
+	}
+
+	if response == "" && imageURL == "" {
+		respondError(s, i, "Phải có ít nhất `response` hoặc `image`.")
 		return
 	}
 
-	err := cmd.svc.Add(context.Background(), i.GuildID, keyword, response, i.Member.User.ID)
+	err := cmd.svc.Add(context.Background(), i.GuildID, keyword, response, i.Member.User.ID, imageURL)
 	if errors.Is(err, customcmd.ErrAlreadyExists) {
 		respondError(s, i, "Keyword `"+keyword+"` đã tồn tại. Dùng `/delcom` để xóa trước.")
 		return
@@ -75,5 +92,12 @@ func (cmd *AddcomCommand) Handle(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 
-	respondSuccess(s, i, "✅ Đã thêm keyword `"+keyword+"` → **"+response+"**\nNhắn `/"+keyword+"` để dùng.")
+	desc := "`" + keyword + "`"
+	if response != "" {
+		desc += " → **" + response + "**"
+	}
+	if imageURL != "" {
+		desc += " + ảnh"
+	}
+	respondSuccess(s, i, "✅ Đã thêm keyword "+desc+"\nNhắn `/"+keyword+"` để dùng.")
 }

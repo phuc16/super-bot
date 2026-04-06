@@ -2,6 +2,7 @@ package export
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -90,12 +91,12 @@ func (s *Service) Export(ctx context.Context, req ExportRequest) (*ExportResult,
 		if req.StartTime == nil || req.EndTime == nil {
 			return nil, fmt.Errorf("start_time and end_time required for date_range export")
 		}
-		messages, err = s.fetcher.FetchDateRange(req.ChannelID, *req.StartTime, *req.EndTime)
+		messages, err = s.fetcher.FetchDateRange(req.ChannelID, req.GuildID, *req.StartTime, *req.EndTime)
 	case models.ExportTypeRecent:
 		if req.StartTime == nil || req.EndTime == nil {
 			return nil, fmt.Errorf("start_time and end_time required for recent export")
 		}
-		messages, err = s.fetcher.FetchDateRange(req.ChannelID, *req.StartTime, *req.EndTime)
+		messages, err = s.fetcher.FetchDateRange(req.ChannelID, req.GuildID, *req.StartTime, *req.EndTime)
 	default:
 		return nil, fmt.Errorf("invalid export type: %s", req.ExportType)
 	}
@@ -155,7 +156,11 @@ func (s *Service) Export(ctx context.Context, req ExportRequest) (*ExportResult,
 	if language == "" {
 		language = "vi" // Default to Vietnamese
 	}
-	requestID, responseChan := s.gptQueue.SubmitWithLanguage(formatted, req.ChannelName, language)
+
+	// Fetch recent summaries as historical context
+	historicalContext := s.buildHistoricalContext(ctx, req.GuildID, req.ChannelID, export.ID.String())
+
+	requestID, responseChan := s.gptQueue.SubmitWithLanguage(formatted, req.ChannelName, language, historicalContext)
 	log.Debug().
 		Str("gpt_request_id", requestID.String()).
 		Str("language", language).
@@ -235,4 +240,63 @@ func (s *Service) GetExport(exportID uuid.UUID) (*models.MessageExport, error) {
 		return nil, fmt.Errorf("failed to find export: %w", err)
 	}
 	return &export, nil
+}
+
+// buildHistoricalContext fetches the last 3 completed summaries for the channel
+// and concatenates them as context for the next GPT call.
+// currentExportID is excluded so we don't include the record just created.
+func (s *Service) buildHistoricalContext(ctx context.Context, guildID, channelID, currentExportID string) string {
+	var exports []models.MessageExport
+	err := s.db.WithContext(ctx).
+		Where("guild_id = ? AND channel_id = ? AND summary_status = ? AND id != ? AND summary_text IS NOT NULL",
+			guildID, channelID, models.SummaryStatusCompleted, currentExportID).
+		Order("end_time DESC").
+		Limit(3).
+		Find(&exports).Error
+	if err != nil || len(exports) == 0 {
+		return ""
+	}
+
+	const maxCharsPerSummary = 3000
+	var parts []string
+	for idx, e := range exports {
+		if e.SummaryText == nil || *e.SummaryText == "" {
+			continue
+		}
+		text := *e.SummaryText
+		if len(text) > maxCharsPerSummary {
+			text = text[:maxCharsPerSummary] + "..."
+		}
+		timeLabel := ""
+		if e.EndTime != nil {
+			timeLabel = e.EndTime.Format("02/01/2006 15:04")
+		}
+		parts = append(parts, fmt.Sprintf("### Tóm tắt %d (kết thúc %s)\n%s", idx+1, timeLabel, text))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	result := ""
+	for i := len(parts) - 1; i >= 0; i-- {
+		result += parts[i] + "\n\n"
+	}
+	return result
+}
+
+// GetLastExportEndTime returns the end_time of the most recent completed export
+// for the given channel. Returns nil if no prior export exists.
+func (s *Service) GetLastExportEndTime(ctx context.Context, guildID, channelID string) (*time.Time, error) {
+	var export models.MessageExport
+	err := s.db.WithContext(ctx).
+		Where("guild_id = ? AND channel_id = ? AND summary_status != ? AND end_time IS NOT NULL",
+			guildID, channelID, models.SummaryStatusPending).
+		Order("end_time DESC").
+		First(&export).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query last export: %w", err)
+	}
+	return export.EndTime, nil
 }

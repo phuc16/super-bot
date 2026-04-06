@@ -27,7 +27,8 @@ func NewService(db *gorm.DB) *Service {
 }
 
 // Add creates a new custom command. Returns ErrAlreadyExists if the trigger already exists.
-func (s *Service) Add(ctx context.Context, guildID, trigger, response, createdBy string) error {
+// imageURL is optional — pass empty string for none.
+func (s *Service) Add(ctx context.Context, guildID, trigger, response, createdBy, imageURL string) error {
 	normalizedTrigger := strings.ToLower(strings.TrimSpace(trigger))
 
 	// Check if trigger already exists
@@ -46,6 +47,9 @@ func (s *Service) Add(ctx context.Context, guildID, trigger, response, createdBy
 		Trigger:   normalizedTrigger,
 		Response:  response,
 		CreatedBy: createdBy,
+	}
+	if imageURL != "" {
+		cmd.ImageURL = &imageURL
 	}
 	return s.db.WithContext(ctx).Create(cmd).Error
 }
@@ -76,8 +80,8 @@ func (s *Service) List(ctx context.Context, guildID string) ([]models.CustomComm
 	return cmds, err
 }
 
-// GetResponse returns the response for a trigger, or empty string if not found
-func (s *Service) GetResponse(ctx context.Context, guildID, trigger string) (string, bool, error) {
+// Get returns the custom command for a trigger, or (nil, nil) if not found.
+func (s *Service) Get(ctx context.Context, guildID, trigger string) (*models.CustomCommand, error) {
 	normalizedTrigger := strings.ToLower(strings.TrimSpace(trigger))
 
 	var cmd models.CustomCommand
@@ -85,10 +89,10 @@ func (s *Service) GetResponse(ctx context.Context, guildID, trigger string) (str
 		Where("guild_id = ? AND `trigger` = ? AND deleted_at IS NULL", guildID, normalizedTrigger).
 		First(&cmd).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	return cmd.Response, true, nil
+	return &cmd, nil
 }
