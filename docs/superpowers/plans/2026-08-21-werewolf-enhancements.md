@@ -899,7 +899,7 @@ type roundLog struct {
 	DoctorTargetLabel string
 	SeerTargetLabel   string
 	SeerResult        role
-	VoteTally         map[string]int
+	VoteBreakdown     map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
 	LynchedLabel      string
 }
 ```
@@ -959,17 +959,23 @@ func formatRoundBlock(r roundLog) string {
 	if r.SeerTargetLabel != "" {
 		fmt.Fprintf(&b, "\n🔮 Tiên tri xem: %s → %s", r.SeerTargetLabel, r.SeerResult.label())
 	}
-	if len(r.VoteTally) > 0 {
-		parts := make([]string, 0, len(r.VoteTally))
-		for label, count := range r.VoteTally {
-			parts = append(parts, fmt.Sprintf("%s: %d", label, count))
+	if len(r.VoteBreakdown) > 0 {
+		targets := make([]string, 0, len(r.VoteBreakdown))
+		for target := range r.VoteBreakdown {
+			targets = append(targets, target)
 		}
-		sort.Strings(parts)
+		sort.Strings(targets)
+		lines := make([]string, 0, len(targets))
+		for _, target := range targets {
+			voters := append([]string(nil), r.VoteBreakdown[target]...)
+			sort.Strings(voters)
+			lines = append(lines, fmt.Sprintf("%s: %d (%s)", target, len(voters), strings.Join(voters, ", ")))
+		}
 		lynched := "Không ai bị treo cổ"
 		if r.LynchedLabel != "" {
 			lynched = r.LynchedLabel + " bị treo cổ"
 		}
-		fmt.Fprintf(&b, "\n🗳️ Kết quả bỏ phiếu: %s → %s", strings.Join(parts, ", "), lynched)
+		fmt.Fprintf(&b, "\n🗳️ Kết quả bỏ phiếu:\n%s\n→ %s", strings.Join(lines, "\n"), lynched)
 	}
 	return b.String()
 }
@@ -1010,7 +1016,7 @@ func TestFormatRoundBlockFullFields(t *testing.T) {
 		DoctorTargetLabel: "Bob",
 		SeerTargetLabel:   "Carol",
 		SeerResult:        roleWerewolf,
-		VoteTally:         map[string]int{"Dave": 2, "Eve": 1},
+		VoteBreakdown:     map[string][]string{"Dave": {"Frank", "Grace"}, "Eve": {"Heidi"}},
 		LynchedLabel:      "Dave",
 	}
 	got := formatRoundBlock(r)
@@ -1019,7 +1025,8 @@ func TestFormatRoundBlockFullFields(t *testing.T) {
 		"🐺 Sói cắn: Alice",
 		"💉 Bác sĩ bảo vệ: Bob",
 		"🔮 Tiên tri xem: Carol → Ma Sói",
-		"Dave: 2, Eve: 1",
+		"Dave: 2 (Frank, Grace)",
+		"Eve: 1 (Heidi)",
 		"Dave bị treo cổ",
 	}
 	for _, want := range wantParts {
@@ -1300,8 +1307,8 @@ Replace with:
 
 		if n := len(game.History); n > 0 {
 			entry := &game.History[n-1]
-			entry.VoteTally = make(map[string]int)
-			for _, targetID := range game.Votes {
+			entry.VoteBreakdown = make(map[string][]string)
+			for voterID, targetID := range game.Votes {
 				label := voteSkipLabel
 				if targetID != voteSkipValue {
 					if target, exists := game.Players[targetID]; exists {
@@ -1310,7 +1317,11 @@ Replace with:
 						label = "?"
 					}
 				}
-				entry.VoteTally[label]++
+				voterLabel := "?"
+				if voter, exists := game.Players[voterID]; exists {
+					voterLabel = voter.Label
+				}
+				entry.VoteBreakdown[label] = append(entry.VoteBreakdown[label], voterLabel)
 			}
 			if lynchedPlayer != nil {
 				entry.LynchedLabel = lynchedPlayer.Label
