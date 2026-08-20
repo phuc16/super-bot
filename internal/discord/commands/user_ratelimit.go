@@ -202,6 +202,7 @@ var GlobalRateLimiters = struct {
 	Help     *UserRateLimiter
 	Roast    *UserRateLimiter
 	Duel     *UserRateLimiter
+	Werewolf *UserRateLimiter
 }{
 	Export:   NewUserRateLimiter(3, 1*time.Hour),    // 3 per hour per bot-commands.md
 	Activity: NewUserRateLimiter(10, 1*time.Minute), // 10 per minute
@@ -211,6 +212,7 @@ var GlobalRateLimiters = struct {
 	Help:     NewUserRateLimiter(20, 1*time.Minute), // 20 per minute (generous for help)
 	Roast:    NewUserRateLimiter(5, 1*time.Minute),  // 5 per minute (costs GPT tokens)
 	Duel:     NewUserRateLimiter(10, 1*time.Minute), // 10 per minute (no GPT cost)
+	Werewolf: NewUserRateLimiter(10, 1*time.Minute), // 10 per minute (start/status/leave)
 }
 
 // CloseAllRateLimiters closes all global rate limiters
@@ -223,4 +225,5 @@ func CloseAllRateLimiters() {
 	GlobalRateLimiters.Help.Close()
 	GlobalRateLimiters.Roast.Close()
 	GlobalRateLimiters.Duel.Close()
+	GlobalRateLimiters.Werewolf.Close()
 }

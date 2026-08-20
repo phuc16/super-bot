@@ -217,6 +217,7 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 	duelHistoryCmd := commands.NewDuelHistoryCommand(duelStatsSvc)
 	duelResetCmd := commands.NewDuelResetCommand(duelStatsSvc)
 	duelChallengeAllCmd := commands.NewDuelChallengeAllCommand(duelStatsSvc, cfg.Timezone)
+	werewolfCmd := commands.NewWerewolfCommand()
 
 	for _, def := range []*discordgo.ApplicationCommand{
 		exportCmd.Definition(),
@@ -235,13 +236,14 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 		duelHistoryCmd.Definition(),
 		duelResetCmd.Definition(),
 		duelChallengeAllCmd.Definition(),
+		werewolfCmd.Definition(),
 	} {
 		if err := discordClient.RegisterCommand(def); err != nil {
 			return fmt.Errorf("failed to register /%s command: %w", def.Name, err)
 		}
 	}
 
-	log.Info().Msg("Registered 16 Discord commands: /export, /config, /help, /addcom, /delcom, /listcom, /addtopic, /deltopic, /listtopic, /posttopic, /roast, /duel, /duel-leaderboard, /duel-history, /duel-reset, /duel-challenge-all")
+	log.Info().Msg("Registered 17 Discord commands: /export, /config, /help, /addcom, /delcom, /listcom, /addtopic, /deltopic, /listtopic, /posttopic, /roast, /duel, /duel-leaderboard, /duel-history, /duel-reset, /duel-challenge-all, /werewolf")
 
 	wrap := func(name string, h commands.CommandHandler, limiters ...func(commands.CommandHandler) commands.CommandHandler) commands.CommandHandler {
 		mw := append(limiters,
@@ -275,12 +277,16 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 	duelHistoryHandler := wrap("duel-history", duelHistoryCmd.Handle)
 	duelResetHandler := wrap("duel-reset", duelResetCmd.Handle)
 	duelChallengeAllHandler := wrap("duel-challenge-all", duelChallengeAllCmd.Handle)
+	werewolfHandler := wrap("werewolf", werewolfCmd.Handle, func(h commands.CommandHandler) commands.CommandHandler {
+		return commands.WithUserRateLimit("werewolf", commands.GlobalRateLimiters.Werewolf, h)
+	})
 
 	discordClient.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if i.Type == discordgo.InteractionMessageComponent {
 			duelCmd.HandleComponent(s, i)
 			duelResetCmd.HandleComponent(s, i)
 			duelChallengeAllCmd.HandleComponent(s, i)
+			werewolfCmd.HandleComponent(s, i)
 			return
 		}
 		if i.Type == discordgo.InteractionModalSubmit {
@@ -324,6 +330,8 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 			duelResetHandler(s, i)
 		case "duel-challenge-all":
 			duelChallengeAllHandler(s, i)
+		case "werewolf":
+			werewolfHandler(s, i)
 		default:
 			log.Warn().Str("command", i.ApplicationCommandData().Name).Msg("Unknown command received")
 		}
