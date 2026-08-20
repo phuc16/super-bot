@@ -110,13 +110,21 @@ func TestCheckWinConditionEmptyRoster(t *testing.T) {
 	if got := checkWinCondition(map[string]*player{}); got != resultOngoing {
 		t.Errorf("empty roster: got %v, want resultOngoing", got)
 	}
+	if got := checkWinCondition(nil); got != resultOngoing {
+		t.Errorf("nil roster: got %v, want resultOngoing", got)
+	}
+}
 
-	lobbyPlayers := map[string]*player{
+func TestCheckWinConditionAllDeadMidGame(t *testing.T) {
+	// A non-empty roster where everyone happens to be dead simultaneously
+	// (e.g. an AFK-removal batch) must not be treated as "ongoing" — zero
+	// alive werewolves with a real roster is a villager win.
+	players := map[string]*player{
 		"a": {UserID: "a", Role: roleVillager, Alive: false},
 		"b": {UserID: "b", Role: roleVillager, Alive: false},
 	}
-	if got := checkWinCondition(lobbyPlayers); got != resultOngoing {
-		t.Errorf("no-alive-players roster: got %v, want resultOngoing", got)
+	if got := checkWinCondition(players); got != resultVillagersWin {
+		t.Errorf("all-dead mid-game roster: got %v, want resultVillagersWin", got)
 	}
 }
 

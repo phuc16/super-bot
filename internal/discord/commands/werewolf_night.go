@@ -81,47 +81,58 @@ func copyPlayers(ps []*player) []*player {
 // runNightPhase resets this round's night state, opens the wolf thread and
 // seer/doctor DMs, waits for actions (or the timer), then resolves the night.
 func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string, seq uint64) {
-	cmd.mu.Lock()
-	game := cmd.gameIfCurrent(channelID, seq)
-	if game == nil {
-		cmd.mu.Unlock()
+	var (
+		gameFound      bool
+		round          int
+		wolves         []*player
+		nonWolfTargets []*player
+		seer           *player
+		seerTargets    []*player
+		doctor         *player
+		doctorTargets  []*player
+	)
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+		game.Phase = phaseNight
+		game.Round++
+		game.NightTarget = ""
+		game.SeerActed = false
+		game.DoctorProtect = ""
+
+		round = game.Round
+		wolves = copyPlayers(alivePlayersOfRole(game, roleWerewolf))
+		nonWolfTargets = copyPlayers(aliveNonWolves(game))
+
+		if seers := alivePlayersOfRole(game, roleSeer); len(seers) > 0 {
+			seer = copyPlayer(seers[0])
+			for _, id := range game.JoinOrder {
+				p := game.Players[id]
+				if p.Alive && p.UserID != seer.UserID {
+					seerTargets = append(seerTargets, copyPlayer(p))
+				}
+			}
+		}
+
+		if doctors := alivePlayersOfRole(game, roleDoctor); len(doctors) > 0 {
+			doctor = copyPlayer(doctors[0])
+			lastPick := game.DoctorLastPick
+			for _, id := range game.JoinOrder {
+				p := game.Players[id]
+				if p.Alive && p.UserID != lastPick {
+					doctorTargets = append(doctorTargets, copyPlayer(p))
+				}
+			}
+		}
+	}()
+	if !gameFound {
 		return
 	}
-	game.Phase = phaseNight
-	game.Round++
-	game.NightTarget = ""
-	game.SeerActed = false
-	game.DoctorProtect = ""
-
-	round := game.Round
-	wolves := copyPlayers(alivePlayersOfRole(game, roleWerewolf))
-	nonWolfTargets := copyPlayers(aliveNonWolves(game))
-
-	var seer *player
-	var seerTargets []*player
-	if seers := alivePlayersOfRole(game, roleSeer); len(seers) > 0 {
-		seer = copyPlayer(seers[0])
-		for _, id := range game.JoinOrder {
-			p := game.Players[id]
-			if p.Alive && p.UserID != seer.UserID {
-				seerTargets = append(seerTargets, copyPlayer(p))
-			}
-		}
-	}
-
-	var doctor *player
-	var doctorTargets []*player
-	if doctors := alivePlayersOfRole(game, roleDoctor); len(doctors) > 0 {
-		doctor = copyPlayer(doctors[0])
-		lastPick := game.DoctorLastPick
-		for _, id := range game.JoinOrder {
-			p := game.Players[id]
-			if p.Alive && p.UserID != lastPick {
-				doctorTargets = append(doctorTargets, copyPlayer(p))
-			}
-		}
-	}
-	cmd.mu.Unlock()
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ đang hành động trong tin nhắn riêng...", round),
@@ -165,11 +176,13 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 		return
 	}
 
-	cmd.mu.Lock()
-	if g := cmd.gameIfCurrent(channelID, seq); g != nil {
-		g.WolfThreadID = thread.ID
-	}
-	cmd.mu.Unlock()
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+			g.WolfThreadID = thread.ID
+		}
+	}()
 
 	for _, w := range wolves {
 		if err := s.ThreadMemberAdd(thread.ID, w.UserID); err != nil {
@@ -251,14 +264,18 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID string, deadline time.Time, seq uint64) {
 	reminded := false
 	for {
-		cmd.mu.Lock()
-		game := cmd.gameIfCurrent(channelID, seq)
-		var done bool
-		if game != nil {
+		var gameFound, done bool
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			game := cmd.gameIfCurrent(channelID, seq)
+			if game == nil {
+				return
+			}
+			gameFound = true
 			done = cmd.nightActionsComplete(game)
-		}
-		cmd.mu.Unlock()
-		if game == nil || done || time.Now().After(deadline) {
+		}()
+		if !gameFound || done || time.Now().After(deadline) {
 			return
 		}
 
@@ -282,57 +299,67 @@ func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID 
 // result, then hands off to the win-check and (if the game continues) the
 // day-discuss phase.
 func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string, seq uint64) {
-	cmd.mu.Lock()
-	game := cmd.gameIfCurrent(channelID, seq)
-	if game == nil {
-		cmd.mu.Unlock()
+	var (
+		gameFound     bool
+		threadID      string
+		revealOnDeath bool
+		killedPlayer  *player
+		saved         bool
+	)
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+
+		var killedID string
+		if game.NightTarget != "" {
+			if game.NightTarget == game.DoctorProtect {
+				saved = true
+			} else if target, exists := game.Players[game.NightTarget]; exists && target.Alive {
+				target.Alive = false
+				killedID = game.NightTarget
+			}
+		}
+
+		if game.NightTarget == "" {
+			for _, w := range alivePlayersOfRole(game, roleWerewolf) {
+				game.AFKStrikes[w.UserID]++
+			}
+		} else {
+			for _, w := range alivePlayersOfRole(game, roleWerewolf) {
+				game.AFKStrikes[w.UserID] = 0
+			}
+		}
+		for _, p := range alivePlayersOfRole(game, roleSeer) {
+			if game.SeerActed {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+		for _, p := range alivePlayersOfRole(game, roleDoctor) {
+			if game.DoctorProtect != "" {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+
+		game.DoctorLastPick = game.DoctorProtect
+		threadID = game.WolfThreadID
+		game.WolfThreadID = ""
+		revealOnDeath = game.RevealOnDeath
+		if killedID != "" {
+			killedPlayer = game.Players[killedID]
+		}
+	}()
+	if !gameFound {
 		return
 	}
-
-	var killedID string
-	saved := false
-	if game.NightTarget != "" {
-		if game.NightTarget == game.DoctorProtect {
-			saved = true
-		} else if target, exists := game.Players[game.NightTarget]; exists && target.Alive {
-			target.Alive = false
-			killedID = game.NightTarget
-		}
-	}
-
-	if game.NightTarget == "" {
-		for _, w := range alivePlayersOfRole(game, roleWerewolf) {
-			game.AFKStrikes[w.UserID]++
-		}
-	} else {
-		for _, w := range alivePlayersOfRole(game, roleWerewolf) {
-			game.AFKStrikes[w.UserID] = 0
-		}
-	}
-	for _, p := range alivePlayersOfRole(game, roleSeer) {
-		if game.SeerActed {
-			game.AFKStrikes[p.UserID] = 0
-		} else {
-			game.AFKStrikes[p.UserID]++
-		}
-	}
-	for _, p := range alivePlayersOfRole(game, roleDoctor) {
-		if game.DoctorProtect != "" {
-			game.AFKStrikes[p.UserID] = 0
-		} else {
-			game.AFKStrikes[p.UserID]++
-		}
-	}
-
-	game.DoctorLastPick = game.DoctorProtect
-	threadID := game.WolfThreadID
-	game.WolfThreadID = ""
-	revealOnDeath := game.RevealOnDeath
-	var killedPlayer *player
-	if killedID != "" {
-		killedPlayer = game.Players[killedID]
-	}
-	cmd.mu.Unlock()
 
 	if threadID != "" {
 		if _, err := s.ChannelDelete(threadID); err != nil {

@@ -16,15 +16,22 @@ const (
 )
 
 func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string, seq uint64) {
-	cmd.mu.Lock()
-	game := cmd.gameIfCurrent(channelID, seq)
-	if game == nil {
-		cmd.mu.Unlock()
+	var gameFound bool
+	var round int
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+		game.Phase = phaseDayDiscuss
+		round = game.Round
+	}()
+	if !gameFound {
 		return
 	}
-	game.Phase = phaseDayDiscuss
-	round := game.Round
-	cmd.mu.Unlock()
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         fmt.Sprintf("☀️ **Ngày %d.** Thảo luận trong %s trước khi bỏ phiếu.", round, formatRemaining(dayDiscussWindow)),
@@ -35,9 +42,11 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 
 	time.Sleep(dayDiscussWindow)
 
-	cmd.mu.Lock()
-	stillGoing := cmd.gameIfCurrent(channelID, seq) != nil
-	cmd.mu.Unlock()
+	stillGoing := func() bool {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		return cmd.gameIfCurrent(channelID, seq) != nil
+	}()
 	if !stillGoing {
 		return
 	}
@@ -46,21 +55,27 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 }
 
 func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, seq uint64) {
-	cmd.mu.Lock()
-	game := cmd.gameIfCurrent(channelID, seq)
-	if game == nil {
-		cmd.mu.Unlock()
+	var gameFound bool
+	var alive []*player
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+		game.Phase = phaseDayVote
+		game.Votes = make(map[string]string)
+		for _, id := range game.JoinOrder {
+			if p := game.Players[id]; p.Alive {
+				alive = append(alive, p)
+			}
+		}
+	}()
+	if !gameFound {
 		return
 	}
-	game.Phase = phaseDayVote
-	game.Votes = make(map[string]string)
-	var alive []*player
-	for _, id := range game.JoinOrder {
-		if p := game.Players[id]; p.Alive {
-			alive = append(alive, p)
-		}
-	}
-	cmd.mu.Unlock()
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:    "🗳️ **Bỏ phiếu treo cổ.** Chọn người bạn nghi ngờ.",
@@ -77,14 +92,18 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 
 func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string, deadline time.Time, aliveCount int, seq uint64) {
 	for {
-		cmd.mu.Lock()
-		game := cmd.gameIfCurrent(channelID, seq)
-		var done bool
-		if game != nil {
+		var gameFound, done bool
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			game := cmd.gameIfCurrent(channelID, seq)
+			if game == nil {
+				return
+			}
+			gameFound = true
 			done = len(game.Votes) >= aliveCount
-		}
-		cmd.mu.Unlock()
-		if game == nil || done || time.Now().After(deadline) {
+		}()
+		if !gameFound || done || time.Now().After(deadline) {
 			return
 		}
 		time.Sleep(2 * time.Second)
@@ -92,37 +111,46 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 }
 
 func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, seq uint64) {
-	cmd.mu.Lock()
-	game := cmd.gameIfCurrent(channelID, seq)
-	if game == nil {
-		cmd.mu.Unlock()
+	var (
+		gameFound     bool
+		lynchedPlayer *player
+		revealOnDeath bool
+	)
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+
+		var alive []*player
+		for _, id := range game.JoinOrder {
+			if p := game.Players[id]; p.Alive {
+				alive = append(alive, p)
+			}
+		}
+		for _, p := range alive {
+			if _, voted := game.Votes[p.UserID]; voted {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+
+		top, tie := tallyVotes(game.Votes)
+		if !tie && len(top) == 1 {
+			if target, exists := game.Players[top[0]]; exists && target.Alive {
+				target.Alive = false
+				lynchedPlayer = target
+			}
+		}
+		revealOnDeath = game.RevealOnDeath
+	}()
+	if !gameFound {
 		return
 	}
-
-	var alive []*player
-	for _, id := range game.JoinOrder {
-		if p := game.Players[id]; p.Alive {
-			alive = append(alive, p)
-		}
-	}
-	for _, p := range alive {
-		if _, voted := game.Votes[p.UserID]; voted {
-			game.AFKStrikes[p.UserID] = 0
-		} else {
-			game.AFKStrikes[p.UserID]++
-		}
-	}
-
-	top, tie := tallyVotes(game.Votes)
-	var lynchedPlayer *player
-	if !tie && len(top) == 1 {
-		if target, exists := game.Players[top[0]]; exists && target.Alive {
-			target.Alive = false
-			lynchedPlayer = target
-		}
-	}
-	revealOnDeath := game.RevealOnDeath
-	cmd.mu.Unlock()
 
 	var resultMsg string
 	switch {
@@ -152,34 +180,50 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 // role, deletes any remaining wolf thread, deletes the game from the
 // pending map, and returns true — callers must stop processing when true.
 func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelID string, seq uint64) bool {
-	cmd.mu.Lock()
-	game := cmd.gameIfCurrent(channelID, seq)
-	if game == nil {
-		cmd.mu.Unlock()
+	var (
+		gameFound    bool
+		ended        bool
+		removedNames []string
+		threadID     string
+		result       gameResult
+		endedGame    *werewolfGame
+	)
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+
+		for _, id := range game.JoinOrder {
+			p := game.Players[id]
+			if p.Alive && shouldRemoveForAFK(game.AFKStrikes[id]) {
+				p.Alive = false
+				removedNames = append(removedNames, p.Label)
+			}
+		}
+
+		result = checkWinCondition(game.Players)
+		if result == resultOngoing {
+			return
+		}
+
+		ended = true
+		threadID = game.WolfThreadID
+		endedGame = game
+		delete(cmd.games, channelID)
+	}()
+	if !gameFound {
 		return true
 	}
-
-	var removedNames []string
-	for _, id := range game.JoinOrder {
-		p := game.Players[id]
-		if p.Alive && shouldRemoveForAFK(game.AFKStrikes[id]) {
-			p.Alive = false
-			removedNames = append(removedNames, p.Label)
-		}
-	}
-
-	result := checkWinCondition(game.Players)
-	if result == resultOngoing {
-		cmd.mu.Unlock()
+	if !ended {
 		if len(removedNames) > 0 {
 			cmd.announceAFKRemovals(s, channelID, removedNames)
 		}
 		return false
 	}
-
-	threadID := game.WolfThreadID
-	delete(cmd.games, channelID)
-	cmd.mu.Unlock()
 
 	if threadID != "" {
 		if _, err := s.ChannelDelete(threadID); err != nil {
@@ -187,7 +231,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		}
 	}
 
-	cmd.announceGameEnd(s, game, result, removedNames)
+	cmd.announceGameEnd(s, endedGame, result, removedNames)
 	return true
 }
 

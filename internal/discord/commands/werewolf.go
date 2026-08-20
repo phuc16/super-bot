@@ -120,6 +120,11 @@ const (
 // checkWinCondition: villagers win when every werewolf is dead; werewolves
 // win once they're no longer outnumbered by everyone else still alive.
 func checkWinCondition(players map[string]*player) gameResult {
+	if len(players) == 0 {
+		// No roster assigned yet (lobby phase) — there's nothing to win or
+		// lose, so don't report either side as having won.
+		return resultOngoing
+	}
 	aliveWolves, aliveOthers := 0, 0
 	for _, p := range players {
 		if !p.Alive {
@@ -132,11 +137,6 @@ func checkWinCondition(players map[string]*player) gameResult {
 		}
 	}
 	switch {
-	case aliveWolves == 0 && aliveOthers == 0:
-		// No real roster yet (e.g. an empty or lobby-phase Players map) —
-		// there's nothing to win or lose, so don't report either side as
-		// having won.
-		return resultOngoing
 	case aliveWolves == 0:
 		return resultVillagersWin
 	case aliveWolves >= aliveOthers:
@@ -594,8 +594,19 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 		respondComponentEphemeral(s, i, "Chỉ người mở bàn hoặc quản trị viên mới được huỷ.")
 		return
 	}
+	// Cancel only fires from the lobby buttons, which are cleared once the
+	// game leaves phaseLobby, so WolfThreadID can't be set yet here — but
+	// clean it up defensively in case the UI ever races ahead of the phase
+	// change, mirroring the cleanup the win/end paths already do.
+	threadID := game.WolfThreadID
 	delete(cmd.games, channelID)
 	cmd.mu.Unlock()
+
+	if threadID != "" {
+		if _, err := s.ChannelDelete(threadID); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread on lobby cancel")
+		}
+	}
 
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
@@ -683,6 +694,28 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 				Interface("panic", r).
 				Str("channel_id", channelID).
 				Msg("werewolf: recovered from panic in game goroutine")
+
+			var threadID string
+			var cleaned bool
+			func() {
+				cmd.mu.Lock()
+				defer cmd.mu.Unlock()
+				game := cmd.gameIfCurrent(channelID, seq)
+				if game == nil {
+					return
+				}
+				threadID = game.WolfThreadID
+				delete(cmd.games, channelID)
+				cleaned = true
+			}()
+			if cleaned {
+				if threadID != "" {
+					if _, err := s.ChannelDelete(threadID); err != nil {
+						log.Error().Err(err).Msg("werewolf: failed to delete wolf thread during panic cleanup")
+					}
+				}
+				log.Error().Str("channel_id", channelID).Msg("werewolf: cleaned up game state after panic recovery")
+			}
 		}
 	}()
 
@@ -698,11 +731,13 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 	players, err := assignRoles(joinOrder, labels)
 	if err != nil {
 		sendPlain("❌ Không thể chia vai trò: " + err.Error())
-		cmd.mu.Lock()
-		if cmd.gameIfCurrent(channelID, seq) != nil {
-			delete(cmd.games, channelID)
-		}
-		cmd.mu.Unlock()
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			if cmd.gameIfCurrent(channelID, seq) != nil {
+				delete(cmd.games, channelID)
+			}
+		}()
 		return
 	}
 
@@ -718,9 +753,11 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		))
 		time.Sleep(preflightGracePeriod)
 
-		cmd.mu.Lock()
-		stillCurrent := cmd.gameIfCurrent(channelID, seq) != nil
-		cmd.mu.Unlock()
+		stillCurrent := func() bool {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			return cmd.gameIfCurrent(channelID, seq) != nil
+		}()
 		if !stillCurrent {
 			return
 		}
@@ -740,22 +777,26 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 
 			if len(joinOrder) < werewolfMinPlayers {
 				sendPlain(fmt.Sprintf("❌ Không đủ %d người sau khi loại người không nhận được tin nhắn riêng, huỷ ván.", werewolfMinPlayers))
-				cmd.mu.Lock()
-				if cmd.gameIfCurrent(channelID, seq) != nil {
-					delete(cmd.games, channelID)
-				}
-				cmd.mu.Unlock()
+				func() {
+					cmd.mu.Lock()
+					defer cmd.mu.Unlock()
+					if cmd.gameIfCurrent(channelID, seq) != nil {
+						delete(cmd.games, channelID)
+					}
+				}()
 				return
 			}
 
 			reassigned, err := assignRoles(joinOrder, labels)
 			if err != nil {
 				sendPlain("❌ Không thể chia lại vai trò: " + err.Error())
-				cmd.mu.Lock()
-				if cmd.gameIfCurrent(channelID, seq) != nil {
-					delete(cmd.games, channelID)
-				}
-				cmd.mu.Unlock()
+				func() {
+					cmd.mu.Lock()
+					defer cmd.mu.Unlock()
+					if cmd.gameIfCurrent(channelID, seq) != nil {
+						delete(cmd.games, channelID)
+					}
+				}()
 				return
 			}
 			cmd.dmRoleReveals(s, reassigned, joinOrder)
@@ -763,14 +804,18 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}
 	}
 
-	cmd.mu.Lock()
-	game := cmd.gameIfCurrent(channelID, seq)
-	if game != nil {
+	gameFound := func() bool {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return false
+		}
 		game.Players = players
 		game.JoinOrder = joinOrder
-	}
-	cmd.mu.Unlock()
-	if game == nil {
+		return true
+	}()
+	if !gameFound {
 		return
 	}
 
