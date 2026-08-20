@@ -127,6 +127,16 @@ Any field that's empty (role already dead / role not in this game's ratio) is om
 - `roundLog` population and recap formatting: since this is deterministic string/struct building from already-known role/vote data, add a focused unit test that builds a `game.History` by hand and asserts `formatRecap(history) string` (a pure helper, factored out of `announceGameEnd`, for testability) produces the expected sections/omissions — this is new pure logic, not Discord-coupled, so it's testable unlike the rest of the interactive engine.
 - Channel-permission lock/restore, thread creation/membership, and the end-to-end timer changes remain manually verified against a real Discord server, per the original design's testing philosophy (interactive Discord I/O isn't unit tested).
 
+## Cleanup on every terminal path
+
+The original design's rule stands and now covers more state: **the moment a game ends, is cancelled, or panics, every piece of state this spec adds must be torn down at the same cleanup point that already deletes `cmd.games[channelID]` and the wolf thread.** Concretely, on every terminal path (win, lobby cancel, panic-recovery):
+
+- **Channel permission overwrite** (item 1) — restored from `PriorChannelOverwrite` (or deleted if it was nil), same as described above. A game that ends without this running would leave a Discord channel permanently muted for `@everyone` — this is a user-facing incident, not just a memory leak, so it's the highest-priority cleanup item of the three.
+- **Alive-players thread** (item 2) — `game.AliveThreadID` deleted via `ChannelDelete`, at the same call site that already deletes `game.WolfThreadID`.
+- **`game.History`** (item 6) — no separate action needed beyond the existing `delete(cmd.games, channelID)`; it's a field on `werewolfGame` like everything else, so it's freed when the game struct itself is garbage-collected after removal from the map. It must **not** be persisted anywhere (no DB, no file) — it only ever gets read once, by `announceGameEnd`, before the struct is dropped.
+
+This applies to **all three terminal paths** identified in the original spec and confirmed present in the current code: normal win (`checkAndHandleGameEnd`), lobby cancellation (`handleCancelLobby`), and the panic-recovery handler in `startPreflight`. The implementation plan must show the channel-permission restore and the second `ChannelDelete` call added at each of those three sites, not just one of them — the panic-recovery path in particular is easy to forget since it was added in a later fix round, after the wolf-thread cleanup pattern was already established at the other two sites.
+
 ## Out of scope
 
 - Distinguishing "genuine tie" from "skip won" in the vote-result wording.
