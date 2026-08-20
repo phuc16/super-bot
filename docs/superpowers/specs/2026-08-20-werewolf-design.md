@@ -190,7 +190,18 @@ tied for most votes) → **nobody is lynched**, day ends, straight to next
 night. AFK non-voters get a strike.
 
 Win check runs after every death (night kill, day lynch, or AFK-removal). If
-neither side has won, loop back to NIGHT (round N+1).
+neither side has won, loop back to NIGHT (round N+1). If a side has won, phase
+becomes `phaseEnded`: post the win announcement (with a full role reveal for
+every player regardless of the `RevealOnDeath` setting, since the game is over),
+archive/delete the wolf thread if one still exists, and **immediately delete the
+game's entry from `WerewolfCommand.games`**. This is the only cleanup point —
+once the map entry is removed, the entire `werewolfGame` (players, votes, AFK
+strikes, night-action state) becomes unreferenced and is garbage collected by
+Go normally. The same immediate-delete-from-map step also applies to a
+cancelled lobby (not enough players after the DM-check grace window, or the
+starter clicking Huỷ) — a game must never remain reachable via `games` past the
+point it stops being playable, so memory doesn't grow across repeated games
+over the bot's uptime.
 
 ### AFK & mid-game leave
 2 consecutive AFK strikes (missed night action or missed vote, back-to-back)
