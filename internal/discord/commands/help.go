@@ -37,6 +37,7 @@ func (cmd *HelpCommand) Definition() *discordgo.ApplicationCommand {
 					{Name: "duel-history", Value: "duel-history"},
 					{Name: "duel-reset", Value: "duel-reset"},
 					{Name: "duel-challenge-all", Value: "duel-challenge-all"},
+					{Name: "werewolf", Value: "werewolf"},
 				},
 			},
 		},
@@ -125,6 +126,11 @@ func (cmd *HelpCommand) getGeneralHelp() *discordgo.MessageEmbed {
 			{
 				Name:   "🎪 `/duel-challenge-all` 🔒",
 				Value:  "Schedule a single-elimination Duel tournament at a fixed time, with champion betting\n*Admin only to start — anyone can join*",
+				Inline: false,
+			},
+			{
+				Name:   "🐺 `/werewolf`",
+				Value:  "Play a game of Werewolf (Ma Sói) in this channel\n*Available to all members — use `/help werewolf` for details*",
 				Inline: false,
 			},
 			{
@@ -438,6 +444,35 @@ func (cmd *HelpCommand) getCommandHelp(commandName string) *discordgo.MessageEmb
 				{
 					Name:   "Limits",
 					Value:  fmt.Sprintf("%d-%d players. Start time must be %d min – %d hours from now (tournament state is in-memory only — it will be lost if the bot restarts before it finishes, so avoid redeploying mid-tournament). Only the organizer can cancel.", tournamentMinPlayers, tournamentMaxPlayers, int(minLeadTime.Minutes()), int(maxLeadTime.Hours())),
+					Inline: false,
+				},
+			},
+		}
+
+	case "werewolf":
+		return &discordgo.MessageEmbed{
+			Title:       "🐺 `/werewolf` Command",
+			Color:       0x5865F2,
+			Description: "Play a game of Werewolf (Ma Sói): Werewolves, Villagers, a Seer, and a Doctor.",
+			Fields: []*discordgo.MessageEmbedField{
+				{
+					Name:   "Subcommands",
+					Value:  "• `/werewolf start reveal-on-death:true|false` - Open a lobby in this channel\n• `/werewolf status` - Check the current phase/round without leaking roles\n• `/werewolf leave` - Leave the lobby, or leave a running game (counts as being eliminated)",
+					Inline: false,
+				},
+				{
+					Name:   "How it works",
+					Value:  fmt.Sprintf("Anyone can Join/Leave the lobby; the starter clicks Start once %d-%d have joined. Roles are DMed privately. Each night the Werewolves get a private thread to pick a kill target, the Seer and Doctor act via DM. Each day: discuss, then vote to lynch — a tie means nobody is lynched. Repeats until one side wins.", werewolfMinPlayers, werewolfMaxPlayers),
+					Inline: false,
+				},
+				{
+					Name:   "Privacy note",
+					Value:  "The werewolves' coordination thread is private from other players, but anyone with the server's \"Manage Threads\" permission (usually admins/mods) can still see it — that's a Discord permission-model limit, not a bot bug.",
+					Inline: false,
+				},
+				{
+					Name:   "Limits",
+					Value:  "In-memory only — a bot restart while a game is running loses it, same as `/duel-challenge-all`. Missing 2 actions/votes in a row auto-removes a player. One game per channel at a time.",
 					Inline: false,
 				},
 			},
