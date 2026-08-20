@@ -10,14 +10,25 @@ import (
 )
 
 const (
-	werewolfVoteID   = "ww:vote:"
-	dayDiscussWindow = 3 * time.Minute
-	dayVoteWindow    = 90 * time.Second
+	werewolfVoteID = "ww:vote:"
+	dayVoteWindow  = 90 * time.Second
+
+	dayDiscussBase     = 90 * time.Second
+	dayDiscussPerAlive = 30 * time.Second
 )
+
+// dayDiscussWindowFor returns the day-discussion window for a given number
+// of alive players. Text discussion takes longer to read/type than voice,
+// and bigger games have more people to accuse/defend, so the window scales
+// with the lobby size instead of staying flat.
+func dayDiscussWindowFor(aliveCount int) time.Duration {
+	return dayDiscussBase + dayDiscussPerAlive*time.Duration(aliveCount)
+}
 
 func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string, seq uint64) {
 	var gameFound bool
 	var round int
+	var aliveCount int
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -28,19 +39,26 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 		gameFound = true
 		game.Phase = phaseDayDiscuss
 		round = game.Round
+		for _, p := range game.Players {
+			if p.Alive {
+				aliveCount++
+			}
+		}
 	}()
 	if !gameFound {
 		return
 	}
 
+	discussWindow := dayDiscussWindowFor(aliveCount)
+
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("☀️ **Ngày %d.** Thảo luận trong %s trước khi bỏ phiếu.", round, formatRemaining(dayDiscussWindow)),
+		Content:         fmt.Sprintf("☀️ **Ngày %d.** Thảo luận trong %s trước khi bỏ phiếu.", round, formatRemaining(discussWindow)),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post day-discuss announcement")
 	}
 
-	time.Sleep(dayDiscussWindow)
+	time.Sleep(discussWindow)
 
 	stillGoing := func() bool {
 		cmd.mu.Lock()
