@@ -35,3 +35,73 @@ func TestRolesForPlayerCountOutOfRange(t *testing.T) {
 		t.Error("expected error for 13 players, got nil")
 	}
 }
+
+func TestAssignRolesCounts(t *testing.T) {
+	joinOrder := []string{"a", "b", "c", "d", "e", "f", "g"} // 7 players
+	labels := map[string]string{"a": "A", "b": "B", "c": "C", "d": "D", "e": "E", "f": "F", "g": "G"}
+
+	players, err := assignRoles(joinOrder, labels)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(players) != 7 {
+		t.Fatalf("expected 7 players, got %d", len(players))
+	}
+
+	counts := map[role]int{}
+	for _, id := range joinOrder {
+		p, ok := players[id]
+		if !ok {
+			t.Fatalf("player %s missing from assigned roles", id)
+		}
+		if !p.Alive {
+			t.Errorf("player %s should start alive", id)
+		}
+		if p.Label != labels[id] {
+			t.Errorf("player %s label = %q, want %q", id, p.Label, labels[id])
+		}
+		counts[p.Role]++
+	}
+
+	if counts[roleWerewolf] != 2 || counts[roleSeer] != 1 || counts[roleDoctor] != 1 || counts[roleVillager] != 3 {
+		t.Errorf("unexpected role distribution: %+v", counts)
+	}
+}
+
+func TestAssignRolesOutOfRange(t *testing.T) {
+	if _, err := assignRoles([]string{"a", "b"}, nil); err == nil {
+		t.Error("expected error for too few players")
+	}
+}
+
+func TestCheckWinConditionOngoing(t *testing.T) {
+	players := map[string]*player{
+		"w1": {UserID: "w1", Role: roleWerewolf, Alive: true},
+		"v1": {UserID: "v1", Role: roleVillager, Alive: true},
+		"v2": {UserID: "v2", Role: roleVillager, Alive: true},
+	}
+	if got := checkWinCondition(players); got != resultOngoing {
+		t.Errorf("got %v, want resultOngoing", got)
+	}
+}
+
+func TestCheckWinConditionVillagersWin(t *testing.T) {
+	players := map[string]*player{
+		"w1": {UserID: "w1", Role: roleWerewolf, Alive: false},
+		"v1": {UserID: "v1", Role: roleVillager, Alive: true},
+	}
+	if got := checkWinCondition(players); got != resultVillagersWin {
+		t.Errorf("got %v, want resultVillagersWin", got)
+	}
+}
+
+func TestCheckWinConditionWerewolvesWin(t *testing.T) {
+	players := map[string]*player{
+		"w1": {UserID: "w1", Role: roleWerewolf, Alive: true},
+		"w2": {UserID: "w2", Role: roleWerewolf, Alive: true},
+		"v1": {UserID: "v1", Role: roleVillager, Alive: true},
+	}
+	if got := checkWinCondition(players); got != resultWerewolvesWin {
+		t.Errorf("got %v, want resultWerewolvesWin (2 wolves >= 1 other)", got)
+	}
+}
