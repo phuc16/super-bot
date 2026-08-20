@@ -92,7 +92,7 @@ type roundLog struct {
     DoctorTargetLabel string // "" if doctor is dead/absent this round
     SeerTargetLabel   string // "" if seer is dead/absent this round
     SeerResult        role  // zero value meaningless if SeerTargetLabel == ""
-    VoteTally         map[string]int // key: player label or "Không treo cổ ai", value: vote count
+    VoteBreakdown     map[string][]string // target label (or "Không treo cổ ai") -> voter labels who chose it
     LynchedLabel      string // "" if nobody was lynched this round
 }
 ```
@@ -100,7 +100,7 @@ type roundLog struct {
 `game.History []roundLog` accumulates one entry per completed round (both night and day folded into one entry per round number, since they're always paired). Populated incrementally:
 
 - `resolveNight` fills in `WolfTargetLabel`, `WolfTargetSaved`, `DoctorTargetLabel`, `SeerTargetLabel`, `SeerResult` for the current round and appends a new (mostly-empty) `roundLog` to `game.History` — or, simpler: `runNightPhase` appends a fresh `roundLog{Round: game.Round}` at night start, and `resolveNight` fills its night-side fields by mutating `game.History[len(game.History)-1]` (always the current round, since rounds only append forward).
-- `resolveVote` fills in `VoteTally` (built directly from `game.Votes`, translating each voter's target ID to a label, or "Không treo cổ ai" for the skip sentinel) and `LynchedLabel` on that same last entry.
+- `resolveVote` fills in `VoteBreakdown` and `LynchedLabel` on that same last entry. `VoteBreakdown` is keyed by *target* label (or "Không treo cổ ai" for the skip sentinel), with the value being every voter's label who chose that target — this is a deliberate choice over a plain `target -> count` tally: the recap must show **who voted for whom**, not just aggregate counts, so the full voter list is the data actually needed, and the count is just `len(voters)`.
 
 **Recap rendering:** `announceGameEnd` (already the single terminal-announcement function) gets a new section appended after the existing final-role reveal, iterating `game.History` in order:
 
@@ -111,11 +111,17 @@ type roundLog struct {
 🐺 Sói cắn: <label> (bị bác sĩ cứu / đã chết)
 💉 Bác sĩ bảo vệ: <label>
 🔮 Tiên tri xem: <label> → <Sói/Dân Làng>
-🗳️ Kết quả bỏ phiếu: A: 2, B: 1, Không treo cổ ai: 1 → <label bị treo cổ / Không ai bị treo cổ>
+🗳️ Kết quả bỏ phiếu:
+A: 2 (X, Y)
+B: 1 (Z)
+Không treo cổ ai: 1 (W)
+→ A bị treo cổ
 
 **Đêm/Ngày 2:**
 ...
 ```
+
+Each vote-tally line names every voter who picked that target, not just the count — this is the point of `VoteBreakdown` over a simple tally map.
 
 Any field that's empty (role already dead / role not in this game's ratio) is omitted from that round's block. If the resulting content exceeds Discord's 2000-char message limit for large games with many rounds, split into multiple `ChannelMessageSendComplex` calls, chunking by whole round boundaries (never mid-round) — there is no existing reusable chunking helper elsewhere in the codebase (the export feature's 2000-char handling in `internal/services/export/formatter.go` is inline and package-private), so this is a small new local helper in `werewolf_day.go`, e.g. `chunkRoundsByMessageLimit(rounds []string, limit int) []string` that greedily packs formatted per-round blocks into ≤`limit`-char message bodies.
 
@@ -124,18 +130,21 @@ Any field that's empty (role already dead / role not in this game's ratio) is om
 ## Testing
 
 - Pure-function additions (`wolfDiscussWindowFor`, the tally-with-skip-sentinel behavior — though `tallyVotes` itself is unchanged) get unit tests following the existing `werewolf_test.go` pattern.
-- `roundLog` population and recap formatting: since this is deterministic string/struct building from already-known role/vote data, add a focused unit test that builds a `game.History` by hand and asserts `formatRecap(history) string` (a pure helper, factored out of `announceGameEnd`, for testability) produces the expected sections/omissions — this is new pure logic, not Discord-coupled, so it's testable unlike the rest of the interactive engine.
+- `roundLog` population and recap formatting: since this is deterministic string/struct building from already-known role/vote data, add focused unit tests that build a `game.History` by hand and assert the pure formatting/chunking helpers (factored out of `announceGameEnd` for testability) produce the expected sections/omissions, including the per-voter `VoteBreakdown` detail — this is new pure logic, not Discord-coupled, so it's testable unlike the rest of the interactive engine.
 - Channel-permission lock/restore, thread creation/membership, and the end-to-end timer changes remain manually verified against a real Discord server, per the original design's testing philosophy (interactive Discord I/O isn't unit tested).
 
 ## Cleanup on every terminal path
 
-The original design's rule stands and now covers more state: **the moment a game ends, is cancelled, or panics, every piece of state this spec adds must be torn down at the same cleanup point that already deletes `cmd.games[channelID]` and the wolf thread.** Concretely, on every terminal path (win, lobby cancel, panic-recovery):
+There are two distinct kinds of state this spec adds, and they must both be torn down at the same cleanup point that already deletes `cmd.games[channelID]` and the wolf thread — but for different reasons, and the primary one is **not** Discord:
 
-- **Channel permission overwrite** (item 1) — restored from `PriorChannelOverwrite` (or deleted if it was nil), same as described above. A game that ends without this running would leave a Discord channel permanently muted for `@everyone` — this is a user-facing incident, not just a memory leak, so it's the highest-priority cleanup item of the three.
-- **Alive-players thread** (item 2) — `game.AliveThreadID` deleted via `ChannelDelete`, at the same call site that already deletes `game.WolfThreadID`.
-- **`game.History`** (item 6) — no separate action needed beyond the existing `delete(cmd.games, channelID)`; it's a field on `werewolfGame` like everything else, so it's freed when the game struct itself is garbage-collected after removal from the map. It must **not** be persisted anywhere (no DB, no file) — it only ever gets read once, by `announceGameEnd`, before the struct is dropped.
+**1. Bot-process (VPS) memory — the primary concern.** `game.History` (a slice that grows one entry per round, holding labels/maps/role values for every night and day of the game) and every other field on `werewolfGame` live in the Go process's own heap on the machine running the bot, not on Discord's servers. A game that never gets `delete()`d from `cmd.games` is a real, unbounded memory leak in the bot's own process — a bug that grows worse the longer the bot runs and the more games are played, eventually pressuring the VPS's memory and potentially affecting every other feature (`/duel`, `/export`, etc.) sharing that process. The existing `delete(cmd.games, channelID)` call is what actually fixes this: once a `*werewolfGame` is unreachable from `cmd.games`, Go's garbage collector reclaims its entire heap allocation — `History` included — with no further action needed. **This is the cleanup step with the highest actual cost if it's ever skipped on a code path**, since a leaked game isn't just one struct: it's every round's history, every player, every map, retained in VPS RAM for as long as the bot process runs.
+- **`game.History` must never be persisted anywhere** (no DB, no file) — it only ever gets read once, by `announceGameEnd`, immediately before the struct becomes unreachable and eligible for GC. Persisting it would defeat the point (still in-memory-only by design) and would itself become a second, disk-backed leak.
 
-This applies to **all three terminal paths** identified in the original spec and confirmed present in the current code: normal win (`checkAndHandleGameEnd`), lobby cancellation (`handleCancelLobby`), and the panic-recovery handler in `startPreflight`. The implementation plan must show the channel-permission restore and the second `ChannelDelete` call added at each of those three sites, not just one of them — the panic-recovery path in particular is easy to forget since it was added in a later fix round, after the wolf-thread cleanup pattern was already established at the other two sites.
+**2. Discord-side artifacts — a distinct, still-critical concern, but not a memory leak.** These live on Discord's servers, not the VPS, so they don't grow the bot process's memory footprint — but leaving them behind is still a real user-facing incident:
+- **Channel permission overwrite** (item 1) — restored from `PriorChannelOverwrite` (or deleted if it was nil). A game that ends without this running leaves a Discord channel permanently muted for `@everyone`.
+- **Alive-players thread** (item 2) — `game.AliveThreadID` deleted via `ChannelDelete`, at the same call site that already deletes `game.WolfThreadID`. An orphaned thread doesn't leak VPS memory, but it does clutter the server and confuse players about whether a game is still running.
+
+Both categories must be handled on **all three terminal paths** identified in the original spec and confirmed present in the current code: normal win (`checkAndHandleGameEnd`), lobby cancellation (`handleCancelLobby`), and the panic-recovery handler in `startPreflight`. The implementation plan must show the channel-permission restore, the second `ChannelDelete` call, and the `delete(cmd.games, channelID)` all present at each of those three sites, not just one of them — the panic-recovery path in particular is easy to forget since it was added in a later fix round, after the other two cleanup patterns were already established at the other two sites. Confirm via code inspection (not just testing) that no code path can return out of `startPreflight`, `checkAndHandleGameEnd`, or `handleCancelLobby` without reaching its `delete(cmd.games, channelID)` call — that line is the one that actually frees the VPS memory; the Discord-side cleanup calls are important but secondary to it.
 
 ## Out of scope
 
