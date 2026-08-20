@@ -5,11 +5,19 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/rs/zerolog/log"
 )
+
+// werewolfSeqCounter hands out a unique, monotonically increasing Seq to
+// every werewolfGame created, regardless of channel. It lets long-sleeping
+// goroutines (day-discuss window, night-action wait, preflight grace period)
+// detect that the game occupying "their" channel key by the time they wake
+// is not the same game they started with — see werewolfGame.Seq.
+var werewolfSeqCounter uint64
 
 const (
 	werewolfMinPlayers = 5
@@ -179,6 +187,7 @@ const (
 type werewolfGame struct {
 	GuildID, ChannelID, StarterID string
 	MessageID                     string
+	Seq                           uint64 // unique creation-order token; see werewolfSeqCounter
 	RevealOnDeath                 bool
 	Phase                         gamePhase
 	Round                         int
@@ -202,6 +211,36 @@ type WerewolfCommand struct {
 // NewWerewolfCommand creates a new WerewolfCommand
 func NewWerewolfCommand() *WerewolfCommand {
 	return &WerewolfCommand{games: make(map[string]*werewolfGame)}
+}
+
+// gameIfCurrent returns the game at channelID only if it still exists AND
+// matches seq. Callers use this after waking from a sleep to make sure the
+// game they were tracking hasn't ended and been replaced by a new one in
+// the same channel in the meantime. Must be called with cmd.mu held.
+func (cmd *WerewolfCommand) gameIfCurrent(channelID string, seq uint64) *werewolfGame {
+	game, ok := cmd.games[channelID]
+	if !ok || game.Seq != seq {
+		return nil
+	}
+	return game
+}
+
+// respondComponentEphemeralMentioned is respondComponentEphemeral's
+// werewolf-local counterpart for responses whose content embeds a <@id>
+// mention: it explicitly sets an empty AllowedMentions allow-list so the
+// ephemeral response can never trigger a real ping.
+func respondComponentEphemeralMentioned(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content:         message,
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		},
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to send ephemeral component response")
+	}
 }
 
 // interactionUserID returns the acting user's ID whether the interaction
@@ -344,6 +383,7 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		GuildID:       i.GuildID,
 		ChannelID:     i.ChannelID,
 		StarterID:     starterID,
+		Seq:           atomic.AddUint64(&werewolfSeqCounter, 1),
 		RevealOnDeath: revealOnDeath,
 		Phase:         phaseLobby,
 		Players:       make(map[string]*player),
@@ -553,6 +593,7 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 	for id, p := range game.Players {
 		labels[id] = p.Label
 	}
+	seq := game.Seq
 	cmd.mu.Unlock()
 
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -563,7 +604,7 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 		},
 	})
 
-	go cmd.startPreflight(s, channelID, joinOrder, labels)
+	go cmd.startPreflight(s, channelID, joinOrder, labels, seq)
 }
 
 // dmRoleReveals DMs each listed player their assigned role, returning the
@@ -592,12 +633,23 @@ func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[stri
 // anyone unreachable (with a public grace-period notice), and drops still-
 // unreachable players (recomputing roles for the smaller group) before
 // kicking off round 1. Runs in its own goroutine, started from handleStartGame.
-func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID string, joinOrder []string, labels map[string]string) {
+func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID string, joinOrder []string, labels map[string]string, seq uint64) {
+	sendPlain := func(content string) {
+		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:         content,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to post preflight message")
+		}
+	}
+
 	players, err := assignRoles(joinOrder, labels)
 	if err != nil {
-		s.ChannelMessageSend(channelID, "❌ Không thể chia vai trò: "+err.Error())
+		sendPlain("❌ Không thể chia vai trò: " + err.Error())
 		cmd.mu.Lock()
-		delete(cmd.games, channelID)
+		if cmd.gameIfCurrent(channelID, seq) != nil {
+			delete(cmd.games, channelID)
+		}
 		cmd.mu.Unlock()
 		return
 	}
@@ -608,11 +660,18 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		for idx, id := range unreachable {
 			names[idx] = labels[id]
 		}
-		s.ChannelMessageSend(channelID, fmt.Sprintf(
+		sendPlain(fmt.Sprintf(
 			"⚠️ Không gửi được tin nhắn riêng cho: %s.\nHãy bật DM từ thành viên server (Cài đặt quyền riêng tư) rồi chờ %s để bot thử lại.",
 			strings.Join(names, ", "), formatRemaining(preflightGracePeriod),
 		))
 		time.Sleep(preflightGracePeriod)
+
+		cmd.mu.Lock()
+		stillCurrent := cmd.gameIfCurrent(channelID, seq) != nil
+		cmd.mu.Unlock()
+		if !stillCurrent {
+			return
+		}
 
 		stillUnreachable := cmd.dmRoleReveals(s, players, unreachable)
 		if len(stillUnreachable) > 0 {
@@ -628,18 +687,22 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 			joinOrder = newJoinOrder
 
 			if len(joinOrder) < werewolfMinPlayers {
-				s.ChannelMessageSend(channelID, fmt.Sprintf("❌ Không đủ %d người sau khi loại người không nhận được tin nhắn riêng, huỷ ván.", werewolfMinPlayers))
+				sendPlain(fmt.Sprintf("❌ Không đủ %d người sau khi loại người không nhận được tin nhắn riêng, huỷ ván.", werewolfMinPlayers))
 				cmd.mu.Lock()
-				delete(cmd.games, channelID)
+				if cmd.gameIfCurrent(channelID, seq) != nil {
+					delete(cmd.games, channelID)
+				}
 				cmd.mu.Unlock()
 				return
 			}
 
 			reassigned, err := assignRoles(joinOrder, labels)
 			if err != nil {
-				s.ChannelMessageSend(channelID, "❌ Không thể chia lại vai trò: "+err.Error())
+				sendPlain("❌ Không thể chia lại vai trò: " + err.Error())
 				cmd.mu.Lock()
-				delete(cmd.games, channelID)
+				if cmd.gameIfCurrent(channelID, seq) != nil {
+					delete(cmd.games, channelID)
+				}
 				cmd.mu.Unlock()
 				return
 			}
@@ -649,13 +712,13 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 	}
 
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if ok {
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game != nil {
 		game.Players = players
 		game.JoinOrder = joinOrder
 	}
 	cmd.mu.Unlock()
-	if !ok {
+	if game == nil {
 		return
 	}
 

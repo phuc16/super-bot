@@ -18,17 +18,14 @@ const (
 func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string) {
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if ok {
-		game.Phase = phaseDayDiscuss
-	}
-	round := 0
-	if ok {
-		round = game.Round
-	}
-	cmd.mu.Unlock()
 	if !ok {
+		cmd.mu.Unlock()
 		return
 	}
+	game.Phase = phaseDayDiscuss
+	round := game.Round
+	seq := game.Seq
+	cmd.mu.Unlock()
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         fmt.Sprintf("☀️ **Ngày %d.** Thảo luận trong %s trước khi bỏ phiếu.", round, formatRemaining(dayDiscussWindow)),
@@ -40,7 +37,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	time.Sleep(dayDiscussWindow)
 
 	cmd.mu.Lock()
-	_, stillGoing := cmd.games[channelID]
+	stillGoing := cmd.gameIfCurrent(channelID, seq) != nil
 	cmd.mu.Unlock()
 	if !stillGoing {
 		return
@@ -52,22 +49,20 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string) {
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if ok {
-		game.Phase = phaseDayVote
-		game.Votes = make(map[string]string)
+	if !ok {
+		cmd.mu.Unlock()
+		return
 	}
+	game.Phase = phaseDayVote
+	game.Votes = make(map[string]string)
+	seq := game.Seq
 	var alive []*player
-	if ok {
-		for _, id := range game.JoinOrder {
-			if p := game.Players[id]; p.Alive {
-				alive = append(alive, p)
-			}
+	for _, id := range game.JoinOrder {
+		if p := game.Players[id]; p.Alive {
+			alive = append(alive, p)
 		}
 	}
 	cmd.mu.Unlock()
-	if !ok {
-		return
-	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:    "🗳️ **Bỏ phiếu treo cổ.** Chọn người bạn nghi ngờ.",
@@ -77,21 +72,21 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string) {
 	}
 
 	deadline := time.Now().Add(dayVoteWindow)
-	cmd.waitForVotes(s, channelID, deadline, len(alive))
+	cmd.waitForVotes(s, channelID, deadline, len(alive), seq)
 
 	cmd.resolveVote(s, channelID)
 }
 
-func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string, deadline time.Time, aliveCount int) {
+func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string, deadline time.Time, aliveCount int, seq uint64) {
 	for {
 		cmd.mu.Lock()
-		game, ok := cmd.games[channelID]
+		game := cmd.gameIfCurrent(channelID, seq)
 		var done bool
-		if ok {
+		if game != nil {
 			done = len(game.Votes) >= aliveCount
 		}
 		cmd.mu.Unlock()
-		if !ok || done || time.Now().After(deadline) {
+		if game == nil || done || time.Now().After(deadline) {
 			return
 		}
 		time.Sleep(2 * time.Second)
@@ -262,5 +257,5 @@ func (cmd *WerewolfCommand) handleVote(s *discordgo.Session, i *discordgo.Intera
 	game.Votes[voterID] = targetID
 	cmd.mu.Unlock()
 
-	respondComponentEphemeral(s, i, fmt.Sprintf("✅ Đã bỏ phiếu cho <@%s>.", targetID))
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã bỏ phiếu cho <@%s>.", targetID))
 }

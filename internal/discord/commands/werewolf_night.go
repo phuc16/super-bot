@@ -62,60 +62,114 @@ func targetSelectMenu(customID, placeholder string, targets []*player) []discord
 	}
 }
 
+// copyPlayer returns a fresh *player holding a value copy of p, safe to read
+// without cmd.mu held — unlike p itself, which handleLeave (and other
+// handlers) can mutate concurrently at any time.
+func copyPlayer(p *player) *player {
+	cp := *p
+	return &cp
+}
+
+func copyPlayers(ps []*player) []*player {
+	out := make([]*player, len(ps))
+	for idx, p := range ps {
+		out[idx] = copyPlayer(p)
+	}
+	return out
+}
+
 // runNightPhase resets this round's night state, opens the wolf thread and
 // seer/doctor DMs, waits for actions (or the timer), then resolves the night.
 func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string) {
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if ok {
-		game.Phase = phaseNight
-		game.Round++
-		game.NightTarget = ""
-		game.SeerActed = false
-		game.DoctorProtect = ""
-	}
-	cmd.mu.Unlock()
 	if !ok {
+		cmd.mu.Unlock()
 		return
 	}
+	game.Phase = phaseNight
+	game.Round++
+	game.NightTarget = ""
+	game.SeerActed = false
+	game.DoctorProtect = ""
+
+	seq := game.Seq
+	round := game.Round
+	wolves := copyPlayers(alivePlayersOfRole(game, roleWerewolf))
+	nonWolfTargets := copyPlayers(aliveNonWolves(game))
+
+	var seer *player
+	var seerTargets []*player
+	if seers := alivePlayersOfRole(game, roleSeer); len(seers) > 0 {
+		seer = copyPlayer(seers[0])
+		for _, id := range game.JoinOrder {
+			p := game.Players[id]
+			if p.Alive && p.UserID != seer.UserID {
+				seerTargets = append(seerTargets, copyPlayer(p))
+			}
+		}
+	}
+
+	var doctor *player
+	var doctorTargets []*player
+	if doctors := alivePlayersOfRole(game, roleDoctor); len(doctors) > 0 {
+		doctor = copyPlayer(doctors[0])
+		lastPick := game.DoctorLastPick
+		for _, id := range game.JoinOrder {
+			p := game.Players[id]
+			if p.Alive && p.UserID != lastPick {
+				doctorTargets = append(doctorTargets, copyPlayer(p))
+			}
+		}
+	}
+	cmd.mu.Unlock()
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ đang hành động trong tin nhắn riêng...", game.Round),
+		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ đang hành động trong tin nhắn riêng...", round),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post night announcement")
 	}
 
-	cmd.startWolfThread(s, game)
-	cmd.dmSeerPrompt(s, game)
-	cmd.dmDoctorPrompt(s, game)
+	cmd.startWolfThread(s, channelID, round, wolves, nonWolfTargets)
+	if seer != nil {
+		cmd.dmSeerPrompt(s, channelID, seer, seerTargets)
+	}
+	if doctor != nil {
+		cmd.dmDoctorPrompt(s, channelID, doctor, doctorTargets)
+	}
 
 	deadline := time.Now().Add(nightActionWindow)
-	cmd.waitForNightActions(s, channelID, deadline)
+	cmd.waitForNightActions(s, channelID, deadline, seq)
 
 	cmd.resolveNight(s, channelID)
 }
 
-func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, game *werewolfGame) {
-	wolves := alivePlayersOfRole(game, roleWerewolf)
+// startWolfThread and the DM prompts below all take pre-snapshotted player
+// data (copyPlayer'd under cmd.mu by the caller) rather than the live
+// *werewolfGame — handleLeave can mutate live player/game state concurrently
+// at any time during the night, so these must not read it unguarded.
+func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID string, round int, wolves, targets []*player) {
 	if len(wolves) == 0 {
 		return
 	}
 
-	thread, err := s.ThreadStartComplex(game.ChannelID, &discordgo.ThreadStart{
-		Name:                fmt.Sprintf("🐺 Sói bàn đêm %d", game.Round),
+	thread, err := s.ThreadStartComplex(channelID, &discordgo.ThreadStart{
+		Name:                fmt.Sprintf("🐺 Sói bàn đêm %d", round),
 		Type:                discordgo.ChannelTypeGuildPrivateThread,
 		AutoArchiveDuration: 60,
 		Invitable:           false,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to create wolf thread, falling back to independent DMs")
-		cmd.dmWolvesIndependently(s, game, wolves)
+		cmd.dmWolvesIndependently(s, channelID, wolves, targets)
 		return
 	}
 
 	cmd.mu.Lock()
-	game.WolfThreadID = thread.ID
+	if g, ok := cmd.games[channelID]; ok {
+		g.WolfThreadID = thread.ID
+	}
 	cmd.mu.Unlock()
 
 	for _, w := range wolves {
@@ -124,10 +178,9 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, game *werewolf
 		}
 	}
 
-	targets := aliveNonWolves(game)
 	if _, err := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
 		Content:    "🐺 Chọn mục tiêu để tấn công đêm nay. Lượt chọn đầu tiên sẽ được tính.",
-		Components: targetSelectMenu(werewolfWolfTargetID+game.ChannelID, "Chọn mục tiêu", targets),
+		Components: targetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets),
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post wolf target select")
 	}
@@ -136,8 +189,7 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, game *werewolf
 // dmWolvesIndependently is the fallback when the wolf thread can't be
 // created: each wolf gets the same target-picker in their own DM instead.
 // The first submitted pick still stands (handleWolfTarget enforces that).
-func (cmd *WerewolfCommand) dmWolvesIndependently(s *discordgo.Session, game *werewolfGame, wolves []*player) {
-	targets := aliveNonWolves(game)
+func (cmd *WerewolfCommand) dmWolvesIndependently(s *discordgo.Session, channelID string, wolves, targets []*player) {
 	for _, w := range wolves {
 		dm, err := s.UserChannelCreate(w.UserID)
 		if err != nil {
@@ -146,28 +198,14 @@ func (cmd *WerewolfCommand) dmWolvesIndependently(s *discordgo.Session, game *we
 		}
 		if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
 			Content:    "🐺 Chọn mục tiêu để tấn công đêm nay.",
-			Components: targetSelectMenu(werewolfWolfTargetID+game.ChannelID, "Chọn mục tiêu", targets),
+			Components: targetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets),
 		}); err != nil {
 			log.Error().Err(err).Str("user_id", w.UserID).Msg("werewolf: failed to DM wolf fallback prompt")
 		}
 	}
 }
 
-func (cmd *WerewolfCommand) dmSeerPrompt(s *discordgo.Session, game *werewolfGame) {
-	seers := alivePlayersOfRole(game, roleSeer)
-	if len(seers) == 0 {
-		return
-	}
-	seer := seers[0]
-
-	var targets []*player
-	for _, id := range game.JoinOrder {
-		p := game.Players[id]
-		if p.Alive && p.UserID != seer.UserID {
-			targets = append(targets, p)
-		}
-	}
-
+func (cmd *WerewolfCommand) dmSeerPrompt(s *discordgo.Session, channelID string, seer *player, targets []*player) {
 	dm, err := s.UserChannelCreate(seer.UserID)
 	if err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to open DM for seer")
@@ -175,27 +213,13 @@ func (cmd *WerewolfCommand) dmSeerPrompt(s *discordgo.Session, game *werewolfGam
 	}
 	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
 		Content:    "🔮 Chọn một người để soi.",
-		Components: targetSelectMenu(werewolfSeerCheckID+game.ChannelID, "Chọn người để soi", targets),
+		Components: targetSelectMenu(werewolfSeerCheckID+channelID, "Chọn người để soi", targets),
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to DM seer prompt")
 	}
 }
 
-func (cmd *WerewolfCommand) dmDoctorPrompt(s *discordgo.Session, game *werewolfGame) {
-	doctors := alivePlayersOfRole(game, roleDoctor)
-	if len(doctors) == 0 {
-		return
-	}
-	doctor := doctors[0]
-
-	var targets []*player
-	for _, id := range game.JoinOrder {
-		p := game.Players[id]
-		if p.Alive && p.UserID != game.DoctorLastPick {
-			targets = append(targets, p)
-		}
-	}
-
+func (cmd *WerewolfCommand) dmDoctorPrompt(s *discordgo.Session, channelID string, doctor *player, targets []*player) {
 	dm, err := s.UserChannelCreate(doctor.UserID)
 	if err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to open DM for doctor")
@@ -203,7 +227,7 @@ func (cmd *WerewolfCommand) dmDoctorPrompt(s *discordgo.Session, game *werewolfG
 	}
 	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
 		Content:    "💉 Chọn một người để bảo vệ đêm nay (không được trùng người đêm trước).",
-		Components: targetSelectMenu(werewolfDoctorProtectID+game.ChannelID, "Chọn người để bảo vệ", targets),
+		Components: targetSelectMenu(werewolfDoctorProtectID+channelID, "Chọn người để bảo vệ", targets),
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to DM doctor prompt")
 	}
@@ -225,17 +249,17 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 // waitForNightActions blocks until every required night-actor has acted or
 // the deadline passes. Posts one public reminder at the halfway point if
 // the night is still waiting on someone.
-func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID string, deadline time.Time) {
+func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID string, deadline time.Time, seq uint64) {
 	reminded := false
 	for {
 		cmd.mu.Lock()
-		game, ok := cmd.games[channelID]
+		game := cmd.gameIfCurrent(channelID, seq)
 		var done bool
-		if ok {
+		if game != nil {
 			done = cmd.nightActionsComplete(game)
 		}
 		cmd.mu.Unlock()
-		if !ok || done || time.Now().After(deadline) {
+		if game == nil || done || time.Now().After(deadline) {
 			return
 		}
 
@@ -371,10 +395,10 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	cmd.mu.Unlock()
 
 	if alreadyLocked {
-		respondComponentEphemeral(s, i, fmt.Sprintf("Cả bầy đã chốt mục tiêu: <@%s>.", locked))
+		respondComponentEphemeralMentioned(s, i, fmt.Sprintf("Cả bầy đã chốt mục tiêu: <@%s>.", locked))
 		return
 	}
-	respondComponentEphemeral(s, i, fmt.Sprintf("✅ Đã chốt mục tiêu: <@%s>.", targetID))
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chốt mục tiêu: <@%s>.", targetID))
 }
 
 func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -412,7 +436,7 @@ func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.I
 	if isWolf {
 		verdict = "LÀ MA SÓI"
 	}
-	respondComponentEphemeral(s, i, fmt.Sprintf("🔮 <@%s> %s.", targetID, verdict))
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("🔮 <@%s> %s.", targetID, verdict))
 }
 
 func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -449,5 +473,5 @@ func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discord
 	game.DoctorProtect = targetID
 	cmd.mu.Unlock()
 
-	respondComponentEphemeral(s, i, fmt.Sprintf("✅ Đã chọn bảo vệ: <@%s>.", targetID))
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chọn bảo vệ: <@%s>.", targetID))
 }
