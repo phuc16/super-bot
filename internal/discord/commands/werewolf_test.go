@@ -106,6 +106,20 @@ func TestCheckWinConditionWerewolvesWin(t *testing.T) {
 	}
 }
 
+func TestCheckWinConditionEmptyRoster(t *testing.T) {
+	if got := checkWinCondition(map[string]*player{}); got != resultOngoing {
+		t.Errorf("empty roster: got %v, want resultOngoing", got)
+	}
+
+	lobbyPlayers := map[string]*player{
+		"a": {UserID: "a", Role: roleVillager, Alive: false},
+		"b": {UserID: "b", Role: roleVillager, Alive: false},
+	}
+	if got := checkWinCondition(lobbyPlayers); got != resultOngoing {
+		t.Errorf("no-alive-players roster: got %v, want resultOngoing", got)
+	}
+}
+
 func TestTallyVotesSingleWinner(t *testing.T) {
 	votes := map[string]string{"a": "x", "b": "x", "c": "y"}
 	top, tie := tallyVotes(votes)

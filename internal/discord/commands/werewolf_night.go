@@ -80,10 +80,10 @@ func copyPlayers(ps []*player) []*player {
 
 // runNightPhase resets this round's night state, opens the wolf thread and
 // seer/doctor DMs, waits for actions (or the timer), then resolves the night.
-func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string) {
+func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string, seq uint64) {
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok {
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
 		cmd.mu.Unlock()
 		return
 	}
@@ -93,7 +93,6 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	game.SeerActed = false
 	game.DoctorProtect = ""
 
-	seq := game.Seq
 	round := game.Round
 	wolves := copyPlayers(alivePlayersOfRole(game, roleWerewolf))
 	nonWolfTargets := copyPlayers(aliveNonWolves(game))
@@ -360,10 +359,10 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		log.Error().Err(err).Msg("werewolf: failed to post night result")
 	}
 
-	if cmd.checkAndHandleGameEnd(s, channelID) {
+	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
 		return
 	}
-	cmd.runDayDiscuss(s, channelID)
+	cmd.runDayDiscuss(s, channelID, seq)
 }
 
 func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -385,6 +384,11 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	if !isWolf || clicker.Role != roleWerewolf || !clicker.Alive {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ Ma Sói còn sống mới được chọn mục tiêu.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
 		return
 	}
 	alreadyLocked := game.NightTarget != ""
@@ -427,9 +431,14 @@ func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Bạn đã soi đêm nay rồi.")
 		return
 	}
+	target, exists := game.Players[targetID]
+	if !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
 	game.SeerActed = true
-	target := game.Players[targetID]
-	isWolf := target != nil && target.Role == roleWerewolf
+	isWolf := target.Role == roleWerewolf
 	cmd.mu.Unlock()
 
 	verdict := "KHÔNG PHẢI Ma Sói"
@@ -468,6 +477,11 @@ func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discord
 	if targetID == game.DoctorLastPick {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Không thể bảo vệ cùng một người hai đêm liên tiếp.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
 		return
 	}
 	game.DoctorProtect = targetID

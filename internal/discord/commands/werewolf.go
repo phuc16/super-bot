@@ -132,6 +132,11 @@ func checkWinCondition(players map[string]*player) gameResult {
 		}
 	}
 	switch {
+	case aliveWolves == 0 && aliveOthers == 0:
+		// No real roster yet (e.g. an empty or lobby-phase Players map) —
+		// there's nothing to win or lose, so don't report either side as
+		// having won.
+		return resultOngoing
 	case aliveWolves == 0:
 		return resultVillagersWin
 	case aliveWolves >= aliveOthers:
@@ -176,6 +181,12 @@ type gamePhase int
 
 const (
 	phaseLobby gamePhase = iota
+	// phasePreflight covers the brief window between the "Bắt đầu" click and
+	// the first night phase actually starting: roles are being assigned and
+	// DMed out. It exists so the lobby is unambiguously closed the instant
+	// "Bắt đầu" is clicked, rather than staying in phaseLobby (and therefore
+	// joinable/leavable) through up to a minute of DM sends and grace period.
+	phasePreflight
 	phaseNight
 	phaseDayDiscuss
 	phaseDayVote
@@ -430,6 +441,7 @@ func (cmd *WerewolfCommand) handleStatus(s *discordgo.Session, i *discordgo.Inte
 		}
 		phaseLabels := map[gamePhase]string{
 			phaseLobby:      "Đang đăng ký",
+			phasePreflight:  "Đang chia vai trò",
 			phaseNight:      "Ban đêm",
 			phaseDayDiscuss: "Thảo luận ban ngày",
 			phaseDayVote:    "Bỏ phiếu",
@@ -456,17 +468,43 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	}
 
 	if game.Phase == phaseLobby {
-		if _, inLobby := game.Players[userID]; inLobby {
-			delete(game.Players, userID)
-			for idx, id := range game.JoinOrder {
-				if id == userID {
-					game.JoinOrder = append(game.JoinOrder[:idx], game.JoinOrder[idx+1:]...)
-					break
-				}
+		_, inLobby := game.Players[userID]
+		if !inLobby {
+			cmd.mu.Unlock()
+			respondError(s, i, "Bạn không ở trong bàn này.")
+			return
+		}
+		delete(game.Players, userID)
+		for idx, id := range game.JoinOrder {
+			if id == userID {
+				game.JoinOrder = append(game.JoinOrder[:idx], game.JoinOrder[idx+1:]...)
+				break
 			}
 		}
+		content := werewolfLobbyContent(game)
+		channelID := game.ChannelID
+		messageID := game.MessageID
 		cmd.mu.Unlock()
+
 		respondSuccess(s, i, "Đã rời bàn.")
+		if messageID != "" {
+			components := werewolfLobbyButtons(channelID, false)
+			if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+				Channel:         channelID,
+				ID:              messageID,
+				Content:         &content,
+				Components:      &components,
+				AllowedMentions: &discordgo.MessageAllowedMentions{},
+			}); err != nil {
+				log.Error().Err(err).Msg("werewolf: failed to update lobby message after leave")
+			}
+		}
+		return
+	}
+
+	if game.Phase == phasePreflight {
+		cmd.mu.Unlock()
+		respondError(s, i, "Bàn đang được thiết lập, vui lòng chờ ván bắt đầu.")
 		return
 	}
 
@@ -479,11 +517,12 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	p.Alive = false
 	revealOnDeath := game.RevealOnDeath
 	channelID := game.ChannelID
+	seq := game.Seq
 	cmd.mu.Unlock()
 
 	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
 
-	if cmd.checkAndHandleGameEnd(s, channelID) {
+	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
 		return
 	}
 
@@ -550,9 +589,9 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 		respondComponentEphemeral(s, i, "Bàn này đã kết thúc rồi.")
 		return
 	}
-	if i.Member.User.ID != game.StarterID {
+	if i.Member.User.ID != game.StarterID && !hasAdminPermission(i.Member) {
 		cmd.mu.Unlock()
-		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được huỷ.")
+		respondComponentEphemeral(s, i, "Chỉ người mở bàn hoặc quản trị viên mới được huỷ.")
 		return
 	}
 	delete(cmd.games, channelID)
@@ -594,6 +633,7 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 		labels[id] = p.Label
 	}
 	seq := game.Seq
+	game.Phase = phasePreflight
 	cmd.mu.Unlock()
 
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -634,6 +674,18 @@ func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[stri
 // unreachable players (recomputing roles for the smaller group) before
 // kicking off round 1. Runs in its own goroutine, started from handleStartGame.
 func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID string, joinOrder []string, labels map[string]string, seq uint64) {
+	// This goroutine tail-calls the entire rest of the game (night, day
+	// discuss, day vote, and back again) — one recover here guards the
+	// whole phase chain against a crash taking down the bot process.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().
+				Interface("panic", r).
+				Str("channel_id", channelID).
+				Msg("werewolf: recovered from panic in game goroutine")
+		}
+	}()
+
 	sendPlain := func(content string) {
 		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 			Content:         content,
@@ -730,7 +782,7 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		log.Error().Err(err).Msg("werewolf: failed to post role-assigned announcement")
 	}
 
-	cmd.runNightPhase(s, channelID)
+	cmd.runNightPhase(s, channelID, seq)
 }
 
 // HandleComponent processes every /werewolf button and select-menu click:

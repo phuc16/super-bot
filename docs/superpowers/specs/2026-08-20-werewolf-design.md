@@ -234,6 +234,17 @@ check. A manual `/werewolf leave` command follows the identical removal path.
 | Wolf-thread creation fails | Fall back to independent DM target-pickers for that night only |
 | Other Discord API failures (DM send fails mid-game, etc.) | Logged via `zerolog`, game continues with graceful fallback where possible rather than crashing |
 
+## Deviations from spec
+
+- **"Bắt đầu" button**: always enabled, not disabled below the ≥5-player
+  minimum as originally specified. Clicking it below the minimum is validated
+  ephemerally on click instead.
+- **`/werewolf start`**: open to all members, not starter/admin-only as
+  originally specified — this matches what `/help werewolf` already
+  documents, so the spec has been brought in line with the shipped behavior.
+- **Seer "already checked" tracking**: per-round (`SeerActed bool`, reset each
+  night), not cumulative across the whole game as originally implied.
+
 ## Testing Approach
 
 No way to unit-test Discord button clicks/DMs directly, so:

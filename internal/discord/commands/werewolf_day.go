@@ -15,16 +15,15 @@ const (
 	dayVoteWindow    = 90 * time.Second
 )
 
-func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string) {
+func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string, seq uint64) {
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok {
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
 		cmd.mu.Unlock()
 		return
 	}
 	game.Phase = phaseDayDiscuss
 	round := game.Round
-	seq := game.Seq
 	cmd.mu.Unlock()
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
@@ -43,19 +42,18 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 		return
 	}
 
-	cmd.runDayVote(s, channelID)
+	cmd.runDayVote(s, channelID, seq)
 }
 
-func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string) {
+func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, seq uint64) {
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok {
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
 		cmd.mu.Unlock()
 		return
 	}
 	game.Phase = phaseDayVote
 	game.Votes = make(map[string]string)
-	seq := game.Seq
 	var alive []*player
 	for _, id := range game.JoinOrder {
 		if p := game.Players[id]; p.Alive {
@@ -118,7 +116,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 	top, tie := tallyVotes(game.Votes)
 	var lynchedPlayer *player
 	if !tie && len(top) == 1 {
-		if target, exists := game.Players[top[0]]; exists {
+		if target, exists := game.Players[top[0]]; exists && target.Alive {
 			target.Alive = false
 			lynchedPlayer = target
 		}
@@ -143,20 +141,20 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		log.Error().Err(err).Msg("werewolf: failed to post vote result")
 	}
 
-	if cmd.checkAndHandleGameEnd(s, channelID) {
+	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
 		return
 	}
-	cmd.runNightPhase(s, channelID)
+	cmd.runNightPhase(s, channelID, seq)
 }
 
 // checkAndHandleGameEnd applies AFK-strike removals, then checks the win
 // condition. If the game has ended, it announces the result, reveals every
 // role, deletes any remaining wolf thread, deletes the game from the
 // pending map, and returns true — callers must stop processing when true.
-func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelID string) bool {
+func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelID string, seq uint64) bool {
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok {
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
 		cmd.mu.Unlock()
 		return true
 	}
@@ -252,6 +250,11 @@ func (cmd *WerewolfCommand) handleVote(s *discordgo.Session, i *discordgo.Intera
 	if !isPlayer || !voter.Alive {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ người chơi còn sống mới được bỏ phiếu.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
 		return
 	}
 	game.Votes[voterID] = targetID
