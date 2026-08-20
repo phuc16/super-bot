@@ -69,6 +69,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	var round int
 	var aliveCount int
 	var summary string
+	var guildID string
 	var aliveThreadID string
 	func() {
 		cmd.mu.Lock()
@@ -86,11 +87,13 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 			}
 		}
 		summary = aliveDeadSummary(game)
+		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
 	}()
 	if !gameFound {
 		return
 	}
+	unmuteAliveThread(s, guildID, aliveThreadID)
 
 	discussWindow := dayDiscussWindowFor(aliveCount)
 
@@ -123,6 +126,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 	var gameFound bool
 	var alive []*player
 	var summary string
+	var guildID string
 	var aliveThreadID string
 	func() {
 		cmd.mu.Lock()
@@ -140,11 +144,13 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 			}
 		}
 		summary = aliveDeadSummary(game)
+		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
 	}()
 	if !gameFound {
 		return
 	}
+	muteAliveThread(s, guildID, aliveThreadID)
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:    fmt.Sprintf("🗳️ **Bỏ phiếu treo cổ.** Chọn người bạn nghi ngờ, hoặc bỏ qua.\n\n%s", summary),

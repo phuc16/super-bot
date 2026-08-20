@@ -99,6 +99,8 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		gameFound      bool
 		round          int
 		summary        string
+		guildID        string
+		aliveThreadID  string
 		wolves         []*player
 		nonWolfTargets []*player
 		seer           *player
@@ -125,6 +127,8 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 
 		round = game.Round
 		summary = aliveDeadSummary(game)
+		guildID = game.GuildID
+		aliveThreadID = game.AliveThreadID
 		wolves = copyPlayers(alivePlayersOfRole(game, roleWerewolf))
 		nonWolfTargets = copyPlayers(aliveNonWolves(game))
 
@@ -152,6 +156,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	if !gameFound {
 		return
 	}
+	muteAliveThread(s, guildID, aliveThreadID)
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ đang hành động trong tin nhắn riêng...\n\n%s", round, summary),

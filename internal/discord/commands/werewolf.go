@@ -394,6 +394,33 @@ func unlockChannel(s *discordgo.Session, guildID, channelID string, prior *disco
 	}
 }
 
+// muteAliveThread denies @everyone SEND_MESSAGES_IN_THREADS on the alive-
+// discussion thread, used during night and vote phases so players can only
+// actually chat there during day-discuss. No-op if threadID is empty (the
+// thread failed to create, or the game already unlocked everything via the
+// createAliveDiscussionThread failure fallback).
+func muteAliveThread(s *discordgo.Session, guildID, threadID string) {
+	if threadID == "" {
+		return
+	}
+	if err := s.ChannelPermissionSet(threadID, guildID, discordgo.PermissionOverwriteTypeRole, 0, discordgo.PermissionSendMessagesInThreads); err != nil {
+		log.Error().Err(err).Str("channel_id", threadID).Msg("werewolf: failed to mute alive-discussion thread")
+	}
+}
+
+// unmuteAliveThread removes the mute overwrite muteAliveThread applies,
+// reopening the thread for day-discuss. Deleting the overwrite (rather than
+// setting an explicit allow) restores Discord's default thread permission
+// behavior, which is what the thread had immediately after creation.
+func unmuteAliveThread(s *discordgo.Session, guildID, threadID string) {
+	if threadID == "" {
+		return
+	}
+	if err := s.ChannelPermissionDelete(threadID, guildID); err != nil {
+		log.Error().Err(err).Str("channel_id", threadID).Msg("werewolf: failed to unmute alive-discussion thread")
+	}
+}
+
 // createAliveDiscussionThread creates the private thread all players use for
 // day-discussion chat, since the main channel is locked to bot-only during
 // the game (see lockChannelToBotOnly). Unlike the wolf thread (recreated
