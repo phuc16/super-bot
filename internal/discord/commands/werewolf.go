@@ -3,6 +3,12 @@ package commands
 import (
 	"fmt"
 	"math/rand"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -156,4 +162,535 @@ const afkRemovalThreshold = 2
 
 func shouldRemoveForAFK(strikes int) bool {
 	return strikes >= afkRemovalThreshold
+}
+
+type gamePhase int
+
+const (
+	phaseLobby gamePhase = iota
+	phaseNight
+	phaseDayDiscuss
+	phaseDayVote
+)
+
+// werewolfGame tracks one in-progress Werewolf game for a single channel,
+// from lobby signup through to the final win check. Entirely in-memory —
+// deleted from WerewolfCommand.games the instant it ends or is cancelled.
+type werewolfGame struct {
+	GuildID, ChannelID, StarterID string
+	MessageID                     string
+	RevealOnDeath                 bool
+	Phase                         gamePhase
+	Round                         int
+	Players                       map[string]*player // userID -> player
+	JoinOrder                     []string           // frozen once the game leaves phaseLobby
+	WolfThreadID                  string             // this round's wolf-coordination thread, "" between nights
+	NightTarget                   string             // wolves' locked-in kill target this round
+	SeerActed                     bool               // whether the seer has acted this round
+	DoctorProtect                 string             // doctor's pick this round
+	DoctorLastPick                string             // last round's pick — can't repeat back-to-back
+	Votes                         map[string]string  // voterID -> targetID, reset each day
+	AFKStrikes                    map[string]int     // resets to 0 on any successful action, +1 on a miss
+}
+
+// WerewolfCommand handles /werewolf and all its button/select interactions.
+type WerewolfCommand struct {
+	mu    sync.Mutex
+	games map[string]*werewolfGame // keyed by channel ID — one game per channel
+}
+
+// NewWerewolfCommand creates a new WerewolfCommand
+func NewWerewolfCommand() *WerewolfCommand {
+	return &WerewolfCommand{games: make(map[string]*werewolfGame)}
+}
+
+// interactionUserID returns the acting user's ID whether the interaction
+// came from a guild channel (i.Member set) or a DM (i.User set — night
+// actions happen in DMs, where i.Member is always nil).
+func interactionUserID(i *discordgo.InteractionCreate) string {
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.ID
+	}
+	if i.User != nil {
+		return i.User.ID
+	}
+	return ""
+}
+
+const (
+	werewolfJoinID   = "ww:join:"
+	werewolfLeaveID  = "ww:leave:"
+	werewolfStartID  = "ww:startgame:"
+	werewolfCancelID = "ww:cancel:"
+)
+
+func werewolfLobbyContent(game *werewolfGame) string {
+	names := make([]string, len(game.JoinOrder))
+	for idx, id := range game.JoinOrder {
+		names[idx] = nameTag(id)
+	}
+	joined := "*chưa có ai*"
+	if len(names) > 0 {
+		joined = strings.Join(names, ", ")
+	}
+	return fmt.Sprintf(
+		"🐺 <@%s> mở bàn **Ma Sói**! Bấm \"Tham gia\" để vào bàn, \"Rời đi\" nếu đổi ý.\nCần %d-%d người. Người mở bàn bấm \"Bắt đầu\" khi đủ người.\n\n**Đã tham gia (%d):** %s",
+		game.StarterID, werewolfMinPlayers, werewolfMaxPlayers, len(names), joined,
+	)
+}
+
+func werewolfLobbyButtons(channelID string, disabled bool) []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    "Tham gia",
+					Style:    discordgo.SuccessButton,
+					CustomID: werewolfJoinID + channelID,
+					Disabled: disabled,
+				},
+				discordgo.Button{
+					Label:    "Rời đi",
+					Style:    discordgo.SecondaryButton,
+					CustomID: werewolfLeaveID + channelID,
+					Disabled: disabled,
+				},
+				discordgo.Button{
+					Label:    "Bắt đầu",
+					Style:    discordgo.PrimaryButton,
+					CustomID: werewolfStartID + channelID,
+					Disabled: disabled,
+				},
+				discordgo.Button{
+					Label:    "Huỷ",
+					Style:    discordgo.DangerButton,
+					CustomID: werewolfCancelID + channelID,
+					Disabled: disabled,
+				},
+			},
+		},
+	}
+}
+
+// Definition returns the Discord application command definition
+func (cmd *WerewolfCommand) Definition() *discordgo.ApplicationCommand {
+	return &discordgo.ApplicationCommand{
+		Name:        "werewolf",
+		Description: "Trò chơi Ma Sói trong kênh này",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "start",
+				Description: "Mở bàn chơi Ma Sói mới",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionBoolean,
+						Name:        "reveal-on-death",
+						Description: "Tiết lộ vai trò khi người chơi chết (mặc định: có)",
+						Required:    false,
+					},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "status",
+				Description: "Xem trạng thái ván Ma Sói hiện tại trong kênh này",
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "leave",
+				Description: "Rời bàn hoặc rời ván Ma Sói đang chạy trong kênh này",
+			},
+		},
+	}
+}
+
+// Handle dispatches /werewolf's subcommands.
+func (cmd *WerewolfCommand) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	options := i.ApplicationCommandData().Options
+	if len(options) == 0 {
+		respondError(s, i, "Thiếu subcommand.")
+		return
+	}
+	switch options[0].Name {
+	case "start":
+		cmd.handleStart(s, i, options[0].Options)
+	case "status":
+		cmd.handleStatus(s, i)
+	case "leave":
+		cmd.handleLeave(s, i)
+	default:
+		respondError(s, i, "Subcommand không hợp lệ.")
+	}
+}
+
+func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.InteractionCreate, subOptions []*discordgo.ApplicationCommandInteractionDataOption) {
+	cmd.mu.Lock()
+	_, exists := cmd.games[i.ChannelID]
+	cmd.mu.Unlock()
+	if exists {
+		respondError(s, i, "Kênh này đang có ván Ma Sói, đợi ván trước kết thúc đã.")
+		return
+	}
+
+	options := parseOptions(subOptions)
+	revealOnDeath := true
+	if v, ok := options["reveal-on-death"].(bool); ok {
+		revealOnDeath = v
+	}
+
+	starterID := i.Member.User.ID
+	game := &werewolfGame{
+		GuildID:       i.GuildID,
+		ChannelID:     i.ChannelID,
+		StarterID:     starterID,
+		RevealOnDeath: revealOnDeath,
+		Phase:         phaseLobby,
+		Players:       make(map[string]*player),
+		JoinOrder:     []string{},
+		Votes:         make(map[string]string),
+		AFKStrikes:    make(map[string]int),
+	}
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content:         werewolfLobbyContent(game),
+			Components:      werewolfLobbyButtons(i.ChannelID, false),
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		},
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to post lobby")
+		return
+	}
+
+	msg, err := s.InteractionResponse(i.Interaction)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to fetch lobby message")
+		return
+	}
+	game.MessageID = msg.ID
+
+	cmd.mu.Lock()
+	cmd.games[i.ChannelID] = game
+	cmd.mu.Unlock()
+}
+
+func (cmd *WerewolfCommand) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	cmd.mu.Lock()
+	game, ok := cmd.games[i.ChannelID]
+	var content string
+	if ok {
+		aliveCount := 0
+		for _, p := range game.Players {
+			if p.Alive {
+				aliveCount++
+			}
+		}
+		phaseLabels := map[gamePhase]string{
+			phaseLobby:      "Đang đăng ký",
+			phaseNight:      "Ban đêm",
+			phaseDayDiscuss: "Thảo luận ban ngày",
+			phaseDayVote:    "Bỏ phiếu",
+		}
+		content = fmt.Sprintf("🐺 Ván hiện tại: **%s**, vòng %d, %d người còn sống / %d người chơi.",
+			phaseLabels[game.Phase], game.Round, aliveCount, len(game.Players))
+	} else {
+		content = "Kênh này hiện không có ván Ma Sói nào."
+	}
+	cmd.mu.Unlock()
+
+	respondSuccess(s, i, content)
+}
+
+func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	userID := i.Member.User.ID
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[i.ChannelID]
+	if !ok {
+		cmd.mu.Unlock()
+		respondError(s, i, "Kênh này hiện không có ván Ma Sói nào.")
+		return
+	}
+
+	if game.Phase == phaseLobby {
+		if _, inLobby := game.Players[userID]; inLobby {
+			delete(game.Players, userID)
+			for idx, id := range game.JoinOrder {
+				if id == userID {
+					game.JoinOrder = append(game.JoinOrder[:idx], game.JoinOrder[idx+1:]...)
+					break
+				}
+			}
+		}
+		cmd.mu.Unlock()
+		respondSuccess(s, i, "Đã rời bàn.")
+		return
+	}
+
+	p, inGame := game.Players[userID]
+	if !inGame || !p.Alive {
+		cmd.mu.Unlock()
+		respondError(s, i, "Bạn không ở trong ván đang chạy này.")
+		return
+	}
+	p.Alive = false
+	revealOnDeath := game.RevealOnDeath
+	channelID := game.ChannelID
+	cmd.mu.Unlock()
+
+	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
+
+	if cmd.checkAndHandleGameEnd(s, channelID) {
+		return
+	}
+
+	msg := fmt.Sprintf("💨 **%s** đã rời ván.", p.Label)
+	if revealOnDeath {
+		msg = fmt.Sprintf("💨 **%s** đã rời ván. Vai trò: %s.", p.Label, p.Role.label())
+	}
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         msg,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to announce voluntary leave")
+	}
+}
+
+func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string, joining bool) {
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseLobby {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bàn này đã đóng đăng ký hoặc kết thúc.")
+		return
+	}
+	clickerID := i.Member.User.ID
+	if joining {
+		if _, already := game.Players[clickerID]; !already {
+			if len(game.JoinOrder) >= werewolfMaxPlayers {
+				cmd.mu.Unlock()
+				respondComponentEphemeral(s, i, fmt.Sprintf("Bàn đã đủ %d người, không thể tham gia thêm.", werewolfMaxPlayers))
+				return
+			}
+			game.Players[clickerID] = &player{UserID: clickerID, Label: displayLabel(i.Member.User), Alive: true}
+			game.JoinOrder = append(game.JoinOrder, clickerID)
+		}
+	} else {
+		if _, already := game.Players[clickerID]; already {
+			delete(game.Players, clickerID)
+			for idx, id := range game.JoinOrder {
+				if id == clickerID {
+					game.JoinOrder = append(game.JoinOrder[:idx], game.JoinOrder[idx+1:]...)
+					break
+				}
+			}
+		}
+	}
+	content := werewolfLobbyContent(game)
+	cmd.mu.Unlock()
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:         content,
+			Components:      werewolfLobbyButtons(channelID, false),
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		},
+	})
+}
+
+func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bàn này đã kết thúc rồi.")
+		return
+	}
+	if i.Member.User.ID != game.StarterID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được huỷ.")
+		return
+	}
+	delete(cmd.games, channelID)
+	cmd.mu.Unlock()
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    "🚫 Đã huỷ bàn Ma Sói.",
+			Components: []discordgo.MessageComponent{},
+		},
+	})
+}
+
+const preflightGracePeriod = 60 * time.Second
+
+func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseLobby {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bàn này đã đóng đăng ký hoặc kết thúc.")
+		return
+	}
+	if i.Member.User.ID != game.StarterID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được bắt đầu.")
+		return
+	}
+	if len(game.JoinOrder) < werewolfMinPlayers {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, fmt.Sprintf("Cần tối thiểu %d người để bắt đầu.", werewolfMinPlayers))
+		return
+	}
+	joinOrder := make([]string, len(game.JoinOrder))
+	copy(joinOrder, game.JoinOrder)
+	labels := make(map[string]string, len(game.Players))
+	for id, p := range game.Players {
+		labels[id] = p.Label
+	}
+	cmd.mu.Unlock()
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    "🐺 Đang chia vai trò và gửi tin nhắn riêng, chờ chút...",
+			Components: []discordgo.MessageComponent{},
+		},
+	})
+
+	go cmd.startPreflight(s, channelID, joinOrder, labels)
+}
+
+// dmRoleReveals DMs each listed player their assigned role, returning the
+// IDs of anyone the bot couldn't reach (DMs closed/blocked).
+func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[string]*player, ids []string) []string {
+	var unreachable []string
+	for _, id := range ids {
+		p, ok := players[id]
+		if !ok {
+			continue
+		}
+		dm, err := s.UserChannelCreate(id)
+		if err != nil {
+			unreachable = append(unreachable, id)
+			continue
+		}
+		content := fmt.Sprintf("🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.", p.Role.label())
+		if _, err := s.ChannelMessageSend(dm.ID, content); err != nil {
+			unreachable = append(unreachable, id)
+		}
+	}
+	return unreachable
+}
+
+// startPreflight assigns roles, DMs everyone their role, retries once for
+// anyone unreachable (with a public grace-period notice), and drops still-
+// unreachable players (recomputing roles for the smaller group) before
+// kicking off round 1. Runs in its own goroutine, started from handleStartGame.
+func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID string, joinOrder []string, labels map[string]string) {
+	players, err := assignRoles(joinOrder, labels)
+	if err != nil {
+		s.ChannelMessageSend(channelID, "❌ Không thể chia vai trò: "+err.Error())
+		cmd.mu.Lock()
+		delete(cmd.games, channelID)
+		cmd.mu.Unlock()
+		return
+	}
+
+	unreachable := cmd.dmRoleReveals(s, players, joinOrder)
+	if len(unreachable) > 0 {
+		names := make([]string, len(unreachable))
+		for idx, id := range unreachable {
+			names[idx] = labels[id]
+		}
+		s.ChannelMessageSend(channelID, fmt.Sprintf(
+			"⚠️ Không gửi được tin nhắn riêng cho: %s.\nHãy bật DM từ thành viên server (Cài đặt quyền riêng tư) rồi chờ %s để bot thử lại.",
+			strings.Join(names, ", "), formatRemaining(preflightGracePeriod),
+		))
+		time.Sleep(preflightGracePeriod)
+
+		stillUnreachable := cmd.dmRoleReveals(s, players, unreachable)
+		if len(stillUnreachable) > 0 {
+			for _, id := range stillUnreachable {
+				delete(players, id)
+			}
+			newJoinOrder := make([]string, 0, len(joinOrder))
+			for _, id := range joinOrder {
+				if _, ok := players[id]; ok {
+					newJoinOrder = append(newJoinOrder, id)
+				}
+			}
+			joinOrder = newJoinOrder
+
+			if len(joinOrder) < werewolfMinPlayers {
+				s.ChannelMessageSend(channelID, fmt.Sprintf("❌ Không đủ %d người sau khi loại người không nhận được tin nhắn riêng, huỷ ván.", werewolfMinPlayers))
+				cmd.mu.Lock()
+				delete(cmd.games, channelID)
+				cmd.mu.Unlock()
+				return
+			}
+
+			reassigned, err := assignRoles(joinOrder, labels)
+			if err != nil {
+				s.ChannelMessageSend(channelID, "❌ Không thể chia lại vai trò: "+err.Error())
+				cmd.mu.Lock()
+				delete(cmd.games, channelID)
+				cmd.mu.Unlock()
+				return
+			}
+			cmd.dmRoleReveals(s, reassigned, joinOrder)
+			players = reassigned
+		}
+	}
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if ok {
+		game.Players = players
+		game.JoinOrder = joinOrder
+	}
+	cmd.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	pingText, allowedMentions := pingOnce(joinOrder)
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         fmt.Sprintf("🐺 Vai trò đã được gửi riêng cho từng người! %s", pingText),
+		AllowedMentions: allowedMentions,
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to post role-assigned announcement")
+	}
+
+	cmd.runNightPhase(s, channelID)
+}
+
+// HandleComponent processes every /werewolf button and select-menu click:
+// lobby (join/leave/start/cancel), night actions (wolf/seer/doctor), and
+// the day vote.
+func (cmd *WerewolfCommand) HandleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	customID := i.MessageComponentData().CustomID
+	switch {
+	case strings.HasPrefix(customID, werewolfJoinID):
+		cmd.handleJoinLeave(s, i, strings.TrimPrefix(customID, werewolfJoinID), true)
+	case strings.HasPrefix(customID, werewolfLeaveID):
+		cmd.handleJoinLeave(s, i, strings.TrimPrefix(customID, werewolfLeaveID), false)
+	case strings.HasPrefix(customID, werewolfStartID):
+		cmd.handleStartGame(s, i, strings.TrimPrefix(customID, werewolfStartID))
+	case strings.HasPrefix(customID, werewolfCancelID):
+		cmd.handleCancelLobby(s, i, strings.TrimPrefix(customID, werewolfCancelID))
+	case strings.HasPrefix(customID, werewolfWolfTargetID):
+		cmd.handleWolfTarget(s, i, strings.TrimPrefix(customID, werewolfWolfTargetID))
+	case strings.HasPrefix(customID, werewolfSeerCheckID):
+		cmd.handleSeerCheck(s, i, strings.TrimPrefix(customID, werewolfSeerCheckID))
+	case strings.HasPrefix(customID, werewolfDoctorProtectID):
+		cmd.handleDoctorProtect(s, i, strings.TrimPrefix(customID, werewolfDoctorProtectID))
+	case strings.HasPrefix(customID, werewolfVoteID):
+		cmd.handleVote(s, i, strings.TrimPrefix(customID, werewolfVoteID))
+	}
 }
