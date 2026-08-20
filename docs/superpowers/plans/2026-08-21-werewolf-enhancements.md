@@ -4,7 +4,7 @@
 
 **Goal:** Add six enhancements to the live `/werewolf` feature: bot-only main channel, a private alive-players discussion thread, alive/dead reminders on every phase transition, an explicit skip-vote option, reworked (generally faster, wolf-count-scaled) timers, and a full round-by-round history recap at game end.
 
-**Architecture:** All changes are additive to the existing `werewolfGame` struct and its phase functions (`internal/discord/commands/werewolf.go`, `werewolf_night.go`, `werewolf_day.go`). No new files, no new commands, no database changes — the feature stays entirely in-memory. New Discord permission dependency: the bot needs `Manage Channels` in addition to the already-required `Manage Threads`.
+**Architecture:** All changes are additive to the existing `werewolfGame` struct and its phase functions (`internal/discord/commands/werewolf.go`, `werewolf_night.go`, `werewolf_day.go`). No new files, no new commands, no database changes — the feature stays entirely in-memory. New Discord permission dependency: the bot needs `Manage Roles` (required by Discord's Edit Channel Permissions endpoint — corrected during Task 6's review from an initial, incorrect `Manage Channels` assumption) in addition to the already-required `Manage Threads`.
 
 **Tech Stack:** Go, discordgo v0.29.0, existing `sync.Mutex`-guarded `map[string]*werewolfGame` pattern.
 
@@ -1535,7 +1535,7 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 
 	botPerms, err := s.UserChannelPermissions(s.State.User.ID, i.ChannelID)
 	if err != nil || botPerms&discordgo.PermissionManageChannels == 0 {
-		respondError(s, i, "Bot cần quyền \"Manage Channels\" trong kênh này để khoá chat khi chơi Ma Sói.")
+		respondError(s, i, "Bot cần quyền \"Manage Roles\" trong kênh này để khoá chat khi chơi Ma Sói.")
 		return
 	}
 
@@ -1815,7 +1815,7 @@ Expected: build succeeds, all tests `PASS`. Permission-overwrite behavior agains
 git add internal/discord/commands/werewolf.go internal/discord/commands/werewolf_day.go
 git commit -m "werewolf: lock the game channel to bot-only chat while a game runs
 
-Requires the bot to hold Manage Channels on the guild/channel, checked
+Requires the bot to hold Manage Roles on the guild/channel, checked
 up front in /werewolf start. The prior @everyone overwrite (if any) is
 snapshotted and restored on every terminal path: win, lobby cancel, and
 panic-recovery."
@@ -2396,7 +2396,7 @@ with:
 				},
 				{
 					Name:   "Channel lock",
-					Value:  "The bot locks the main channel to bot-only chat for the duration of the game — all real conversation happens in two private threads: one for the werewolves at night, and one for all alive players during the day. The channel is restored automatically the moment the game ends or is cancelled. Requires the bot to have **Manage Channels** in this channel.",
+					Value:  "The bot locks the main channel to bot-only chat for the duration of the game — all real conversation happens in two private threads: one for the werewolves at night, and one for all alive players during the day. The channel is restored automatically the moment the game ends or is cancelled. Requires the bot to have **Manage Roles** in this channel.",
 					Inline: false,
 				},
 				{
@@ -2429,11 +2429,11 @@ git commit -m "werewolf: update /help werewolf for channel lock, threads, skip-v
 
 ### Task 9: Manual end-to-end verification (no code — hand this to the user)
 
-This task has no code changes and requires a real Discord server with the bot invited (and granted **Manage Channels** in addition to the existing **Manage Threads**), which a subagent cannot exercise. Flag this task to the user rather than dispatching it — they run it themselves against a live server.
+This task has no code changes and requires a real Discord server with the bot invited (and granted **Manage Roles** in addition to the existing **Manage Threads** — the channel-lock precheck was corrected during Task 6's review from Manage Channels to Manage Roles, matching what Discord's Edit Channel Permissions endpoint actually requires), which a subagent cannot exercise. Flag this task to the user rather than dispatching it — they run it themselves against a live server.
 
 Checklist to hand over:
 
-- [ ] Run `/werewolf start` in a channel where the bot has Manage Channels + Manage Threads. Confirm the channel immediately becomes un-postable for a regular member (Discord shows "you don't have permission to send messages"), while the bot's own lobby message still posts fine.
+- [ ] Run `/werewolf start` in a channel where the bot has Manage Roles + Manage Threads. Confirm the channel immediately becomes un-postable for a regular member (Discord shows "you don't have permission to send messages"), while the bot's own lobby message still posts fine.
 - [ ] Join 5 players, click Start. Confirm: (a) the main channel gets a role-assigned announcement, (b) a new private "🏡 Thảo luận Ma Sói" thread appears with all 5 players added, (c) a "🐺 Sói bàn đêm 1" thread appears with only the wolf(s) added.
 - [ ] During night 1, confirm the wolf(s)' target-picker in their thread and the seer/doctor's DM prompts arrive; let the timer run out without acting and confirm the ~halfway reminder posts in the main channel with a correct remaining-time estimate.
 - [ ] Confirm the night-result and day-discuss/day-vote announcements each include a correct "🟢 Còn sống / 💀 Đã chết" line.

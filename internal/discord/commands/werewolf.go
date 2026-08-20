@@ -192,6 +192,23 @@ const (
 	phaseDayVote
 )
 
+// roundLog captures everything that happened in one round (night + day) for
+// the end-of-game recap. Populated incrementally: runNightPhase appends a
+// fresh entry when a round starts, resolveNight fills the night-side
+// fields, and resolveVote fills the day-side fields on that same entry.
+// Zero-value fields (a role that's already dead, or not in this game's
+// ratio) are omitted when rendering.
+type roundLog struct {
+	Round             int
+	WolfTargetLabel   string
+	WolfTargetSaved   bool
+	DoctorTargetLabel string
+	SeerTargetLabel   string
+	SeerResult        role
+	VoteBreakdown     map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
+	LynchedLabel      string
+}
+
 // werewolfGame tracks one in-progress Werewolf game for a single channel,
 // from lobby signup through to the final win check. Entirely in-memory —
 // deleted from WerewolfCommand.games the instant it ends or is cancelled.
@@ -202,15 +219,21 @@ type werewolfGame struct {
 	RevealOnDeath                 bool
 	Phase                         gamePhase
 	Round                         int
-	Players                       map[string]*player // userID -> player
-	JoinOrder                     []string           // frozen once the game leaves phaseLobby
-	WolfThreadID                  string             // this round's wolf-coordination thread, "" between nights
-	NightTarget                   string             // wolves' locked-in kill target this round
-	SeerActed                     bool               // whether the seer has acted this round
-	DoctorProtect                 string             // doctor's pick this round
-	DoctorLastPick                string             // last round's pick — can't repeat back-to-back
-	Votes                         map[string]string  // voterID -> targetID, reset each day
-	AFKStrikes                    map[string]int     // resets to 0 on any successful action, +1 on a miss
+	Players                       map[string]*player             // userID -> player
+	JoinOrder                     []string                       // frozen once the game leaves phaseLobby
+	WolfThreadID                  string                         // this round's wolf-coordination thread, "" between nights
+	NightTarget                   string                         // wolves' locked-in kill target this round
+	SeerActed                     bool                           // whether the seer has acted this round
+	SeerTarget                    string                         // who the seer checked this round, "" if SeerActed is false
+	SeerResult                    role                           // that check's result — meaningless if SeerTarget == ""
+	DoctorProtect                 string                         // doctor's pick this round
+	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
+	Votes                         map[string]string              // voterID -> targetID, reset each day
+	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
+	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
+	PriorOverwrite                *discordgo.PermissionOverwrite // @everyone's channel overwrite before this game locked it; nil if there was none
+	AliveThreadID                 string                         // private thread all players use for day-discussion chat; "" before it's created
+	ChannelUnlocked               bool                           // true once unlockChannel has already run for this game (e.g. the alive-thread-creation fallback below) — terminal cleanup paths must check this before calling unlockChannel again
 }
 
 // WerewolfCommand handles /werewolf and all its button/select interactions.
@@ -287,6 +310,125 @@ func werewolfLobbyContent(game *werewolfGame) string {
 		"🐺 <@%s> mở bàn **Ma Sói**! Bấm \"Tham gia\" để vào bàn, \"Rời đi\" nếu đổi ý.\nCần %d-%d người. Người mở bàn bấm \"Bắt đầu\" khi đủ người.\n\n**Đã tham gia (%d):** %s",
 		game.StarterID, werewolfMinPlayers, werewolfMaxPlayers, len(names), joined,
 	)
+}
+
+// aliveDeadSummary renders a compact two-line alive/dead roster snapshot,
+// appended to phase-transition announcements so players don't have to run
+// /werewolf status to check who's still in. Must be called with cmd.mu
+// held — it reads game.Players/game.JoinOrder directly.
+func aliveDeadSummary(game *werewolfGame) string {
+	var alive, dead []string
+	for _, id := range game.JoinOrder {
+		p, ok := game.Players[id]
+		if !ok {
+			continue
+		}
+		if p.Alive {
+			alive = append(alive, p.Label)
+		} else {
+			dead = append(dead, p.Label)
+		}
+	}
+	summary := fmt.Sprintf("🟢 Còn sống: %s", strings.Join(alive, ", "))
+	if len(dead) > 0 {
+		summary += fmt.Sprintf("\n💀 Đã chết: %s", strings.Join(dead, ", "))
+	}
+	return summary
+}
+
+// everyoneOverwrite returns the channel's existing @everyone permission
+// overwrite, or nil if none exists. A guild's @everyone role ID always
+// equals the guild's own ID — that's the Discord convention this relies on.
+func everyoneOverwrite(s *discordgo.Session, guildID, channelID string) (*discordgo.PermissionOverwrite, error) {
+	channel, err := s.State.Channel(channelID)
+	if err != nil || channel == nil {
+		channel, err = s.Channel(channelID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, ow := range channel.PermissionOverwrites {
+		if ow.Type == discordgo.PermissionOverwriteTypeRole && ow.ID == guildID {
+			owCopy := *ow
+			return &owCopy, nil
+		}
+	}
+	return nil, nil
+}
+
+// lockChannelToBotOnly denies @everyone SEND_MESSAGES on the game channel,
+// preserving whatever else @everyone already allowed/denied there. Returns
+// the prior overwrite (nil if none existed) so unlockChannel can restore it
+// exactly once the game ends.
+func lockChannelToBotOnly(s *discordgo.Session, guildID, channelID string) (*discordgo.PermissionOverwrite, error) {
+	prior, err := everyoneOverwrite(s, guildID, channelID)
+	if err != nil {
+		return nil, err
+	}
+	deny := int64(discordgo.PermissionSendMessages)
+	allow := int64(0)
+	if prior != nil {
+		allow = prior.Allow &^ deny
+		deny = prior.Deny | deny
+	}
+	if err := s.ChannelPermissionSet(channelID, guildID, discordgo.PermissionOverwriteTypeRole, allow, deny); err != nil {
+		return nil, err
+	}
+	return prior, nil
+}
+
+// unlockChannel restores whatever @everyone permission overwrite existed on
+// the channel before lockChannelToBotOnly ran. prior == nil means there was
+// none, so the overwrite this game added is deleted outright. Best-effort:
+// logs on failure rather than propagating an error, since every caller is
+// already on a terminal cleanup path with nothing left to roll back to.
+func unlockChannel(s *discordgo.Session, guildID, channelID string, prior *discordgo.PermissionOverwrite) {
+	var err error
+	if prior == nil {
+		err = s.ChannelPermissionDelete(channelID, guildID)
+	} else {
+		err = s.ChannelPermissionSet(channelID, guildID, discordgo.PermissionOverwriteTypeRole, prior.Allow, prior.Deny)
+	}
+	if err != nil {
+		log.Error().Err(err).Str("channel_id", channelID).Msg("werewolf: failed to restore channel permissions")
+	}
+}
+
+// createAliveDiscussionThread creates the private thread all players use for
+// day-discussion chat, since the main channel is locked to bot-only during
+// the game (see lockChannelToBotOnly). Unlike the wolf thread (recreated
+// every night), this one is created once, right after roles are assigned,
+// and lives for the whole game — membership shrinks as players die (see
+// removeFromAliveThread, called everywhere a player's Alive flag flips to
+// false).
+func (cmd *WerewolfCommand) createAliveDiscussionThread(s *discordgo.Session, channelID string, joinOrder []string) (string, error) {
+	thread, err := s.ThreadStartComplex(channelID, &discordgo.ThreadStart{
+		Name:                "🏡 Thảo luận Ma Sói",
+		Type:                discordgo.ChannelTypeGuildPrivateThread,
+		AutoArchiveDuration: 1440,
+		Invitable:           false,
+	})
+	if err != nil {
+		return "", err
+	}
+	for _, id := range joinOrder {
+		if err := s.ThreadMemberAdd(thread.ID, id); err != nil {
+			log.Error().Err(err).Str("user_id", id).Msg("werewolf: failed to add player to alive-discussion thread")
+		}
+	}
+	return thread.ID, nil
+}
+
+// removeFromAliveThread best-effort removes a player from the alive-
+// discussion thread the instant they die. Failures are logged, not fatal —
+// the game must proceed regardless of Discord API hiccups here.
+func removeFromAliveThread(s *discordgo.Session, threadID, userID string) {
+	if threadID == "" {
+		return
+	}
+	if err := s.ThreadMemberRemove(threadID, userID); err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("werewolf: failed to remove player from alive-discussion thread")
+	}
 }
 
 func werewolfLobbyButtons(channelID string, disabled bool) []discordgo.MessageComponent {
@@ -375,14 +517,6 @@ func (cmd *WerewolfCommand) Handle(s *discordgo.Session, i *discordgo.Interactio
 }
 
 func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.InteractionCreate, subOptions []*discordgo.ApplicationCommandInteractionDataOption) {
-	cmd.mu.Lock()
-	_, exists := cmd.games[i.ChannelID]
-	cmd.mu.Unlock()
-	if exists {
-		respondError(s, i, "Kênh này đang có ván Ma Sói, đợi ván trước kết thúc đã.")
-		return
-	}
-
 	options := parseOptions(subOptions)
 	revealOnDeath := true
 	if v, ok := options["reveal-on-death"].(bool); ok {
@@ -403,28 +537,84 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		AFKStrikes:    make(map[string]int),
 	}
 
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	// Claim the channel's map slot atomically with the existence check —
+	// this closes the TOCTOU window where two near-simultaneous
+	// /werewolf start calls in the same channel could both pass the
+	// existence check, both lock the channel, and race to overwrite each
+	// other's game in the map (see final-review Fix 1). Everything below
+	// this point can fail and roll back via rollback(), but nothing below
+	// this point can lose the race for the slot itself.
+	cmd.mu.Lock()
+	if _, exists := cmd.games[i.ChannelID]; exists {
+		cmd.mu.Unlock()
+		respondError(s, i, "Kênh này đang có ván Ma Sói, đợi ván trước kết thúc đã.")
+		return
+	}
+	cmd.games[i.ChannelID] = game
+	// game is now reachable from cmd.games, so its fields (JoinOrder in
+	// particular) can be mutated by a concurrent handleJoinLeave from this
+	// point on — render the lobby content now, still under the lock, rather
+	// than reading game unguarded later.
+	lobbyContent := werewolfLobbyContent(game)
+	cmd.mu.Unlock()
+
+	// rollback releases the claimed channel slot (only if it's still this
+	// exact game — nothing else should have touched it, but check by
+	// pointer identity to be safe) and, if unlockGame is true, restores the
+	// channel's permission overwrite. Used on every failure path below.
+	rollback := func(unlockGame bool) {
+		cmd.mu.Lock()
+		prior := game.PriorOverwrite
+		if cur, ok := cmd.games[i.ChannelID]; ok && cur == game {
+			delete(cmd.games, i.ChannelID)
+		}
+		cmd.mu.Unlock()
+		if unlockGame {
+			unlockChannel(s, i.GuildID, i.ChannelID, prior)
+		}
+	}
+
+	botPerms, err := s.UserChannelPermissions(s.State.User.ID, i.ChannelID)
+	if err != nil || botPerms&discordgo.PermissionManageRoles == 0 {
+		rollback(false)
+		respondError(s, i, "Bot cần quyền \"Manage Roles\" trong kênh này để khoá chat khi chơi Ma Sói.")
+		return
+	}
+
+	priorOverwrite, err := lockChannelToBotOnly(s, i.GuildID, i.ChannelID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to lock channel")
+		rollback(false)
+		respondError(s, i, "Không thể khoá kênh để bắt đầu ván Ma Sói, thử lại sau.")
+		return
+	}
+	cmd.mu.Lock()
+	game.PriorOverwrite = priorOverwrite
+	cmd.mu.Unlock()
+
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content:         werewolfLobbyContent(game),
+			Content:         lobbyContent,
 			Components:      werewolfLobbyButtons(i.ChannelID, false),
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		},
 	})
 	if err != nil {
+		rollback(true)
 		log.Error().Err(err).Msg("werewolf: failed to post lobby")
 		return
 	}
 
 	msg, err := s.InteractionResponse(i.Interaction)
 	if err != nil {
+		rollback(true)
 		log.Error().Err(err).Msg("werewolf: failed to fetch lobby message")
 		return
 	}
-	game.MessageID = msg.ID
 
 	cmd.mu.Lock()
-	cmd.games[i.ChannelID] = game
+	game.MessageID = msg.ID
 	cmd.mu.Unlock()
 }
 
@@ -518,8 +708,10 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	revealOnDeath := game.RevealOnDeath
 	channelID := game.ChannelID
 	seq := game.Seq
+	aliveThreadID := game.AliveThreadID
 	cmd.mu.Unlock()
 
+	removeFromAliveThread(s, aliveThreadID, userID)
 	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
 
 	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
@@ -599,6 +791,9 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 	// clean it up defensively in case the UI ever races ahead of the phase
 	// change, mirroring the cleanup the win/end paths already do.
 	threadID := game.WolfThreadID
+	aliveThreadID := game.AliveThreadID
+	guildID := game.GuildID
+	priorOverwrite := game.PriorOverwrite
 	delete(cmd.games, channelID)
 	cmd.mu.Unlock()
 
@@ -607,6 +802,12 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread on lobby cancel")
 		}
 	}
+	if aliveThreadID != "" {
+		if _, err := s.ChannelDelete(aliveThreadID); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread on lobby cancel")
+		}
+	}
+	unlockChannel(s, guildID, channelID, priorOverwrite)
 
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
@@ -680,6 +881,32 @@ func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[stri
 	return unreachable
 }
 
+// abortGameStillCurrent deletes the game (if it's still the one identified by
+// seq) and restores its channel permission lock. Used by startPreflight's
+// several abort-before-night-one paths. Returns true if a game was actually
+// found and cleaned up.
+func (cmd *WerewolfCommand) abortGameStillCurrent(s *discordgo.Session, channelID string, seq uint64) bool {
+	var guildID string
+	var priorOverwrite *discordgo.PermissionOverwrite
+	var found bool
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		guildID = game.GuildID
+		priorOverwrite = game.PriorOverwrite
+		delete(cmd.games, channelID)
+		found = true
+	}()
+	if found {
+		unlockChannel(s, guildID, channelID, priorOverwrite)
+	}
+	return found
+}
+
 // startPreflight assigns roles, DMs everyone their role, retries once for
 // anyone unreachable (with a public grace-period notice), and drops still-
 // unreachable players (recomputing roles for the smaller group) before
@@ -695,8 +922,9 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 				Str("channel_id", channelID).
 				Msg("werewolf: recovered from panic in game goroutine")
 
-			var threadID string
-			var cleaned bool
+			var threadID, aliveThreadID, guildID string
+			var priorOverwrite *discordgo.PermissionOverwrite
+			var cleaned, channelUnlocked bool
 			func() {
 				cmd.mu.Lock()
 				defer cmd.mu.Unlock()
@@ -705,6 +933,10 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 					return
 				}
 				threadID = game.WolfThreadID
+				aliveThreadID = game.AliveThreadID
+				guildID = game.GuildID
+				priorOverwrite = game.PriorOverwrite
+				channelUnlocked = game.ChannelUnlocked
 				delete(cmd.games, channelID)
 				cleaned = true
 			}()
@@ -713,6 +945,14 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 					if _, err := s.ChannelDelete(threadID); err != nil {
 						log.Error().Err(err).Msg("werewolf: failed to delete wolf thread during panic cleanup")
 					}
+				}
+				if aliveThreadID != "" {
+					if _, err := s.ChannelDelete(aliveThreadID); err != nil {
+						log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread during panic cleanup")
+					}
+				}
+				if !channelUnlocked {
+					unlockChannel(s, guildID, channelID, priorOverwrite)
 				}
 				log.Error().Str("channel_id", channelID).Msg("werewolf: cleaned up game state after panic recovery")
 			}
@@ -731,13 +971,7 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 	players, err := assignRoles(joinOrder, labels)
 	if err != nil {
 		sendPlain("❌ Không thể chia vai trò: " + err.Error())
-		func() {
-			cmd.mu.Lock()
-			defer cmd.mu.Unlock()
-			if cmd.gameIfCurrent(channelID, seq) != nil {
-				delete(cmd.games, channelID)
-			}
-		}()
+		cmd.abortGameStillCurrent(s, channelID, seq)
 		return
 	}
 
@@ -777,26 +1011,14 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 
 			if len(joinOrder) < werewolfMinPlayers {
 				sendPlain(fmt.Sprintf("❌ Không đủ %d người sau khi loại người không nhận được tin nhắn riêng, huỷ ván.", werewolfMinPlayers))
-				func() {
-					cmd.mu.Lock()
-					defer cmd.mu.Unlock()
-					if cmd.gameIfCurrent(channelID, seq) != nil {
-						delete(cmd.games, channelID)
-					}
-				}()
+				cmd.abortGameStillCurrent(s, channelID, seq)
 				return
 			}
 
 			reassigned, err := assignRoles(joinOrder, labels)
 			if err != nil {
 				sendPlain("❌ Không thể chia lại vai trò: " + err.Error())
-				func() {
-					cmd.mu.Lock()
-					defer cmd.mu.Unlock()
-					if cmd.gameIfCurrent(channelID, seq) != nil {
-						delete(cmd.games, channelID)
-					}
-				}()
+				cmd.abortGameStillCurrent(s, channelID, seq)
 				return
 			}
 			cmd.dmRoleReveals(s, reassigned, joinOrder)
@@ -825,6 +1047,52 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		AllowedMentions: allowedMentions,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post role-assigned announcement")
+	}
+
+	aliveThreadID, err := cmd.createAliveDiscussionThread(s, channelID, joinOrder)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to create alive-discussion thread")
+
+		// No clean per-player-DM equivalent exists for a group discussion
+		// thread (unlike the wolf thread's dmWolvesIndependently fallback),
+		// so instead unlock the channel for the rest of this game — players
+		// can at least talk in the now-unlocked main channel rather than
+		// being trapped with no discussion venue at all. Mark
+		// ChannelUnlocked so every later terminal-cleanup path knows the
+		// permission overwrite has already been restored and skips calling
+		// unlockChannel a second time.
+		var guildID string
+		var priorOverwrite *discordgo.PermissionOverwrite
+		var stillCurrent bool
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			g := cmd.gameIfCurrent(channelID, seq)
+			if g == nil {
+				return
+			}
+			stillCurrent = true
+			guildID = g.GuildID
+			priorOverwrite = g.PriorOverwrite
+			g.ChannelUnlocked = true
+		}()
+		if stillCurrent {
+			unlockChannel(s, guildID, channelID, priorOverwrite)
+			if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+				Content:         "⚠️ Không thể tạo thread thảo luận, kênh sẽ được mở lại để mọi người thảo luận trực tiếp tại đây.",
+				AllowedMentions: &discordgo.MessageAllowedMentions{},
+			}); err != nil {
+				log.Error().Err(err).Msg("werewolf: failed to post alive-thread-fallback notice")
+			}
+		}
+	} else {
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+				g.AliveThreadID = aliveThreadID
+			}
+		}()
 	}
 
 	cmd.runNightPhase(s, channelID, seq)

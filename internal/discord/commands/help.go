@@ -424,12 +424,17 @@ func (cmd *HelpCommand) getCommandHelp(commandName string) *discordgo.MessageEmb
 				},
 				{
 					Name:   "How it works",
-					Value:  fmt.Sprintf("Anyone can Join/Leave the lobby; the starter clicks Start once %d-%d have joined. Roles are DMed privately. Each night the Werewolves get a private thread to pick a kill target, the Seer and Doctor act via DM. Each day: discuss, then vote to lynch — a tie means nobody is lynched. Repeats until one side wins.", werewolfMinPlayers, werewolfMaxPlayers),
+					Value:  fmt.Sprintf("Anyone can Join/Leave the lobby; the starter clicks Start once %d-%d have joined. Roles are DMed privately. Each night the Werewolves get a private thread to pick a kill target (with more time as their numbers grow), the Seer and Doctor act via DM. Each day: discuss in a private alive-players thread, then vote to lynch (or explicitly skip) — a tie or a skip-win means nobody is lynched. Every phase change posts a live alive/dead roster. Repeats until one side wins, then a full round-by-round recap is posted.", werewolfMinPlayers, werewolfMaxPlayers),
+					Inline: false,
+				},
+				{
+					Name:   "Channel lock",
+					Value:  "The bot locks the main channel to bot-only chat for the duration of the game — all real conversation happens in two private threads: one for the werewolves at night, and one for all alive players during the day. The channel is restored automatically the moment the game ends or is cancelled. Requires the bot to have **Manage Roles** in this channel.",
 					Inline: false,
 				},
 				{
 					Name:   "Privacy note",
-					Value:  "The werewolves' coordination thread is private from other players, but anyone with the server's \"Manage Threads\" permission (usually admins/mods) can still see it — that's a Discord permission-model limit, not a bot bug.",
+					Value:  "Both threads are private from other players, but anyone with the server's \"Manage Threads\" permission (usually admins/mods) can still see them — that's a Discord permission-model limit, not a bot bug.",
 					Inline: false,
 				},
 				{

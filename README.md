@@ -32,7 +32,7 @@ Bot Discord theo dõi hoạt động, phân tích tương tác và tóm tắt ti
    - ✅ Message Content Intent
 4. Vào tab **OAuth2 → URL Generator**:
    - Scopes: `bot`, `applications.commands`
-   - Bot Permissions: `Read Messages`, `Send Messages`, `Manage Roles`, `Read Message History`
+   - Bot Permissions: `Read Messages`, `Send Messages`, `Manage Roles`, `Manage Threads`, `Read Message History`
 5. Mở URL được tạo ra → Thêm bot vào server của bạn
 
 ### Bước 2 — Lấy Server ID

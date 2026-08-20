@@ -12,8 +12,22 @@ const (
 	werewolfWolfTargetID    = "ww:wolftarget:"
 	werewolfSeerCheckID     = "ww:seercheck:"
 	werewolfDoctorProtectID = "ww:doctorprotect:"
-	nightActionWindow       = 90 * time.Second
+
+	// nightActionWindow is the solo window for the Seer and Doctor, who each
+	// act alone. Wolves get their own, longer window — see
+	// wolfDiscussWindowFor — since they coordinate as a group in a shared
+	// thread and benefit from more time as their numbers grow.
+	nightActionWindow = 60 * time.Second
+
+	wolfDiscussBase    = 60 * time.Second
+	wolfDiscussPerWolf = 20 * time.Second
 )
+
+// wolfDiscussWindowFor returns the night-discussion window for the wolves'
+// private thread, given how many wolves are alive this round.
+func wolfDiscussWindowFor(wolfCount int) time.Duration {
+	return wolfDiscussBase + wolfDiscussPerWolf*time.Duration(wolfCount)
+}
 
 func alivePlayersOfRole(game *werewolfGame, r role) []*player {
 	var result []*player
@@ -84,6 +98,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	var (
 		gameFound      bool
 		round          int
+		summary        string
 		wolves         []*player
 		nonWolfTargets []*player
 		seer           *player
@@ -103,9 +118,13 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.Round++
 		game.NightTarget = ""
 		game.SeerActed = false
+		game.SeerTarget = ""
+		game.SeerResult = roleVillager
 		game.DoctorProtect = ""
+		game.History = append(game.History, roundLog{Round: game.Round})
 
 		round = game.Round
+		summary = aliveDeadSummary(game)
 		wolves = copyPlayers(alivePlayersOfRole(game, roleWerewolf))
 		nonWolfTargets = copyPlayers(aliveNonWolves(game))
 
@@ -135,7 +154,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ đang hành động trong tin nhắn riêng...", round),
+		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ đang hành động trong tin nhắn riêng...\n\n%s", round, summary),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post night announcement")
@@ -149,8 +168,12 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		cmd.dmDoctorPrompt(s, channelID, doctor, doctorTargets)
 	}
 
-	deadline := time.Now().Add(nightActionWindow)
-	cmd.waitForNightActions(s, channelID, deadline, seq)
+	totalWindow := nightActionWindow
+	if w := wolfDiscussWindowFor(len(wolves)); len(wolves) > 0 && w > totalWindow {
+		totalWindow = w
+	}
+	deadline := time.Now().Add(totalWindow)
+	cmd.waitForNightActions(s, channelID, deadline, totalWindow, seq)
 
 	cmd.resolveNight(s, channelID, seq)
 }
@@ -261,7 +284,7 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 // waitForNightActions blocks until every required night-actor has acted or
 // the deadline passes. Posts one public reminder at the halfway point if
 // the night is still waiting on someone.
-func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID string, deadline time.Time, seq uint64) {
+func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID string, deadline time.Time, totalWindow time.Duration, seq uint64) {
 	reminded := false
 	for {
 		var gameFound, done bool
@@ -280,7 +303,7 @@ func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID 
 		}
 
 		remaining := time.Until(deadline)
-		if !reminded && remaining <= nightActionWindow/2 {
+		if !reminded && remaining <= totalWindow/2 {
 			reminded = true
 			if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 				Content:         fmt.Sprintf("⏳ Còn %s để mọi người hành động đêm nay.", formatRemaining(remaining)),
@@ -305,6 +328,8 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		revealOnDeath bool
 		killedPlayer  *player
 		saved         bool
+		summary       string
+		aliveThreadID string
 	)
 	func() {
 		cmd.mu.Lock()
@@ -314,6 +339,20 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			return
 		}
 		gameFound = true
+		aliveThreadID = game.AliveThreadID
+
+		wolfTargetLabel := ""
+		if game.NightTarget != "" {
+			if target, exists := game.Players[game.NightTarget]; exists {
+				wolfTargetLabel = target.Label
+			}
+		}
+		doctorTargetLabel := ""
+		if game.DoctorProtect != "" {
+			if target, exists := game.Players[game.DoctorProtect]; exists {
+				doctorTargetLabel = target.Label
+			}
+		}
 
 		var killedID string
 		if game.NightTarget != "" {
@@ -353,12 +392,29 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		threadID = game.WolfThreadID
 		game.WolfThreadID = ""
 		revealOnDeath = game.RevealOnDeath
+		summary = aliveDeadSummary(game)
 		if killedID != "" {
 			killedPlayer = game.Players[killedID]
+		}
+
+		if n := len(game.History); n > 0 {
+			entry := &game.History[n-1]
+			entry.WolfTargetLabel = wolfTargetLabel
+			entry.WolfTargetSaved = saved
+			entry.DoctorTargetLabel = doctorTargetLabel
+			if game.SeerTarget != "" {
+				if target, exists := game.Players[game.SeerTarget]; exists {
+					entry.SeerTargetLabel = target.Label
+				}
+				entry.SeerResult = game.SeerResult
+			}
 		}
 	}()
 	if !gameFound {
 		return
+	}
+	if killedPlayer != nil {
+		removeFromAliveThread(s, aliveThreadID, killedPlayer.UserID)
 	}
 
 	if threadID != "" {
@@ -380,7 +436,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         resultMsg,
+		Content:         resultMsg + "\n\n" + summary,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post night result")
@@ -465,6 +521,8 @@ func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.I
 		return
 	}
 	game.SeerActed = true
+	game.SeerTarget = targetID
+	game.SeerResult = target.Role
 	isWolf := target.Role == roleWerewolf
 	cmd.mu.Unlock()
 

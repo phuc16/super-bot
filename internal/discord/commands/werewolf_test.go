@@ -1,6 +1,10 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestRolesForPlayerCount(t *testing.T) {
 	cases := []struct {
@@ -160,5 +164,130 @@ func TestShouldRemoveForAFK(t *testing.T) {
 	}
 	if !shouldRemoveForAFK(2) || !shouldRemoveForAFK(3) {
 		t.Error("2 or more strikes should remove")
+	}
+}
+
+func TestDayDiscussWindowFor(t *testing.T) {
+	cases := []struct {
+		alive int
+		want  time.Duration
+	}{
+		{5, 45*time.Second + 15*5*time.Second},
+		{8, 45*time.Second + 15*8*time.Second},
+		{12, 45*time.Second + 15*12*time.Second},
+	}
+	for _, c := range cases {
+		if got := dayDiscussWindowFor(c.alive); got != c.want {
+			t.Errorf("dayDiscussWindowFor(%d) = %v, want %v", c.alive, got, c.want)
+		}
+	}
+}
+
+func TestWolfDiscussWindowFor(t *testing.T) {
+	cases := []struct {
+		wolves int
+		want   time.Duration
+	}{
+		{1, 60*time.Second + 20*time.Second},
+		{2, 60*time.Second + 40*time.Second},
+		{4, 60*time.Second + 80*time.Second},
+	}
+	for _, c := range cases {
+		if got := wolfDiscussWindowFor(c.wolves); got != c.want {
+			t.Errorf("wolfDiscussWindowFor(%d) = %v, want %v", c.wolves, got, c.want)
+		}
+	}
+}
+
+func TestTallyVotesSkipSentinelWins(t *testing.T) {
+	votes := map[string]string{"a": voteSkipValue, "b": voteSkipValue, "c": "x"}
+	top, tie := tallyVotes(votes)
+	if tie {
+		t.Fatal("expected no tie")
+	}
+	if len(top) != 1 || top[0] != voteSkipValue {
+		t.Errorf("got %v, want [%s]", top, voteSkipValue)
+	}
+}
+
+func TestFormatRoundBlockFullFields(t *testing.T) {
+	r := roundLog{
+		Round:             1,
+		WolfTargetLabel:   "Alice",
+		WolfTargetSaved:   false,
+		DoctorTargetLabel: "Bob",
+		SeerTargetLabel:   "Carol",
+		SeerResult:        roleWerewolf,
+		VoteBreakdown:     map[string][]string{"Dave": {"Frank", "Grace"}, "Eve": {"Heidi"}},
+		LynchedLabel:      "Dave",
+	}
+	got := formatRoundBlock(r)
+	wantParts := []string{
+		"Đêm/Ngày 1:",
+		"🐺 Sói cắn: Alice",
+		"💉 Bác sĩ bảo vệ: Bob",
+		"🔮 Tiên tri xem: Carol → Ma Sói",
+		"Dave: 2 (Frank, Grace)",
+		"Eve: 1 (Heidi)",
+		"Dave bị treo cổ",
+	}
+	for _, want := range wantParts {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatRoundBlock output missing %q; got:\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatRoundBlockOmitsDeadOrAbsentRoles(t *testing.T) {
+	r := roundLog{Round: 2, WolfTargetLabel: "Alice", WolfTargetSaved: true}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "được bác sĩ cứu") {
+		t.Errorf("expected saved-target wording; got:\n%s", got)
+	}
+	for _, absent := range []string{"Bác sĩ bảo vệ", "Tiên tri xem", "Kết quả bỏ phiếu"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("expected %q to be omitted when its fields are empty; got:\n%s", absent, got)
+		}
+	}
+}
+
+func TestChunkRecapMessagesSingleChunkWhenSmall(t *testing.T) {
+	history := []roundLog{{Round: 1, WolfTargetLabel: "A"}, {Round: 2, WolfTargetLabel: "B"}}
+	chunks := chunkRecapMessages(history, 2000)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	if !strings.Contains(chunks[0], "Đêm/Ngày 1") || !strings.Contains(chunks[0], "Đêm/Ngày 2") {
+		t.Errorf("expected both rounds in the single chunk; got:\n%s", chunks[0])
+	}
+}
+
+func TestChunkRecapMessagesSplitsOnRoundBoundary(t *testing.T) {
+	history := []roundLog{
+		{Round: 1, WolfTargetLabel: "AAAAAAAAAAAAAAAAAAAA"},
+		{Round: 2, WolfTargetLabel: "BBBBBBBBBBBBBBBBBBBB"},
+		{Round: 3, WolfTargetLabel: "CCCCCCCCCCCCCCCCCCCC"},
+	}
+	// A tiny limit forces a split after almost every round.
+	chunks := chunkRecapMessages(history, 80)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks with a tiny limit, got %d", len(chunks))
+	}
+	for _, c := range chunks {
+		if len(c) > 200 {
+			t.Errorf("chunk exceeds a sane bound (got %d chars): %s", len(c), c)
+		}
+	}
+	joined := strings.Join(chunks, "")
+	for _, want := range []string{"Đêm/Ngày 1", "Đêm/Ngày 2", "Đêm/Ngày 3"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q to appear somewhere across chunks", want)
+		}
+	}
+}
+
+func TestChunkRecapMessagesEmptyHistory(t *testing.T) {
+	if got := chunkRecapMessages(nil, 2000); got != nil {
+		t.Errorf("expected nil for empty history, got %v", got)
 	}
 }
