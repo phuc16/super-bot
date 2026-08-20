@@ -28,7 +28,6 @@ func (cmd *HelpCommand) Definition() *discordgo.ApplicationCommand {
 				Required:    false,
 				Choices: []*discordgo.ApplicationCommandOptionChoice{
 					{Name: "export", Value: "export"},
-					{Name: "config", Value: "config"},
 					{Name: "topic", Value: "topic"},
 					{Name: "custom", Value: "custom"},
 					{Name: "roast", Value: "roast"},
@@ -81,11 +80,6 @@ func (cmd *HelpCommand) getGeneralHelp() *discordgo.MessageEmbed {
 			{
 				Name:   "📤 `/export`",
 				Value:  "Export and summarize channel messages\n*Available to all members*",
-				Inline: false,
-			},
-			{
-				Name:   "⚙️ `/config` 🔒",
-				Value:  "Configure bot settings for your server\n*Admin only*",
 				Inline: false,
 			},
 			{
@@ -182,38 +176,6 @@ func (cmd *HelpCommand) getCommandHelp(commandName string) *discordgo.MessageEmb
 			},
 			Footer: &discordgo.MessageEmbedFooter{
 				Text: "Processing time varies based on message count (typically 10-60 seconds)",
-			},
-		}
-
-	case "config":
-		return &discordgo.MessageEmbed{
-			Title:       "⚙️ `/config` Command 🔒",
-			Color:       0xED4245, // Red for admin commands
-			Description: "Configure bot settings for your server. **Admin only**",
-			Fields: []*discordgo.MessageEmbedField{
-				{
-					Name:   "Subcommands",
-					Value:  "• `/config show` - Display current configuration\n• `/config set-reports-channel` - Set reports channel\n• `/config set-active-role` - Set active role name\n• `/config set-inactive-threshold` - Set inactivity threshold\n• `/config set-schedule` - Set weekly schedule (advanced)",
-					Inline: false,
-				},
-				{
-					Name:   "Examples",
-					Value:  "`/config show`\n`/config set-reports-channel channel:#reports`\n`/config set-active-role name:\"Top Contributor\"`\n`/config set-inactive-threshold days:45`",
-					Inline: false,
-				},
-				{
-					Name:   "Configurable Settings",
-					Value:  "• Reports channel for weekly reports\n• Active role name (default: \"Active of the Week\")\n• Inactivity threshold (7-90 days, default: 30)\n• Weekly schedule cron expression\n• Timezone for scheduling",
-					Inline: false,
-				},
-				{
-					Name:   "Required Permission",
-					Value:  "Administrator or Manage Server",
-					Inline: false,
-				},
-			},
-			Footer: &discordgo.MessageEmbedFooter{
-				Text: "Changes to weekly schedule require bot restart",
 			},
 		}
 

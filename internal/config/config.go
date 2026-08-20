@@ -53,8 +53,7 @@ type Config struct {
 	Timezone string
 
 	// Rate Limiting
-	RateLimitExportPerHour     int
-	RateLimitActivityPerMinute int
+	RateLimitExportPerHour int
 
 	// GPT
 	GPTMaxConcurrentRequests int
@@ -102,8 +101,7 @@ func Load() (*Config, error) {
 		Timezone: getEnv("TIMEZONE", "UTC"),
 
 		// Rate Limiting
-		RateLimitExportPerHour:     getEnvAsInt("RATE_LIMIT_EXPORT_PER_HOUR", 3),
-		RateLimitActivityPerMinute: getEnvAsInt("RATE_LIMIT_ACTIVITY_PER_MINUTE", 10),
+		RateLimitExportPerHour: getEnvAsInt("RATE_LIMIT_EXPORT_PER_HOUR", 3),
 
 		// GPT
 		GPTMaxConcurrentRequests: getEnvAsInt("GPT_MAX_CONCURRENT_REQUESTS", 5),
@@ -168,9 +166,6 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimitExportPerHour < 1 || c.RateLimitExportPerHour > 100 {
 		errors = append(errors, "RATE_LIMIT_EXPORT_PER_HOUR must be between 1 and 100")
-	}
-	if c.RateLimitActivityPerMinute < 1 || c.RateLimitActivityPerMinute > 1000 {
-		errors = append(errors, "RATE_LIMIT_ACTIVITY_PER_MINUTE must be between 1 and 1000")
 	}
 	if c.GPTMaxConcurrentRequests < 1 || c.GPTMaxConcurrentRequests > 50 {
 		errors = append(errors, "GPT_MAX_CONCURRENT_REQUESTS must be between 1 and 50")
