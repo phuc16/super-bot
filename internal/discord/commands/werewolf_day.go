@@ -74,7 +74,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string) {
 	deadline := time.Now().Add(dayVoteWindow)
 	cmd.waitForVotes(s, channelID, deadline, len(alive), seq)
 
-	cmd.resolveVote(s, channelID)
+	cmd.resolveVote(s, channelID, seq)
 }
 
 func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string, deadline time.Time, aliveCount int, seq uint64) {
@@ -93,10 +93,10 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 	}
 }
 
-func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string) {
+func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, seq uint64) {
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok {
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
 		cmd.mu.Unlock()
 		return
 	}

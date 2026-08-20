@@ -131,7 +131,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		log.Error().Err(err).Msg("werewolf: failed to post night announcement")
 	}
 
-	cmd.startWolfThread(s, channelID, round, wolves, nonWolfTargets)
+	cmd.startWolfThread(s, channelID, round, wolves, nonWolfTargets, seq)
 	if seer != nil {
 		cmd.dmSeerPrompt(s, channelID, seer, seerTargets)
 	}
@@ -142,14 +142,14 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	deadline := time.Now().Add(nightActionWindow)
 	cmd.waitForNightActions(s, channelID, deadline, seq)
 
-	cmd.resolveNight(s, channelID)
+	cmd.resolveNight(s, channelID, seq)
 }
 
 // startWolfThread and the DM prompts below all take pre-snapshotted player
 // data (copyPlayer'd under cmd.mu by the caller) rather than the live
 // *werewolfGame — handleLeave can mutate live player/game state concurrently
 // at any time during the night, so these must not read it unguarded.
-func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID string, round int, wolves, targets []*player) {
+func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID string, round int, wolves, targets []*player, seq uint64) {
 	if len(wolves) == 0 {
 		return
 	}
@@ -167,7 +167,7 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 	}
 
 	cmd.mu.Lock()
-	if g, ok := cmd.games[channelID]; ok {
+	if g := cmd.gameIfCurrent(channelID, seq); g != nil {
 		g.WolfThreadID = thread.ID
 	}
 	cmd.mu.Unlock()
@@ -282,10 +282,10 @@ func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID 
 // anyone who didn't act, deletes this round's wolf thread, posts the
 // result, then hands off to the win-check and (if the game continues) the
 // day-discuss phase.
-func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string) {
+func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string, seq uint64) {
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok {
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
 		cmd.mu.Unlock()
 		return
 	}
