@@ -123,6 +123,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 	var gameFound bool
 	var alive []*player
 	var summary string
+	var aliveThreadID string
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -139,6 +140,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 			}
 		}
 		summary = aliveDeadSummary(game)
+		aliveThreadID = game.AliveThreadID
 	}()
 	if !gameFound {
 		return
@@ -149,6 +151,18 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 		Components: voteSelectMenu(werewolfVoteID+channelID, "Chọn người để treo cổ", alive),
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post vote select")
+	}
+
+	// Players are chatting in the alive-discussion thread, not watching the
+	// (locked, bot-only) main channel — point them back to it now that
+	// voting has actually started there.
+	if aliveThreadID != "" {
+		if _, err := s.ChannelMessageSendComplex(aliveThreadID, &discordgo.MessageSend{
+			Content:         fmt.Sprintf("🗳️ Bắt đầu bỏ phiếu! Vào <#%s> để bỏ phiếu treo cổ.", channelID),
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to post vote-start pointer in alive thread")
+		}
 	}
 
 	deadline := time.Now().Add(dayVoteWindow)
