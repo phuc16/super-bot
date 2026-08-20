@@ -23,6 +23,7 @@ import (
 	aitopicService "github.com/phuc16/VCG-super-bot/internal/services/aitopic"
 	configService "github.com/phuc16/VCG-super-bot/internal/services/config"
 	"github.com/phuc16/VCG-super-bot/internal/services/customcmd"
+	"github.com/phuc16/VCG-super-bot/internal/services/duelstats"
 	"github.com/phuc16/VCG-super-bot/internal/services/export"
 	"github.com/phuc16/VCG-super-bot/internal/storage"
 	"github.com/phuc16/VCG-super-bot/internal/storage/migrations"
@@ -89,7 +90,7 @@ func run() error {
 	defer gptQueue.Shutdown()
 
 	log.Info().Msg("Initializing services...")
-	exportSvc, configSvc, customcmdSvc, aiTopicSvc, taskScheduler := initializeServices(storage.GetDB(), discordClient, gptClient, gptQueue, cfg)
+	exportSvc, configSvc, customcmdSvc, aiTopicSvc, duelStatsSvc, taskScheduler := initializeServices(storage.GetDB(), discordClient, gptClient, gptQueue, cfg)
 
 	log.Info().Msg("Registering event handlers...")
 	messageHandler := events.NewMessageHandler(customcmdSvc)
@@ -101,7 +102,7 @@ func run() error {
 	}
 
 	log.Info().Msg("Registering Discord commands...")
-	if err := registerCommands(discordClient, exportSvc, configSvc, customcmdSvc, aiTopicSvc, gptClient, cfg); err != nil {
+	if err := registerCommands(discordClient, exportSvc, configSvc, customcmdSvc, aiTopicSvc, duelStatsSvc, gptClient, cfg); err != nil {
 		return fmt.Errorf("failed to register commands: %w", err)
 	}
 
@@ -187,16 +188,17 @@ func initializeGPT(cfg *config.Config) (*gpt.Client, *gpt.Queue) {
 	return gptClient, queue
 }
 
-func initializeServices(db *gorm.DB, discordClient *discord.Client, gptClient *gpt.Client, gptQueue *gpt.Queue, cfg *config.Config) (*export.Service, *configService.Service, *customcmd.Service, *aitopicService.Service, *scheduler.Scheduler) {
+func initializeServices(db *gorm.DB, discordClient *discord.Client, gptClient *gpt.Client, gptQueue *gpt.Queue, cfg *config.Config) (*export.Service, *configService.Service, *customcmd.Service, *aitopicService.Service, *duelstats.Service, *scheduler.Scheduler) {
 	exportSvc := export.NewService(db, discordClient.Session, gptQueue)
 	configSvc := configService.NewService(db)
 	customcmdSvc := customcmd.NewService(db)
 	aiTopicSvc := aitopicService.NewService(db)
+	duelStatsSvc := duelstats.NewService(db)
 	taskScheduler := scheduler.NewScheduler(db, discordClient.Session, aiTopicSvc, gptClient, cfg.DiscordGuildID)
-	return exportSvc, configSvc, customcmdSvc, aiTopicSvc, taskScheduler
+	return exportSvc, configSvc, customcmdSvc, aiTopicSvc, duelStatsSvc, taskScheduler
 }
 
-func registerCommands(discordClient *discord.Client, exportSvc *export.Service, configSvc *configService.Service, customcmdSvc *customcmd.Service, aiTopicSvc *aitopicService.Service, gptClient *gpt.Client, cfg *config.Config) error {
+func registerCommands(discordClient *discord.Client, exportSvc *export.Service, configSvc *configService.Service, customcmdSvc *customcmd.Service, aiTopicSvc *aitopicService.Service, duelStatsSvc *duelstats.Service, gptClient *gpt.Client, cfg *config.Config) error {
 	rateLimiter := export.NewRateLimiter(cfg.RateLimitExportPerHour)
 
 	exportCmd := commands.NewExportCommand(exportSvc, rateLimiter, cfg.Timezone)
@@ -209,6 +211,12 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 	deltopicCmd := commands.NewDeltopicCommand(aiTopicSvc)
 	listtopicCmd := commands.NewListtopicCommand(aiTopicSvc)
 	posttopicCmd := commands.NewPosttopicCommand(gptClient)
+	roastCmd := commands.NewRoastCommand(gptClient)
+	duelCmd := commands.NewDuelCommand(duelStatsSvc)
+	duelLeaderboardCmd := commands.NewDuelLeaderboardCommand(duelStatsSvc)
+	duelHistoryCmd := commands.NewDuelHistoryCommand(duelStatsSvc)
+	duelResetCmd := commands.NewDuelResetCommand(duelStatsSvc)
+	duelChallengeAllCmd := commands.NewDuelChallengeAllCommand(duelStatsSvc, cfg.Timezone)
 
 	for _, def := range []*discordgo.ApplicationCommand{
 		exportCmd.Definition(),
@@ -221,13 +229,19 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 		deltopicCmd.Definition(),
 		listtopicCmd.Definition(),
 		posttopicCmd.Definition(),
+		roastCmd.Definition(),
+		duelCmd.Definition(),
+		duelLeaderboardCmd.Definition(),
+		duelHistoryCmd.Definition(),
+		duelResetCmd.Definition(),
+		duelChallengeAllCmd.Definition(),
 	} {
 		if err := discordClient.RegisterCommand(def); err != nil {
 			return fmt.Errorf("failed to register /%s command: %w", def.Name, err)
 		}
 	}
 
-	log.Info().Msg("Registered 10 Discord commands: /export, /config, /help, /addcom, /delcom, /listcom, /addtopic, /deltopic, /listtopic, /posttopic")
+	log.Info().Msg("Registered 16 Discord commands: /export, /config, /help, /addcom, /delcom, /listcom, /addtopic, /deltopic, /listtopic, /posttopic, /roast, /duel, /duel-leaderboard, /duel-history, /duel-reset, /duel-challenge-all")
 
 	wrap := func(name string, h commands.CommandHandler, limiters ...func(commands.CommandHandler) commands.CommandHandler) commands.CommandHandler {
 		mw := append(limiters,
@@ -243,16 +257,37 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 	configHandler := wrap("config", configCmd.Handle, func(h commands.CommandHandler) commands.CommandHandler {
 		return commands.WithUserRateLimit("config", commands.GlobalRateLimiters.Config, h)
 	})
-	helpHandler    := wrap("help", helpCmd.Handle)
-	addcomHandler  := wrap("addcom", addcomCmd.Handle)
-	delcomHandler  := wrap("delcom", delcomCmd.Handle)
+	helpHandler := wrap("help", helpCmd.Handle)
+	addcomHandler := wrap("addcom", addcomCmd.Handle)
+	delcomHandler := wrap("delcom", delcomCmd.Handle)
 	listcomHandler := wrap("listcom", listcomCmd.Handle)
-	addtopicHandler  := wrap("addtopic", addtopicCmd.Handle)
-	deltopicHandler  := wrap("deltopic", deltopicCmd.Handle)
+	addtopicHandler := wrap("addtopic", addtopicCmd.Handle)
+	deltopicHandler := wrap("deltopic", deltopicCmd.Handle)
 	listtopicHandler := wrap("listtopic", listtopicCmd.Handle)
 	posttopicHandler := wrap("posttopic", posttopicCmd.Handle)
+	roastHandler := wrap("roast", roastCmd.Handle, func(h commands.CommandHandler) commands.CommandHandler {
+		return commands.WithUserRateLimit("roast", commands.GlobalRateLimiters.Roast, h)
+	})
+	duelHandler := wrap("duel", duelCmd.Handle, func(h commands.CommandHandler) commands.CommandHandler {
+		return commands.WithUserRateLimit("duel", commands.GlobalRateLimiters.Duel, h)
+	})
+	duelLeaderboardHandler := wrap("duel-leaderboard", duelLeaderboardCmd.Handle)
+	duelHistoryHandler := wrap("duel-history", duelHistoryCmd.Handle)
+	duelResetHandler := wrap("duel-reset", duelResetCmd.Handle)
+	duelChallengeAllHandler := wrap("duel-challenge-all", duelChallengeAllCmd.Handle)
 
 	discordClient.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if i.Type == discordgo.InteractionMessageComponent {
+			duelCmd.HandleComponent(s, i)
+			duelResetCmd.HandleComponent(s, i)
+			duelChallengeAllCmd.HandleComponent(s, i)
+			return
+		}
+		if i.Type == discordgo.InteractionModalSubmit {
+			duelCmd.HandleModalSubmit(s, i)
+			duelChallengeAllCmd.HandleModalSubmit(s, i)
+			return
+		}
 		if i.Type != discordgo.InteractionApplicationCommand {
 			return
 		}
@@ -277,6 +312,18 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 			listtopicHandler(s, i)
 		case "posttopic":
 			posttopicHandler(s, i)
+		case "roast":
+			roastHandler(s, i)
+		case "duel":
+			duelHandler(s, i)
+		case "duel-leaderboard":
+			duelLeaderboardHandler(s, i)
+		case "duel-history":
+			duelHistoryHandler(s, i)
+		case "duel-reset":
+			duelResetHandler(s, i)
+		case "duel-challenge-all":
+			duelChallengeAllHandler(s, i)
 		default:
 			log.Warn().Str("command", i.ApplicationCommandData().Name).Msg("Unknown command received")
 		}

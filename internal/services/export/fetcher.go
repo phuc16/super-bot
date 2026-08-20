@@ -79,12 +79,15 @@ func (f *Fetcher) FetchDateRange(channelID string, guildID string, startTime, en
 
 			// Include message if within range
 			if timestamp.After(startTime) && timestamp.Before(endTime) {
+				replyAuthor, replyContent := resolveReplyTarget(msg, nicknames)
 				allMessages = append(allMessages, models.DiscordMessage{
-					ID:        msg.ID,
-					Author:    resolveDisplayName(msg.Author, nicknames),
-					Content:   msg.Content,
-					Timestamp: timestamp,
-					HasAttach: len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+					ID:             msg.ID,
+					Author:         resolveDisplayName(msg.Author, nicknames),
+					Content:        msg.Content,
+					Timestamp:      timestamp,
+					HasAttach:      len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+					ReplyToAuthor:  replyAuthor,
+					ReplyToContent: replyContent,
 				})
 
 				// Check if we've hit the max limit
@@ -133,6 +136,21 @@ func (f *Fetcher) fetchNicknames(guildID string) map[string]string {
 		after = members[len(members)-1].User.ID
 	}
 	return m
+}
+
+// resolveReplyTarget extracts the author and (truncated) content of the message
+// being replied to, using Discord's own reply/reference data rather than
+// inferring it from surrounding text. Returns ("", "") if not a reply.
+func resolveReplyTarget(msg *discordgo.Message, nicknames map[string]string) (author string, content string) {
+	ref := msg.ReferencedMessage
+	if ref == nil || ref.Author == nil {
+		return "", ""
+	}
+	replyContent := ref.Content
+	if len(replyContent) > 200 {
+		replyContent = replyContent[:200] + "..."
+	}
+	return resolveDisplayName(ref.Author, nicknames), replyContent
 }
 
 // resolveDisplayName picks the best human-readable name for a user:
@@ -191,12 +209,15 @@ func (f *Fetcher) FetchRecent(channelID string, limit int) ([]models.DiscordMess
 
 	var result []models.DiscordMessage
 	for _, msg := range messages {
+		replyAuthor, replyContent := resolveReplyTarget(msg, nil)
 		result = append(result, models.DiscordMessage{
-			ID:        msg.ID,
-			Author:    resolveDisplayName(msg.Author, nil),
-			Content:   msg.Content,
-			Timestamp: msg.Timestamp,
-			HasAttach: len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+			ID:             msg.ID,
+			Author:         resolveDisplayName(msg.Author, nil),
+			Content:        msg.Content,
+			Timestamp:      msg.Timestamp,
+			HasAttach:      len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+			ReplyToAuthor:  replyAuthor,
+			ReplyToContent: replyContent,
 		})
 	}
 

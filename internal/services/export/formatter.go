@@ -70,7 +70,17 @@ func (f *Formatter) FormatForGPT(messages []models.DiscordMessage, channelName s
 			content += " [has attachments]"
 		}
 
-		sb.WriteString(fmt.Sprintf("[%s] @%s: %s\n\n", timestamp, msg.Author, content))
+		// Add Discord's own reply reference (ground truth, not inferred)
+		replyPrefix := ""
+		if msg.ReplyToAuthor != "" {
+			replyContent := msg.ReplyToContent
+			if replyContent == "" {
+				replyContent = "[empty message]"
+			}
+			replyPrefix = fmt.Sprintf(" (replying to @%s: \"%s\")", msg.ReplyToAuthor, replyContent)
+		}
+
+		sb.WriteString(fmt.Sprintf("[%s] @%s%s: %s\n\n", timestamp, msg.Author, replyPrefix, content))
 	}
 
 	return sb.String()

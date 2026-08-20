@@ -47,9 +47,11 @@ func (MessageExport) TableName() string {
 
 // DiscordMessage represents a single Discord message for export
 type DiscordMessage struct {
-	ID        string    `json:"id"`
-	Author    string    `json:"author"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-	HasAttach bool      `json:"has_attachments"`
+	ID             string    `json:"id"`
+	Author         string    `json:"author"`
+	Content        string    `json:"content"`
+	Timestamp      time.Time `json:"timestamp"`
+	HasAttach      bool      `json:"has_attachments"`
+	ReplyToAuthor  string    `json:"reply_to_author,omitempty"`
+	ReplyToContent string    `json:"reply_to_content,omitempty"`
 }

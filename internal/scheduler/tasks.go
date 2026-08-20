@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	openai "github.com/sashabaranov/go-openai"
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog/log"
+	openai "github.com/sashabaranov/go-openai"
 	"gorm.io/gorm"
 
 	"github.com/phuc16/VCG-super-bot/internal/gpt"
@@ -87,13 +87,7 @@ func (s *Scheduler) aiContentTask() {
 		}
 
 		messages := []openai.ChatCompletionMessage{
-			{
-				Role: openai.ChatMessageRoleSystem,
-				Content: "Bạn là một AI sáng tạo, viết bằng tiếng Việt. " +
-					"Hãy viết một đoạn văn tự nhiên, hấp dẫn, dài khoảng 100-200 từ về chủ đề được yêu cầu. " +
-					"Không cần tiêu đề, chỉ viết đoạn văn. " +
-					"Nếu chủ đề có chuỗi <@ID>, hãy giữ nguyên chuỗi đó trong đoạn văn.",
-			},
+			{Role: openai.ChatMessageRoleSystem, Content: gpt.TopicSystemPromptVI},
 			{Role: openai.ChatMessageRoleUser, Content: "Viết một đoạn văn về: " + topicText},
 		}
 
