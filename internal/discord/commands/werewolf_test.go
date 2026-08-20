@@ -105,3 +105,38 @@ func TestCheckWinConditionWerewolvesWin(t *testing.T) {
 		t.Errorf("got %v, want resultWerewolvesWin (2 wolves >= 1 other)", got)
 	}
 }
+
+func TestTallyVotesSingleWinner(t *testing.T) {
+	votes := map[string]string{"a": "x", "b": "x", "c": "y"}
+	top, tie := tallyVotes(votes)
+	if tie {
+		t.Fatal("expected no tie")
+	}
+	if len(top) != 1 || top[0] != "x" {
+		t.Errorf("got %v, want [x]", top)
+	}
+}
+
+func TestTallyVotesTie(t *testing.T) {
+	votes := map[string]string{"a": "x", "b": "y"}
+	_, tie := tallyVotes(votes)
+	if !tie {
+		t.Fatal("expected a tie")
+	}
+}
+
+func TestTallyVotesEmpty(t *testing.T) {
+	top, tie := tallyVotes(map[string]string{})
+	if tie || len(top) != 0 {
+		t.Errorf("expected no votes -> no tie, no targets; got top=%v tie=%v", top, tie)
+	}
+}
+
+func TestShouldRemoveForAFK(t *testing.T) {
+	if shouldRemoveForAFK(0) || shouldRemoveForAFK(1) {
+		t.Error("fewer than 2 strikes should not remove")
+	}
+	if !shouldRemoveForAFK(2) || !shouldRemoveForAFK(3) {
+		t.Error("2 or more strikes should remove")
+	}
+}

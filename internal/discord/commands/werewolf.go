@@ -126,3 +126,34 @@ func checkWinCondition(players map[string]*player) gameResult {
 		return resultOngoing
 	}
 }
+
+// tallyVotes counts votes and returns every target tied for the most votes.
+// isTie is true when more than one target shares the highest count — the
+// caller treats that as "nobody lynched."
+func tallyVotes(votes map[string]string) (topTargets []string, isTie bool) {
+	counts := make(map[string]int)
+	for _, target := range votes {
+		counts[target]++
+	}
+	max := 0
+	for _, c := range counts {
+		if c > max {
+			max = c
+		}
+	}
+	if max == 0 {
+		return nil, false
+	}
+	for target, c := range counts {
+		if c == max {
+			topTargets = append(topTargets, target)
+		}
+	}
+	return topTargets, len(topTargets) > 1
+}
+
+const afkRemovalThreshold = 2
+
+func shouldRemoveForAFK(strikes int) bool {
+	return strikes >= afkRemovalThreshold
+}
