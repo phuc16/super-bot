@@ -314,6 +314,7 @@ type werewolfGame struct {
 	DoctorProtect                 string                         // doctor's pick this round
 	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
 	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
+	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
 	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
 	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
 	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round
@@ -426,6 +427,19 @@ func aliveDeadSummary(game *werewolfGame) string {
 		summary += fmt.Sprintf("\n💀 Đã chết: %s", strings.Join(dead, ", "))
 	}
 	return summary
+}
+
+// announceRoleDecided posts a short, identity-free progress line to the
+// main channel the moment a night-role finishes deciding, so players can
+// watch night progress without waiting blindly — it never names the
+// acting player or reveals their choice.
+func announceRoleDecided(s *discordgo.Session, channelID, roleLabel string) {
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         fmt.Sprintf("✅ %s đã quyết định xong.", roleLabel),
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Str("role", roleLabel).Msg("werewolf: failed to post role-decided notification")
+	}
 }
 
 // everyoneOverwrite returns the channel's existing @everyone permission

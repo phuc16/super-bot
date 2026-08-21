@@ -334,6 +334,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.WitchPoisonTarget = ""
 		game.WitchActedThisRound = false
 		game.WitchPromptedThisRound = false
+		game.HunterActedThisRound = false
 		game.History = append(game.History, roundLog{Round: game.Round})
 
 		round = game.Round
@@ -938,10 +939,20 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 		return
 	}
 	game.WolfVotes[clickerID] = targetID
+	allVoted := true
+	for _, w := range alivePlayersOfRole(game, roleWerewolf) {
+		if _, voted := game.WolfVotes[w.UserID]; !voted {
+			allVoted = false
+			break
+		}
+	}
 	seq := game.Seq
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Bạn đã chọn: <@%s>. Phiếu đã khóa, không thể đổi.", targetID))
+	if allVoted {
+		announceRoleDecided(s, channelID, "🐺 Bầy Sói")
+	}
 
 	// Re-lock and take a fresh snapshot of the full vote state rather than
 	// reusing the one taken above — another wolf may have voted in the
@@ -1029,6 +1040,7 @@ func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.I
 		verdict = "LÀ MA SÓI"
 	}
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("🔮 <@%s> %s.", targetID, verdict))
+	announceRoleDecided(s, channelID, "🔮 Tiên Tri")
 }
 
 func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -1071,6 +1083,7 @@ func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discord
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chọn bảo vệ: <@%s>.", targetID))
+	announceRoleDecided(s, channelID, "🩺 Bác Sĩ")
 }
 
 func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -1099,10 +1112,15 @@ func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordg
 		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
 		return
 	}
+	firstActionThisRound := !game.HunterActedThisRound
 	game.HunterTarget = targetID
+	game.HunterActedThisRound = true
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chỉ định: <@%s>.", targetID))
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🏹 Thợ Săn")
+	}
 }
 
 func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -1142,6 +1160,7 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 	cmd.mu.Unlock()
 
 	respondComponentEphemeral(s, i, "✅ Bạn đã chọn cứu người bị cắn đêm nay.")
+	announceRoleDecided(s, channelID, "🧙 Phù Thủy")
 }
 
 func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -1191,6 +1210,7 @@ func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("☠️ Bạn đã đầu độc: <@%s>.", targetID))
+	announceRoleDecided(s, channelID, "🧙 Phù Thủy")
 }
 
 func (cmd *WerewolfCommand) handleWitchSkip(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -1223,4 +1243,5 @@ func (cmd *WerewolfCommand) handleWitchSkip(s *discordgo.Session, i *discordgo.I
 	cmd.mu.Unlock()
 
 	respondComponentEphemeral(s, i, "✅ Bạn chọn không làm gì đêm nay.")
+	announceRoleDecided(s, channelID, "🧙 Phù Thủy")
 }
