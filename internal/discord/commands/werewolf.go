@@ -1224,7 +1224,7 @@ func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[stri
 			continue
 		}
 		content := fmt.Sprintf(
-			"🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.\n%s\n\n💬 Mọi người thảo luận công khai tại thread \"🏡 Thảo luận Ma Sói\" vào ban ngày; kênh chính chỉ dùng để xem thông báo pha (đêm/ngày/bỏ phiếu) và bỏ phiếu.",
+			"🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.\n%s\n\n💬 Mọi người thảo luận công khai tại thread \"🏡 Thảo luận Ma Sói\" vào ban ngày; kênh chính chỉ dùng để xem thông báo giai đoạn (đêm/ngày/bỏ phiếu) và bỏ phiếu.",
 			p.Role.label(), roleInteractionNote(p.Role),
 		)
 		if _, err := s.ChannelMessageSend(dm.ID, content); err != nil {

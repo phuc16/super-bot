@@ -528,7 +528,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				Fields: []*discordgo.MessageEmbedField{
 					{
 						Name:   "Lệnh con",
-						Value:  "• `/werewolf start reveal-on-death:true|false custom-roles:true|false` - Mở bàn chơi trong kênh này; custom-roles mở màn hình chọn vai trò tuỳ chỉnh (chỉ người mở bàn thấy) sau khi khoá danh sách người chơi, thay vì dùng bảng vai trò mặc định theo số người\n• `/werewolf status` - Xem pha/vòng hiện tại mà không lộ vai trò ai\n• `/werewolf leave` - Rời bàn (khi chưa bắt đầu), hoặc rời ván đang chạy (coi như bị loại)",
+						Value:  "• `/werewolf start reveal-on-death:true|false custom-roles:true|false` - Mở bàn chơi trong kênh này; custom-roles mở màn hình chọn vai trò tuỳ chỉnh (chỉ người mở bàn thấy) sau khi khoá danh sách người chơi, thay vì dùng bảng vai trò mặc định theo số người\n• `/werewolf status` - Xem giai đoạn/vòng hiện tại mà không lộ vai trò ai\n• `/werewolf leave` - Rời bàn (khi chưa bắt đầu), hoặc rời ván đang chạy (coi như bị loại)",
 						Inline: false,
 					},
 					{
@@ -548,7 +548,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Thảo luận & bỏ phiếu",
-						Value:  "**Thảo luận ban ngày**: người còn sống trò chuyện trong một thread riêng — thời gian tăng theo số người còn lại. Kênh chính bị khoá chỉ cho bot đăng, chỉ hiện thông báo pha/kết quả.\n**Bỏ phiếu ban ngày**: chọn người muốn treo cổ, hoặc chọn \"Không treo cổ ai\" (bỏ qua) — bỏ qua chỉ là một lựa chọn như bất kỳ ai khác. **Không cần quá bán hay số phiếu tối thiểu**, chỉ cần nhiều phiếu nhất là thắng. Không ai bị treo cổ nếu \"bỏ qua\" nhiều phiếu nhất, hoặc nếu hoà phiếu tuyệt đối giữa các lựa chọn dẫn đầu.\n**Ban đêm (Sói)**: bầy Sói bỏ phiếu trong thread riêng — mỗi Sói bỏ phiếu 1 lần (khoá, không đổi được), quyết định theo cách tương tự (nhiều phiếu nhất, không quá bán); hoà phiếu thì đêm đó không ai chết.",
+						Value:  "**Thảo luận ban ngày**: người còn sống trò chuyện trong một thread riêng — thời gian tăng theo số người còn lại. Kênh chính bị khoá chỉ cho bot đăng, chỉ hiện thông báo giai đoạn/kết quả.\n**Bỏ phiếu ban ngày**: chọn người muốn treo cổ, hoặc chọn \"Không treo cổ ai\" (bỏ qua) — bỏ qua chỉ là một lựa chọn như bất kỳ ai khác. **Không cần quá bán hay số phiếu tối thiểu**, chỉ cần nhiều phiếu nhất là thắng. Không ai bị treo cổ nếu \"bỏ qua\" nhiều phiếu nhất, hoặc nếu hoà phiếu tuyệt đối giữa các lựa chọn dẫn đầu.\n**Ban đêm (Sói)**: bầy Sói bỏ phiếu trong thread riêng — mỗi Sói bỏ phiếu 1 lần (khoá, không đổi được), quyết định theo cách tương tự (nhiều phiếu nhất, không quá bán); hoà phiếu thì đêm đó không ai chết.",
 						Inline: false,
 					},
 				},
@@ -574,7 +574,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Vai trò tương tác với bot ra sao",
-						Value:  "🐺 Sói thường / Sói Con / Sói Nguyền (sau khi lộ diện): hành động cùng nhau mỗi đêm trong thread riêng của bầy Sói.\n🔮 Tiên Tri / 💉 Bảo Vệ / 🧙 Phù Thủy / 🏹 Thợ Săn / 🤫 Kẻ Phá Hoại: được nhắn tin riêng mỗi đêm để chọn hành động.\n💘 Thần Tình Yêu: chỉ được nhắn tin riêng vào đêm đầu tiên.\n🎭 Kẻ Phản Bội: được nhắn tin riêng biết ai là Sói khi bắt đầu ván, và lại mỗi đêm — không có hành động ban đêm.\n👤 Dân thường: không có hành động riêng — chỉ thảo luận và bỏ phiếu cùng mọi người ban ngày.\nMọi người thảo luận công khai trong thread của người còn sống vào ban ngày; kênh chính chỉ hiện thông báo pha/kết quả bỏ phiếu.",
+						Value:  "🐺 Sói thường / Sói Con / Sói Nguyền (sau khi lộ diện): hành động cùng nhau mỗi đêm trong thread riêng của bầy Sói.\n🔮 Tiên Tri / 💉 Bảo Vệ / 🧙 Phù Thủy / 🏹 Thợ Săn / 🤫 Kẻ Phá Hoại: được nhắn tin riêng mỗi đêm để chọn hành động.\n💘 Thần Tình Yêu: chỉ được nhắn tin riêng vào đêm đầu tiên.\n🎭 Kẻ Phản Bội: được nhắn tin riêng biết ai là Sói khi bắt đầu ván, và lại mỗi đêm — không có hành động ban đêm.\n👤 Dân thường: không có hành động riêng — chỉ thảo luận và bỏ phiếu cùng mọi người ban ngày.\nMọi người thảo luận công khai trong thread của người còn sống vào ban ngày; kênh chính chỉ hiện thông báo giai đoạn/kết quả bỏ phiếu.",
 						Inline: false,
 					},
 					{
