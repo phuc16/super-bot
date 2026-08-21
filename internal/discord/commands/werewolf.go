@@ -312,7 +312,6 @@ type werewolfGame struct {
 	DoctorProtect                 string                         // doctor's pick this round
 	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
 	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
-	HunterActedThisRound          bool                           // reset each round; tracks whether Hunter (re-)picked this round, for nightActionsComplete/AFK
 	Votes                         map[string]string              // voterID -> targetID, reset each day
 	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
 	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
@@ -817,6 +816,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 	p.Alive = false
+	leftPlayer := copyPlayer(p)
 	hunterRevenged := applyHunterRevengeChain(game, userID)
 	if len(hunterRevenged) > 0 && len(game.History) > 0 {
 		game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
@@ -837,12 +837,12 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
-	msg := fmt.Sprintf("💨 **%s** đã rời ván.", p.Label)
+	msg := fmt.Sprintf("💨 **%s** đã rời ván.", leftPlayer.Label)
 	if revealOnDeath {
-		msg = fmt.Sprintf("💨 **%s** đã rời ván. Vai trò: %s.", p.Label, p.Role.label())
+		msg = fmt.Sprintf("💨 **%s** đã rời ván. Vai trò: %s.", leftPlayer.Label, leftPlayer.Role.label())
 	}
 	for _, hp := range hunterRevenged {
-		msg += fmt.Sprintf("\n🏹 **%s** cũng chết theo vì Thợ Săn.", hp.Label)
+		msg += "\n" + hunterRevengeLine(hp)
 	}
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         msg,

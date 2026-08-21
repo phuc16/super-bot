@@ -234,7 +234,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		if !tie && len(top) == 1 {
 			if target, exists := game.Players[top[0]]; exists && target.Alive {
 				target.Alive = false
-				lynchedPlayer = target
+				lynchedPlayer = copyPlayer(target)
 			}
 		}
 		if lynchedPlayer != nil {
@@ -289,7 +289,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		resultMsg = "🤷 Không đủ số phiếu áp đảo, không ai bị treo cổ hôm nay."
 	}
 	for _, p := range hunterRevenged {
-		resultMsg += fmt.Sprintf("\n🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label)
+		resultMsg += "\n" + hunterRevengeLine(p)
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
@@ -375,7 +375,9 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		if len(removedNames) > 0 {
 			cmd.announceAFKRemovals(s, channelID, removedNames)
 		}
-		cmd.announceHunterRevenge(s, channelID, hunterRevenged)
+		if len(hunterRevenged) > 0 {
+			cmd.announceHunterRevenge(s, channelID, hunterRevenged)
+		}
 		return false
 	}
 
@@ -410,7 +412,7 @@ func (cmd *WerewolfCommand) announceAFKRemovals(s *discordgo.Session, channelID 
 func (cmd *WerewolfCommand) announceHunterRevenge(s *discordgo.Session, channelID string, revenged []*player) {
 	for _, p := range revenged {
 		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Content:         fmt.Sprintf("🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label),
+			Content:         hunterRevengeLine(p),
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		}); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to announce hunter revenge")

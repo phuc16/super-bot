@@ -198,11 +198,14 @@ func aliveExcept(game *werewolfGame, excludeID string) []*player {
 
 // applyHunterRevengeChain checks whether the player who just died (deadID)
 // was the Hunter with a locked-in target; if so, kills that target too
-// (unless already dead), and recurses in case the newly-killed target was
-// ALSO a Hunter with their own target (unreachable today, since every
-// player count deals exactly one Hunter, but this stays correct if that
-// ever changes). Must be called with cmd.mu held. Returns value-copy
-// snapshots of everyone killed by the chain, safe to read after unlocking
+// (unless already dead). Note: game.HunterTarget is a single game-scoped
+// field, not per-Hunter, so if a second Hunter were ever dealt (not
+// possible with today's ratio tables, which deal exactly one), this
+// cannot produce a genuine multi-Hunter chain — it would resolve the same
+// shared target twice and safely no-op the second time via the
+// already-dead guard below, never mis-killing, but also never revenging
+// more than once per invocation. Must be called with cmd.mu held. Returns
+// value-copy snapshots of everyone killed, safe to read after unlocking
 // — callers append these to their own kill lists for alive-thread removal,
 // win-condition re-checks, and announcements.
 func applyHunterRevengeChain(game *werewolfGame, deadID string) []*player {
@@ -228,6 +231,13 @@ func applyHunterRevengeChain(game *werewolfGame, deadID string) []*player {
 		queue = append(queue, targetID)
 	}
 	return revenged
+}
+
+// hunterRevengeLine renders the shared announcement line used wherever a
+// Hunter's locked-in target dies alongside them — resolveVote, handleLeave,
+// and announceHunterRevenge.
+func hunterRevengeLine(p *player) string {
+	return fmt.Sprintf("🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label)
 }
 
 func targetSelectMenu(customID, placeholder string, targets []*player) []discordgo.MessageComponent {
@@ -312,7 +322,6 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.SeerTarget = ""
 		game.SeerResult = roleVillager
 		game.DoctorProtect = ""
-		game.HunterActedThisRound = false
 		game.History = append(game.History, roundLog{Round: game.Round})
 
 		round = game.Round
@@ -354,7 +363,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	muteAliveThread(s, guildID, aliveThreadID)
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ đang hành động trong tin nhắn riêng...\n\n%s", round, summary),
+		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ, Thợ Săn đang hành động trong tin nhắn riêng...\n\n%s", round, summary),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post night announcement")
@@ -514,9 +523,6 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 	if len(alivePlayersOfRole(game, roleDoctor)) > 0 && game.DoctorProtect == "" {
 		return false
 	}
-	if len(alivePlayersOfRole(game, roleHunter)) > 0 && !game.HunterActedThisRound {
-		return false
-	}
 	return true
 }
 
@@ -626,13 +632,6 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		}
 		for _, p := range alivePlayersOfRole(game, roleDoctor) {
 			if game.DoctorProtect != "" {
-				game.AFKStrikes[p.UserID] = 0
-			} else {
-				game.AFKStrikes[p.UserID]++
-			}
-		}
-		for _, p := range alivePlayersOfRole(game, roleHunter) {
-			if game.HunterActedThisRound {
 				game.AFKStrikes[p.UserID] = 0
 			} else {
 				game.AFKStrikes[p.UserID]++
@@ -897,7 +896,6 @@ func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordg
 		return
 	}
 	game.HunterTarget = targetID
-	game.HunterActedThisRound = true
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chỉ định: <@%s>.", targetID))
