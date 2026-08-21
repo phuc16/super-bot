@@ -65,40 +65,50 @@ Current engine sends Wolf-thread + Seer-DM + Doctor-DM prompts **in parallel**, 
 Revised per-round flow:
 1. **Parallel, as today plus new prompts:** wolf-thread vote, Seer DM, Guard DM, Hunter DM (skip if Hunter already dead — no DM to a dead player), Disruptor DM (skip if dead). Cupid DM only on round 1 (skip every subsequent round — one-time role).
 2. Wait for all of the above (existing `waitForNightActions`/wolf-window logic, extended to also gate on Hunter/Disruptor if alive — they're optional actors so a miss is just an AFK strike like Seer/Guard today, not a blocker).
-3. Resolve the wolf vote's target (existing `resolveNight` wolf-kill logic, extended to check Cursed Wolf conversion before applying death — section 4a).
+3. Resolve the wolf vote's target(s) (section 4a) — extended to check Cursed Wolf conversion before applying death (section 4b).
 4. **Sequential, new:** send Witch her DM now that the bite target is known; wait for her response (or the (shorter, since it's a single fast decision) timeout).
 5. Apply Witch's save/poison, apply Hunter's revenge-chain if Hunter died this round (wolf-killed or poisoned), apply Cupid's lover-death chain if either lover died, apply Disruptor's mute for tomorrow's day-discuss, check win condition, announce, proceed to day.
 
-### 4a. Wolf Cub
-On `roleWolfCub`'s death (any cause — wolf-kill doesn't apply to itself, so this means poison/lynch/AFK/leave/hunter-revenge), set a one-round flag (`game.WolfBonusBiteNextNight bool`) consumed and cleared at the start of the *next* night's wolf-vote resolution, allowing the wolf thread's target-select to accept **2** selections that round instead of 1 (both resolved as separate kill attempts against Guard/Witch-save independently, matching the reference's `wolfFinalTargets` list-of-up-to-2 behavior).
+### 4a. Wolf pack voting (replaces first-click-wins)
 
-### 4b. Cursed Wolf
-Starts `factionVillager`. Seer checks against `p.Faction` (not `p.Role`), so pre-conversion the Seer sees "not wolf". If the wolf vote's target is a `roleCursedWolf` player **and** they are not protected (Guard) and not saved (Witch) that round: instead of dying, `p.Faction = factionWolf` — no death, no history "killed" entry, but the history log should note the conversion happened (new `roundLog.CursedWolfConverted string` field, player label). If they *are* protected/saved, nothing happens (no conversion, no death) — same as the reference.
+Today's `handleWolfTarget` is first-click-wins: whoever votes first locks the pack's target for the round, and other wolves' differing clicks are silently rejected. With player counts going up to 20 (packs of 4-6+ wolves), this stops being fair. Replace it with a real plurality vote:
 
-### 4c. Traitor
-No nightly action. On role assignment, if any `roleTraitor` player exists, DM them once with the current wolf roster (Werewolf + Wolf Cub labels — **not** Cursed Wolf, matching the reference's filter, since Cursed Wolf isn't "really" a wolf until conversion). Re-DM only when the wolf roster changes — i.e., after a Cursed Wolf conversion (section 4b) or after any wolf-faction player's `Alive` flips to false. This requires a small helper called from every death-application site, but only actually sends a DM when a live Traitor exists and the previous/current wolf-roster label sets differ.
+- `game.WolfVotes map[string]string` (wolf userID → target userID), replacing the single `game.NightTarget string`. Any wolf can vote or change their vote any time before the deadline (`handleWolfTarget` always overwrites, never rejects a re-vote).
+- After every vote, the bot edits a single message in the wolf thread (the same message the target-select menu is attached to) to show a live breakdown: per-target vote count, and a per-wolf list of who's currently voted for whom — matching the reference's transparency level, but scoped to the private wolf thread instead of a shared screen, so nothing leaks outside it.
+- At resolution: tally `game.WolfVotes`. The target(s) with the most votes win — normally 1 target, or 2 if the Wolf-Cub bonus bite is active this round (section 4b's flag), in which case the top 2 distinct targets by vote count are both attacked.
+- **Tie handling:** if the top vote count is shared by more than the number of targets needed (i.e., a genuine tie for the last kill slot), that slot produces no kill — consistent with how the existing day-lynch vote already treats ties as "nobody dies." (With the normal 1-target case, any tie for first place means no kill at all that night.)
+- The existing `nightActionsComplete`/AFK-strike logic for wolves changes from "did `NightTarget` get set" to "did every alive wolf cast a vote" — a wolf who never votes this round gets an AFK strike, same as today's semantics, just keyed off the new map instead of the single string.
+
+### 4b. Wolf Cub
+On `roleWolfCub`'s death (any cause — wolf-kill doesn't apply to itself, so this means poison/lynch/AFK/leave/hunter-revenge), set a one-round flag (`game.WolfBonusBiteNextNight bool`) consumed and cleared at the start of the *next* night's wolf-vote resolution, allowing that round's tally (section 4a) to select the **top 2** targets instead of 1.
+
+### 4c. Cursed Wolf
+Starts `factionVillager`. Seer checks against `p.Faction` (not `p.Role`), so pre-conversion the Seer sees "not wolf". If one of the wolf vote's resolved targets is a `roleCursedWolf` player **and** they are not protected (Guard) and not saved (Witch) that round: instead of dying, `p.Faction = factionWolf` — no death, no history "killed" entry, but the history log should note the conversion happened (new `roundLog.CursedWolfConverted string` field, player label). If they *are* protected/saved, nothing happens (no conversion, no death) — same as the reference.
+
+### 4d. Traitor
+No nightly action. On role assignment, if any `roleTraitor` player exists, DM them once with the current wolf roster (Werewolf + Wolf Cub labels — **not** Cursed Wolf, matching the reference's filter, since Cursed Wolf isn't "really" a wolf until conversion). Re-DM only when the wolf roster changes — i.e., after a Cursed Wolf conversion (section 4c) or after any wolf-faction player's `Alive` flips to false. This requires a small helper called from every death-application site, but only actually sends a DM when a live Traitor exists and the previous/current wolf-roster label sets differ.
 
 Seer checks a `roleTraitor` player as "is wolf" (their `Faction` is `factionWolf`, so this falls out of the existing Seer-check-by-faction logic with no special-casing).
 
-### 4d. Witch
-See section 4 (night-order) for the sequencing. DM content: "Sói cắn: **{label}** đêm nay" (or "Không ai bị cắn" if the wolf vote produced no valid target) plus two buttons: "💊 Cứu" (only enabled/shown if `!WitchHealUsed` and there was a valid bite target) and "☠️ Đầu độc" (opens a target-select menu of all alive players except herself, only if `!WitchPoisonUsed`), plus a "Không làm gì" option. Poison **bypasses** Guard's protection (applies unconditionally once chosen) — the wolf-bite death does not. Both potions are single-use per game (`game.WitchHealUsed`, `game.WitchPoisonUsed bool`), never reset.
+### 4e. Witch
+See section 4 (night-order) for the sequencing. DM content: "Sói cắn: **{label(s)}** đêm nay" (listing both targets if the Wolf-Cub bonus bite is active, or "Không ai bị cắn" if the vote produced no valid target) plus two buttons: "💊 Cứu" (only enabled/shown if `!WitchHealUsed` and there was at least one valid bite target — heals exactly one of the bitten targets if there are two) and "☠️ Đầu độc" (opens a target-select menu of all alive players except herself, only if `!WitchPoisonUsed`), plus a "Không làm gì" option. Poison **bypasses** Guard's protection (applies unconditionally once chosen) — the wolf-bite death does not. Both potions are single-use per game (`game.WitchHealUsed`, `game.WitchPoisonUsed bool`), never reset.
 
-### 4e. Hunter
+### 4f. Hunter
 Nightly DM (while alive) with a target-select menu; re-picking overwrites the previous pick (`game.HunterTarget string`, persists across rounds until changed — matches the reference). On Hunter's death by **any** cause (wolf-kill, poison, lynch, AFK-removal, voluntary leave), if `game.HunterTarget` is set and that player is currently alive, they die too (reason: revenge-kill), applied in the same resolution step/message as the triggering death — including the day-vote lynch case (per your answer: immediate, not delayed to "next morning").
 
-### 4f. Disruptor
+### 4g. Disruptor
 Nightly DM (while alive) with a target-select menu (any alive player except self). The chosen player is muted in the alive-discussion thread for the *next* day-discuss phase only — a **per-member** thread permission overwrite (`PermissionOverwriteTypeMember`, not the existing `@everyone`-scoped overwrite `muteAliveThread` uses), applied when day-discuss starts and removed when it ends (vote phase re-mutes everyone via the existing `@everyone` overwrite anyway, so the per-member overwrite only matters during the one day-discuss window it targets). `game.DisruptorTarget string`, reset to `""` each night before the new pick.
 
-### 4g. Cupid
+### 4h. Cupid
 DMs sent only on round 1, to every living player pair-selection... no — DMed once to the Cupid player only, with a 2-target select flow (pick target 1, then target 2, matching the reference's click-to-select-then-click-again-to-deselect UX, adapted to two sequential single-select Discord menus or one multi-select menu with `MaxValues: 2`). On confirm, `game.LoverIDs [2]string` is set and **both lovers are DMed** who their partner is (per your answer — deviating from the reference's "secret" house rule). Lover-death chain: wherever a player's `Alive` flips to `false` (the same four sites Task 7 already touches for alive-thread removal — lynch, wolf-kill/poison, AFK-removal, manual leave), after applying that death, check if the dying player has a living lover via `game.LoverIDs`; if so, apply a second death (reason: lover-death) to that partner, in the same resolution step. Chains only one level deep (a lover's lover-death does not itself have a lover, since `LoverIDs` only ever names the original two).
 
-### 4h. Public per-role progress notifications
+### 4i. Public per-role progress notifications
 
 Every night, as each acting role finishes deciding, the bot posts a short, identity-free progress line to the **main channel** (not the wolf thread, not DMs) — e.g. "🛡️ Bảo vệ đã quyết định xong.", "🐺 Bầy Sói đã quyết định xong.", "🧙 Phù thủy đã quyết định xong.", "🏹 Thợ săn đã quyết định xong.", "🤫 Kẻ phá hoại đã quyết định xong.", "💘 Thần tình yêu đã quyết định xong." — never naming the acting player or revealing their choice, so everyone in the (locked, bot-only) main channel can watch night progress without waiting blindly, while the actual decision stays private to the DM/thread it was made in.
 
 "Decided" is the same moment each role's *existing* private confirmation already fires, so this is one extra `ChannelMessageSendComplex` call (`AllowedMentions: &discordgo.MessageAllowedMentions{}`, no mentions in the text) added alongside each role's current ephemeral/DM confirmation, not a new tracking mechanism:
 
-- **Wolf pack:** on the first successful `handleWolfTarget` lock (same moment the existing "✅ Đã chốt mục tiêu" ephemeral fires) — posted once per round, not once per wolf.
+- **Wolf pack:** since votes are changeable anytime (section 4a), there's no single "locked" moment anymore — post once, the moment every alive wolf has cast at least one vote (i.e., the same condition `nightActionsComplete` now uses for the wolf-vote-complete check). Not re-posted if a wolf changes their vote afterward.
 - **Seer:** on `handleSeerCheck` success.
 - **Guard:** on `handleDoctorProtect`/Guard-equivalent success.
 - **Witch:** on her explicit confirm (heal / poison / "không làm gì" — any of the three finalizes and posts).
