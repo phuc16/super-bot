@@ -841,6 +841,22 @@ func (cmd *WerewolfCommand) dmHunterPrompt(s *discordgo.Session, channelID strin
 	}
 }
 
+// dmCursedWolfConverted tells a Cursed Wolf who survived a bite that they
+// just flipped to the wolf faction. Nothing else in the game tells them:
+// the public night result deliberately never names a conversion, and their
+// original role-reveal DM described them as a plain villager. Called with
+// a copyPlayer snapshot, after cmd.mu is released.
+func dmCursedWolfConverted(s *discordgo.Session, p *player) {
+	dm, err := s.UserChannelCreate(p.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to open DM for converted cursed wolf")
+		return
+	}
+	if _, err := s.ChannelMessageSend(dm.ID, "🐺✨ Bạn đã bị Sói cắn đêm qua nhưng sống sót — bạn giờ là **Sói Nguyền**, thuộc phe Sói! Từ đêm sau bạn sẽ vào thread riêng của bầy Sói và bỏ phiếu cắn cùng họ."); err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to DM cursed wolf conversion notice")
+	}
+}
+
 func (cmd *WerewolfCommand) dmDisruptorPrompt(s *discordgo.Session, channelID string, disruptor *player, targets []*player) {
 	dm, err := s.UserChannelCreate(disruptor.UserID)
 	if err != nil {
@@ -925,6 +941,16 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 		return false
 	}
 	if len(alivePlayersOfRole(game, roleDisruptor)) > 0 && game.DisruptorTarget == "" {
+		return false
+	}
+	// Cupid acts once, on round 1 only, with no retry: if the night ended
+	// the moment the other actors finished, an alive Cupid could lose the
+	// pairing for the entire game before even reading their DM. So round 1
+	// waits for them too. Deliberately NOT mirrored in the AFK-strike loop —
+	// this only buys Cupid the same time window everyone else gets, it never
+	// penalizes them for still missing it.
+	if game.Round == 1 && len(alivePlayersOfRole(game, roleCupid)) > 0 &&
+		game.LoverIDs[0] == "" && game.LoverIDs[1] == "" {
 		return false
 	}
 	return true
@@ -1162,7 +1188,9 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		doctorSaved         bool
 		witchHealed         bool
 		cursedWolfConverted string
+		convertedPlayers    []*player
 		biteOutcomeLines    []string
+		biteSparedCount     int
 		hunterRevenged      []*player
 		loverDeaths         []*player
 		summary             string
@@ -1225,12 +1253,15 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			case wolfBiteConvert:
 				target.Faction = factionWolf
 				cursedWolfConverted = target.Label
+				convertedPlayers = append(convertedPlayers, copyPlayer(target))
+				biteSparedCount++
 				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: biến thành Sói Nguyền, không chết", target.Label))
 			case wolfBiteSpare:
 				reason := "Bác Sĩ cứu"
 				if witchHealedThis && !doctorSavedThis {
 					reason = "Phù Thủy cứu"
 				}
+				biteSparedCount++
 				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: được %s", target.Label, reason))
 			}
 		}
@@ -1313,14 +1344,37 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 	for _, p := range loverDeaths {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)
 	}
+	for _, p := range convertedPlayers {
+		dmCursedWolfConverted(s, p)
+	}
 
 	var resultMsg string
 	switch {
 	case bonusBite && len(biteOutcomeLines) > 0:
 		// Two-target round: the single-target cascade below can't represent
-		// "one target died, the other was saved" — list each target's own
-		// outcome instead. Only reachable once a Wolf Cub has died.
-		resultMsg = "🌙 **Kết quả đêm qua:**\n" + strings.Join(biteOutcomeLines, "\n")
+		// "one target died, the other was saved" — report each outcome
+		// separately instead. Only reachable once a Wolf Cub has died.
+		//
+		// Secrecy: deaths are always named (every other path in the game
+		// does the same), but who was saved and who converted into a Cursed
+		// Wolf must NOT be named — the single-target Doctor-save path
+		// deliberately says only "mục tiêu", and the single-target
+		// conversion path says nothing at all. Naming them here would leak
+		// the Doctor's/Witch's pick and out a brand-new wolf publicly. The
+		// recap (biteOutcomeLines, kept in full above) is game-end only,
+		// where every role is revealed anyway.
+		var lines []string
+		for _, p := range killedPlayers {
+			if revealOnDeath {
+				lines = append(lines, fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", p.Label, p.Role.label()))
+			} else {
+				lines = append(lines, fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", p.Label))
+			}
+		}
+		if biteSparedCount > 0 {
+			lines = append(lines, "🌫️ Có người khác cũng bị Sói cắn nhưng thoát chết trong bí ẩn.")
+		}
+		resultMsg = strings.Join(lines, "\n")
 	case bonusBite && poisonedPlayer == nil:
 		// Both bite targets already died some other way (e.g. left mid-round)
 		// before finalize could record an outcome for either — nothing to
@@ -1681,7 +1735,16 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 		game.WitchSaveTarget = targetID
 	} else {
 		// Single-target button path: sentinel resolved against the lone bite
-		// target at finalize time.
+		// target at finalize time. The plain button is only ever rendered
+		// for a 1-target round, but the DM carrying it survives into later
+		// rounds — so a stale button from an earlier 1-target round could
+		// otherwise be clicked during a 2-target bonus-bite round and
+		// silently save resolvedTargets[0], a target she never picked.
+		if len(game.NightBiteTargetIDs) != 1 {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
+			return
+		}
 		game.WitchSaveTarget = "heal"
 	}
 	game.WitchHealUsed = true

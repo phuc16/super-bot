@@ -1399,3 +1399,59 @@ func TestFormatRoleCountsAnnouncementCountsActualRoster(t *testing.T) {
 		t.Errorf("formatRoleCountsAnnouncement() = %q, want a zero-count role (Doctor) omitted", got)
 	}
 }
+
+// nightActionsCompleteGame builds the minimal roster nightActionsComplete
+// cares about: one wolf who has already voted, plus an optional Cupid.
+func nightActionsCompleteGame(round int, cupidAlive bool, lovers [2]string) *werewolfGame {
+	game := &werewolfGame{
+		Round:     round,
+		JoinOrder: []string{"w1", "c1"},
+		Players: map[string]*player{
+			"w1": {UserID: "w1", Label: "W1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"c1": {UserID: "c1", Label: "C1", Role: roleCupid, Alive: cupidAlive},
+		},
+		WolfVotes: map[string]string{"w1": "c1"},
+		LoverIDs:  lovers,
+	}
+	return game
+}
+
+func TestNightActionsCompleteWaitsForCupidOnRoundOne(t *testing.T) {
+	cmd := &WerewolfCommand{}
+	cases := []struct {
+		name       string
+		round      int
+		cupidAlive bool
+		lovers     [2]string
+		want       bool
+	}{
+		{"round 1, alive cupid, no pairing yet -> not complete", 1, true, [2]string{"", ""}, false},
+		{"round 1, alive cupid, pairing made -> complete", 1, true, [2]string{"w1", "c1"}, true},
+		{"round 1, dead cupid -> complete", 1, false, [2]string{"", ""}, true},
+		{"round 2, alive cupid, no pairing -> complete", 2, true, [2]string{"", ""}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := cmd.nightActionsComplete(nightActionsCompleteGame(c.round, c.cupidAlive, c.lovers))
+			if got != c.want {
+				t.Errorf("nightActionsComplete() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestNightActionsCompleteRoundOneWithNoCupidAtAll(t *testing.T) {
+	cmd := &WerewolfCommand{}
+	game := &werewolfGame{
+		Round:     1,
+		JoinOrder: []string{"w1", "v1"},
+		Players: map[string]*player{
+			"w1": {UserID: "w1", Label: "W1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"v1": {UserID: "v1", Label: "V1", Role: roleVillager, Alive: true},
+		},
+		WolfVotes: map[string]string{"w1": "v1"},
+	}
+	if !cmd.nightActionsComplete(game) {
+		t.Error("nightActionsComplete() = false with no Cupid in the game, want true")
+	}
+}
