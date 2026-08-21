@@ -355,6 +355,11 @@ const (
 	// "Bắt đầu" is clicked, rather than staying in phaseLobby (and therefore
 	// joinable/leavable) through up to a minute of DM sends and grace period.
 	phasePreflight
+	// phaseRoleEdit is entered instead of phasePreflight when the starter
+	// chose custom-roles:true — the starter picks role counts via the
+	// ephemeral editor (werewolf_rolepick.go) before the game proceeds to
+	// the normal preflight (role assignment + DM) flow.
+	phaseRoleEdit
 	phaseNight
 	phaseDayDiscuss
 	phaseDayVote
@@ -395,6 +400,8 @@ type werewolfGame struct {
 	MessageID                     string
 	Seq                           uint64 // unique creation-order token; see werewolfSeqCounter
 	RevealOnDeath                 bool
+	CustomRoles                   bool         // set at /werewolf start; true routes "Bắt đầu" into phaseRoleEdit instead of straight to phasePreflight
+	PendingRoleCounts             map[role]int // the manual-pick editor's live counts, nil until phaseRoleEdit starts; read once at confirm/timeout, then no longer meaningful
 	Phase                         gamePhase
 	Round                         int
 	Players                       map[string]*player             // userID -> player
@@ -714,6 +721,12 @@ func (cmd *WerewolfCommand) Definition() *discordgo.ApplicationCommand {
 						Description: "Tiết lộ vai trò khi người chơi chết (mặc định: có)",
 						Required:    false,
 					},
+					{
+						Type:        discordgo.ApplicationCommandOptionBoolean,
+						Name:        "custom-roles",
+						Description: "Tự chọn số lượng từng vai trò thay vì dùng bảng mặc định (mặc định: không)",
+						Required:    false,
+					},
 				},
 			},
 			{
@@ -755,6 +768,10 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 	if v, ok := options["reveal-on-death"].(bool); ok {
 		revealOnDeath = v
 	}
+	customRoles := false
+	if v, ok := options["custom-roles"].(bool); ok {
+		customRoles = v
+	}
 
 	starterID := i.Member.User.ID
 	game := &werewolfGame{
@@ -763,6 +780,7 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		StarterID:     starterID,
 		Seq:           atomic.AddUint64(&werewolfSeqCounter, 1),
 		RevealOnDeath: revealOnDeath,
+		CustomRoles:   customRoles,
 		Phase:         phaseLobby,
 		Players:       make(map[string]*player),
 		JoinOrder:     []string{},
@@ -925,7 +943,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
-	if game.Phase == phasePreflight {
+	if game.Phase == phasePreflight || game.Phase == phaseRoleEdit {
 		cmd.mu.Unlock()
 		respondError(s, i, "Bàn đang được thiết lập, vui lòng chờ ván bắt đầu.")
 		return

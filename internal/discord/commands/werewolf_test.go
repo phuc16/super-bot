@@ -1110,3 +1110,26 @@ func TestTraitorRosterDM(t *testing.T) {
 		t.Errorf("traitorRosterDM() with no live Traitor = %+v, want nil", fourth)
 	}
 }
+
+func TestWerewolfDefinitionHasCustomRolesOption(t *testing.T) {
+	cmd := NewWerewolfCommand()
+	def := cmd.Definition()
+	var startOpt *discordgo.ApplicationCommandOption
+	for _, opt := range def.Options {
+		if opt.Name == "start" {
+			startOpt = opt
+		}
+	}
+	if startOpt == nil {
+		t.Fatal("Definition() has no 'start' subcommand")
+	}
+	var found bool
+	for _, opt := range startOpt.Options {
+		if opt.Name == "custom-roles" && opt.Type == discordgo.ApplicationCommandOptionBoolean {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("'start' subcommand is missing a boolean 'custom-roles' option")
+	}
+}
