@@ -267,6 +267,13 @@ func dealRoles(joinOrder []string, labels map[string]string, ratio roleRatio) ma
 	return players
 }
 
+// roleRatioTotal is how many seats a ratio explicitly claims (everything
+// dealRoles doesn't claim becomes roleVillager).
+func roleRatioTotal(r roleRatio) int {
+	return r.Werewolves + r.WolfCubs + r.CursedWolves + r.Traitors +
+		r.Seers + r.Doctors + r.Witches + r.Hunters + r.Disruptors + r.Cupids
+}
+
 // assignRoles is dealRoles for the fixed-table path: it derives the ratio
 // from player count instead of accepting one directly.
 func assignRoles(joinOrder []string, labels map[string]string) (map[string]*player, error) {
@@ -882,6 +889,7 @@ func (cmd *WerewolfCommand) handleStatus(s *discordgo.Session, i *discordgo.Inte
 		}
 		phaseLabels := map[gamePhase]string{
 			phaseLobby:      "Đang đăng ký",
+			phaseRoleEdit:   "Đang chọn vai trò tuỳ chỉnh",
 			phasePreflight:  "Đang chia vai trò",
 			phaseNight:      "Ban đêm",
 			phaseDayDiscuss: "Thảo luận ban ngày",
@@ -1120,18 +1128,36 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 		labels[id] = p.Label
 	}
 	seq := game.Seq
-	game.Phase = phasePreflight
+	customRoles := game.CustomRoles
+	playerCount := len(joinOrder)
+	if customRoles {
+		game.Phase = phaseRoleEdit
+		game.PendingRoleCounts = make(map[role]int)
+	} else {
+		game.Phase = phasePreflight
+	}
 	cmd.mu.Unlock()
+
+	if !customRoles {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:    "🐺 Đang chia vai trò và gửi tin nhắn riêng, chờ chút...",
+				Components: []discordgo.MessageComponent{},
+			},
+		})
+		go cmd.startPreflight(s, channelID, joinOrder, labels, seq, nil)
+		return
+	}
 
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
-			Content:    "🐺 Đang chia vai trò và gửi tin nhắn riêng, chờ chút...",
+			Content:    "🐺 Người mở bàn đang chọn vai trò tuỳ chỉnh...",
 			Components: []discordgo.MessageComponent{},
 		},
 	})
-
-	go cmd.startPreflight(s, channelID, joinOrder, labels, seq)
+	cmd.sendRoleCountEditor(s, i.Interaction, channelID, playerCount, seq)
 }
 
 // dmRoleReveals DMs each listed player their assigned role, returning the
@@ -1207,7 +1233,11 @@ func (cmd *WerewolfCommand) abortGameStillCurrent(s *discordgo.Session, channelI
 // anyone unreachable (with a public grace-period notice), and drops still-
 // unreachable players (recomputing roles for the smaller group) before
 // kicking off round 1. Runs in its own goroutine, started from handleStartGame.
-func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID string, joinOrder []string, labels map[string]string, seq uint64) {
+//
+// customRatio is nil for the fixed-table path; non-nil when the starter
+// confirmed the manual role-count editor, in which case that exact ratio is
+// dealt instead of the rolesForPlayerCount table.
+func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID string, joinOrder []string, labels map[string]string, seq uint64, customRatio *roleRatio) {
 	// This goroutine tail-calls the entire rest of the game (night, day
 	// discuss, day vote, and back again) — one recover here guards the
 	// whole phase chain against a crash taking down the bot process.
@@ -1264,7 +1294,19 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}
 	}
 
-	players, err := assignRoles(joinOrder, labels)
+	// deal uses the starter's custom ratio when there is one and it still
+	// fits the (possibly shrunken) roster; otherwise it falls back to the
+	// fixed table, which is also the only safe option once unreachable
+	// players have been dropped and the custom ratio claims more seats than
+	// remain.
+	deal := func(order []string) (map[string]*player, error) {
+		if customRatio != nil && roleRatioTotal(*customRatio) <= len(order) {
+			return dealRoles(order, labels, *customRatio), nil
+		}
+		return assignRoles(order, labels)
+	}
+
+	players, err := deal(joinOrder)
 	if err != nil {
 		sendPlain("❌ Không thể chia vai trò: " + err.Error())
 		cmd.abortGameStillCurrent(s, channelID, seq)
@@ -1311,7 +1353,7 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 				return
 			}
 
-			reassigned, err := assignRoles(joinOrder, labels)
+			reassigned, err := deal(joinOrder)
 			if err != nil {
 				sendPlain("❌ Không thể chia lại vai trò: " + err.Error())
 				cmd.abortGameStillCurrent(s, channelID, seq)
@@ -1415,6 +1457,10 @@ func (cmd *WerewolfCommand) HandleComponent(s *discordgo.Session, i *discordgo.I
 		cmd.handleJoinLeave(s, i, strings.TrimPrefix(customID, werewolfLeaveID), false)
 	case strings.HasPrefix(customID, werewolfStartID):
 		cmd.handleStartGame(s, i, strings.TrimPrefix(customID, werewolfStartID))
+	case strings.HasPrefix(customID, werewolfRoleCountConfirmID):
+		cmd.handleRoleCountConfirm(s, i, strings.TrimPrefix(customID, werewolfRoleCountConfirmID))
+	case strings.HasPrefix(customID, werewolfRoleCountID):
+		cmd.handleRoleCountButton(s, i, strings.TrimPrefix(customID, werewolfRoleCountID))
 	case strings.HasPrefix(customID, werewolfCancelID):
 		cmd.handleCancelLobby(s, i, strings.TrimPrefix(customID, werewolfCancelID))
 	case strings.HasPrefix(customID, werewolfWolfTargetID):

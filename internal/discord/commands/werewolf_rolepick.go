@@ -2,7 +2,22 @@ package commands
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/rs/zerolog/log"
+)
+
+const (
+	werewolfRoleCountID        = "ww:rolecount:"
+	werewolfRoleCountConfirmID = "ww:rolecountconfirm:"
+
+	// roleEditTimeout is how long the starter has to confirm the manual
+	// role-count editor before the game falls back to the fixed table
+	// automatically.
+	roleEditTimeout = 5 * time.Minute
 )
 
 // roleCountWolfSideRoles and roleCountVillagerSideRoles are the manual-pick
@@ -120,4 +135,222 @@ func roleCountEditorContent(side string, counts map[role]int, playerCount int) s
 	}
 	fmt.Fprintf(&b, "\nTổng: %d/%d người · Điểm cân bằng: %d", total, playerCount, balanceScore(counts))
 	return b.String()
+}
+
+// roleCountButtonRows builds one editor message's component rows: the
+// given roles' -/+ buttons, two roles per row, plus a trailing confirm
+// row. customID encodes the sign ("inc"/"dec"), the role's int value, and
+// the channel ID, colon-separated after the werewolfRoleCountID prefix —
+// this is this codebase's first customID needing more than one encoded
+// field, so it's parsed with strings.SplitN rather than the simple
+// TrimPrefix-only pattern every other werewolf customID uses.
+func roleCountButtonRows(channelID string, roles []role, counts map[role]int, playerCount int) []discordgo.MessageComponent {
+	var rows []discordgo.MessageComponent
+	for start := 0; start < len(roles); start += 2 {
+		end := min(start+2, len(roles))
+		var buttons []discordgo.MessageComponent
+		for _, r := range roles[start:end] {
+			current := counts[r]
+			buttons = append(buttons,
+				discordgo.Button{
+					Label:    "➖ " + r.label(),
+					Style:    discordgo.SecondaryButton,
+					CustomID: fmt.Sprintf("%sdec:%d:%s", werewolfRoleCountID, int(r), channelID),
+					Disabled: current <= 0,
+				},
+				discordgo.Button{
+					Label:    "➕ " + r.label(),
+					Style:    discordgo.SecondaryButton,
+					CustomID: fmt.Sprintf("%sinc:%d:%s", werewolfRoleCountID, int(r), channelID),
+					Disabled: current >= roleCountMax(r, playerCount),
+				},
+			)
+		}
+		rows = append(rows, discordgo.ActionsRow{Components: buttons})
+	}
+	rows = append(rows, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.Button{
+				Label:    "✅ Xác nhận",
+				Style:    discordgo.SuccessButton,
+				CustomID: werewolfRoleCountConfirmID + channelID,
+			},
+		},
+	})
+	return rows
+}
+
+// sendRoleCountEditor sends the two ephemeral editor messages (visible
+// only to the starter) as followups to the "Bắt đầu" interaction, then
+// starts the abandon-timeout watchdog.
+func (cmd *WerewolfCommand) sendRoleCountEditor(s *discordgo.Session, interaction *discordgo.Interaction, channelID string, playerCount int, seq uint64) {
+	counts := map[role]int{}
+	if _, err := s.FollowupMessageCreate(interaction, true, &discordgo.WebhookParams{
+		Content:    roleCountEditorContent("wolf", counts, playerCount),
+		Components: roleCountButtonRows(channelID, roleCountWolfSideRoles, counts, playerCount),
+		Flags:      discordgo.MessageFlagsEphemeral,
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to send wolf-side role-count editor")
+	}
+	if _, err := s.FollowupMessageCreate(interaction, true, &discordgo.WebhookParams{
+		Content:    roleCountEditorContent("villager", counts, playerCount),
+		Components: roleCountButtonRows(channelID, roleCountVillagerSideRoles, counts, playerCount),
+		Flags:      discordgo.MessageFlagsEphemeral,
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to send villager-side role-count editor")
+	}
+
+	go cmd.waitForRoleCountConfirm(s, channelID, seq)
+}
+
+// waitForRoleCountConfirm polls until the starter confirms (game.Phase
+// leaves phaseRoleEdit some other way) or roleEditTimeout elapses. On
+// timeout, it performs the same phaseRoleEdit -> phasePreflight handoff
+// handleRoleCountConfirm performs, atomically, so only one of the two
+// ever actually starts startPreflight.
+func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channelID string, seq uint64) {
+	deadline := time.Now().Add(roleEditTimeout)
+	for {
+		var stillEditing bool
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			game := cmd.gameIfCurrent(channelID, seq)
+			stillEditing = game != nil && game.Phase == phaseRoleEdit
+		}()
+		if !stillEditing || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	var joinOrder []string
+	var labels map[string]string
+	var timedOut bool
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil || game.Phase != phaseRoleEdit {
+			return
+		}
+		timedOut = true
+		joinOrder = append([]string(nil), game.JoinOrder...)
+		labels = make(map[string]string, len(game.Players))
+		for id, p := range game.Players {
+			labels[id] = p.Label
+		}
+		game.Phase = phasePreflight
+	}()
+	if !timedOut {
+		return
+	}
+
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         "⏱️ Hết thời gian chọn vai trò tuỳ chỉnh, dùng bảng vai trò mặc định.",
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to post role-edit-timeout notice")
+	}
+	go cmd.startPreflight(s, channelID, joinOrder, labels, seq, nil)
+}
+
+func (cmd *WerewolfCommand) handleRoleCountButton(s *discordgo.Session, i *discordgo.InteractionCreate, remainder string) {
+	parts := strings.SplitN(remainder, ":", 3)
+	if len(parts) != 3 {
+		return
+	}
+	sign, roleStr, channelID := parts[0], parts[1], parts[2]
+	roleInt, err := strconv.Atoi(roleStr)
+	if err != nil {
+		return
+	}
+	r := role(roleInt)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseRoleEdit {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đã hết thời gian hoặc ván đã bắt đầu.")
+		return
+	}
+	if i.Member.User.ID != game.StarterID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được chọn.")
+		return
+	}
+	playerCount := len(game.JoinOrder)
+	current := game.PendingRoleCounts[r]
+	switch sign {
+	case "inc":
+		if current < roleCountMax(r, playerCount) {
+			game.PendingRoleCounts[r] = current + 1
+		}
+	case "dec":
+		if current > 0 {
+			game.PendingRoleCounts[r] = current - 1
+		}
+	}
+	counts := make(map[role]int, len(game.PendingRoleCounts))
+	for k, v := range game.PendingRoleCounts {
+		counts[k] = v
+	}
+	cmd.mu.Unlock()
+
+	side := "wolf"
+	roles := roleCountWolfSideRoles
+	for _, vr := range roleCountVillagerSideRoles {
+		if vr == r {
+			side, roles = "villager", roleCountVillagerSideRoles
+			break
+		}
+	}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    roleCountEditorContent(side, counts, playerCount),
+			Components: roleCountButtonRows(channelID, roles, counts, playerCount),
+		},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to update role-count editor")
+	}
+}
+
+func (cmd *WerewolfCommand) handleRoleCountConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseRoleEdit {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đã hết thời gian hoặc ván đã bắt đầu.")
+		return
+	}
+	if i.Member.User.ID != game.StarterID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được xác nhận.")
+		return
+	}
+	playerCount := len(game.JoinOrder)
+	if !roleCountConfirmValid(game.PendingRoleCounts, playerCount) {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Tổng số vai trò phải bằng số người chơi, và cần ít nhất 1 vai phe Sói và 1 vai phe Dân.")
+		return
+	}
+	ratio := roleRatioFromCounts(game.PendingRoleCounts)
+	joinOrder := append([]string(nil), game.JoinOrder...)
+	labels := make(map[string]string, len(game.Players))
+	for id, p := range game.Players {
+		labels[id] = p.Label
+	}
+	seq := game.Seq
+	game.Phase = phasePreflight
+	cmd.mu.Unlock()
+
+	respondComponentEphemeral(s, i, "✅ Đã xác nhận vai trò tuỳ chỉnh!")
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         "🐺 Đang chia vai trò và gửi tin nhắn riêng, chờ chút...",
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to post custom-roles-confirmed notice")
+	}
+	go cmd.startPreflight(s, channelID, joinOrder, labels, seq, &ratio)
 }

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1217,5 +1218,62 @@ func TestRoleCountEditorContentShowsCountsAndBalance(t *testing.T) {
 	villager := roleCountEditorContent("villager", counts, 5)
 	if !strings.Contains(villager, "Dân Làng") || !strings.Contains(villager, "3") {
 		t.Errorf("roleCountEditorContent(villager) = %q, want it to mention Dân Làng's count", villager)
+	}
+}
+
+func TestRoleCountButtonRowsShape(t *testing.T) {
+	counts := map[role]int{roleWerewolf: 1}
+	rows := roleCountButtonRows("chan1", roleCountWolfSideRoles, counts, 8)
+	if len(rows) != 3 {
+		t.Fatalf("wolf-side rows = %d, want 3 (2 button rows + confirm)", len(rows))
+	}
+	rows = roleCountButtonRows("chan1", roleCountVillagerSideRoles, counts, 8)
+	if len(rows) != 5 {
+		t.Fatalf("villager-side rows = %d, want 5 (4 button rows + confirm)", len(rows))
+	}
+	for idx, row := range rows {
+		ar, ok := row.(discordgo.ActionsRow)
+		if !ok {
+			t.Fatalf("row %d is %T, want discordgo.ActionsRow", idx, row)
+		}
+		if len(ar.Components) > 5 {
+			t.Errorf("row %d has %d components, Discord allows at most 5", idx, len(ar.Components))
+		}
+	}
+}
+
+func TestRoleCountButtonRowsDisablesAtBounds(t *testing.T) {
+	rows := roleCountButtonRows("c", []role{roleSeer}, map[role]int{roleSeer: 1}, 8)
+	buttons := rows[0].(discordgo.ActionsRow).Components
+	dec := buttons[0].(discordgo.Button)
+	inc := buttons[1].(discordgo.Button)
+	if dec.Disabled {
+		t.Error("dec button disabled at count 1, want enabled")
+	}
+	if !inc.Disabled {
+		t.Error("inc button enabled at Seer's max of 1, want disabled")
+	}
+
+	rows = roleCountButtonRows("c", []role{roleSeer}, map[role]int{}, 8)
+	buttons = rows[0].(discordgo.ActionsRow).Components
+	if !buttons[0].(discordgo.Button).Disabled {
+		t.Error("dec button enabled at count 0, want disabled")
+	}
+}
+
+func TestRoleCountCustomIDPrefixesDoNotCollide(t *testing.T) {
+	confirmID := werewolfRoleCountConfirmID + "12345"
+	if strings.HasPrefix(confirmID, werewolfRoleCountID) {
+		t.Errorf("%q must not match the %q prefix", confirmID, werewolfRoleCountID)
+	}
+	rows := roleCountButtonRows("999", []role{roleWerewolf}, map[role]int{}, 8)
+	inc := rows[0].(discordgo.ActionsRow).Components[1].(discordgo.Button)
+	remainder := strings.TrimPrefix(inc.CustomID, werewolfRoleCountID)
+	parts := strings.SplitN(remainder, ":", 3)
+	if len(parts) != 3 || parts[0] != "inc" || parts[2] != "999" {
+		t.Fatalf("customID %q parsed to %v, want [inc <role> 999]", inc.CustomID, parts)
+	}
+	if parts[1] != strconv.Itoa(int(roleWerewolf)) {
+		t.Errorf("encoded role = %q, want %d", parts[1], int(roleWerewolf))
 	}
 }
