@@ -119,7 +119,12 @@ func balanceScore(counts map[role]int) int {
 
 // roleCountConfirmValid mirrors the reference's setupValid: the total
 // count must exactly match playerCount, and both the wolf-side and
-// villager-side groupings must have at least one role counted.
+// villager-side groupings must have at least one role counted. It also
+// requires at least one actual wolf-vote-participant (Werewolf or Wolf
+// Cub) — Cursed Wolf and Traitor both count toward the wolf-side grouping
+// above but neither one ever votes in the wolf kill, so a wolf side made
+// up of only those two would leave the game with no wolf thread and no
+// possible kill, instantly resolving as a villager win.
 func roleCountConfirmValid(counts map[role]int, playerCount int) bool {
 	wolfSide, villagerSide := 0, 0
 	for _, r := range roleCountWolfSideRoles {
