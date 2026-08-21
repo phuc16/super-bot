@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -168,6 +169,83 @@ func (p *player) isWolf() bool {
 // time.
 func (p *player) wolfVoteParticipant() bool {
 	return p.isWolf() && p.Role != roleTraitor
+}
+
+// wolfRosterLabels returns the labels of every alive wolf-faction player
+// except the Traitor themself — this is what the Traitor's roster DM
+// shows them. A not-yet-converted Cursed Wolf is villager-faction, so
+// they're naturally excluded until conversion flips Faction to
+// factionWolf; no Role-based special-casing needed.
+func wolfRosterLabels(game *werewolfGame) []string {
+	var labels []string
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive && p.isWolf() && p.Role != roleTraitor {
+			labels = append(labels, p.Label)
+		}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+// wolfRosterChangeDM is what checkTraitorRosterChange hands back for the
+// caller to send after releasing cmd.mu.
+type wolfRosterChangeDM struct {
+	TraitorUserID string
+	Labels        []string
+}
+
+// checkTraitorRosterChange must be called with cmd.mu held, after any
+// wolf-faction membership change (a death by any cause, or a Cursed Wolf
+// conversion). Returns non-nil only when a live Traitor exists AND the
+// current wolf roster differs from the last one they were sent — updates
+// game.TraitorLastRosterLabels as a side effect, so a repeat call with no
+// further change is a cheap no-op. Safe to call unconditionally at the end
+// of every death-application site's locked section.
+func checkTraitorRosterChange(game *werewolfGame) *wolfRosterChangeDM {
+	traitors := alivePlayersOfRole(game, roleTraitor)
+	if len(traitors) == 0 {
+		return nil
+	}
+	labels := wolfRosterLabels(game)
+	if stringSlicesEqual(labels, game.TraitorLastRosterLabels) {
+		return nil
+	}
+	game.TraitorLastRosterLabels = labels
+	return &wolfRosterChangeDM{TraitorUserID: traitors[0].UserID, Labels: append([]string(nil), labels...)}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sendTraitorRosterDM sends dm's roster to the Traitor. No-op if dm is nil
+// (checkTraitorRosterChange found no live Traitor or no change) — every
+// call site can pass its result through unconditionally.
+func (cmd *WerewolfCommand) sendTraitorRosterDM(s *discordgo.Session, dm *wolfRosterChangeDM) {
+	if dm == nil {
+		return
+	}
+	channel, err := s.UserChannelCreate(dm.TraitorUserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for traitor roster update")
+		return
+	}
+	rosterText := "Không có Sói nào còn sống."
+	if len(dm.Labels) > 0 {
+		rosterText = strings.Join(dm.Labels, ", ")
+	}
+	if _, err := s.ChannelMessageSend(channel.ID, fmt.Sprintf("🎭 Danh sách Sói hiện tại: %s", rosterText)); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM traitor roster update")
+	}
 }
 
 // dealRoles shuffles a copy of joinOrder and deals roles per ratio, filling
@@ -351,6 +429,7 @@ type werewolfGame struct {
 	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
 	WolfBonusBiteNextNight        bool                           // armed when a Wolf Cub dies (any cause); consumed at the start of the next night's wolf-vote resolution to select 2 targets instead of 1
 	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2 if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a 2-target select-menu pick, reset each round in runNightPhase
+	TraitorLastRosterLabels       []string                       // the wolf roster the Traitor was last DMed, sorted — nil until their first DM; compared against on every wolf-faction membership change to avoid re-sending an unchanged roster
 	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
 	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor handlers against a late click landing during the Witch's stage-2 window. Does NOT gate Witch or Hunter handlers.
 	Votes                         map[string]string              // voterID -> targetID, reset each day
@@ -873,6 +952,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	leftPlayer := copyPlayer(p)
 	hunterRevenged := applyHunterRevengeChain(game, userID)
 	applyWolfCubBonusBiteFlag(game, append([]string{userID}, idsOf(hunterRevenged)...))
+	traitorDM := checkTraitorRosterChange(game)
 	if len(hunterRevenged) > 0 && len(game.History) > 0 {
 		game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
 	}
@@ -886,6 +966,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	for _, hp := range hunterRevenged {
 		removeFromAliveThread(s, aliveThreadID, hp.UserID)
 	}
+	cmd.sendTraitorRosterDM(s, traitorDM)
 	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
 
 	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
@@ -1224,6 +1305,7 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}
 	}
 
+	var initialTraitorDM *wolfRosterChangeDM
 	gameFound := func() bool {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -1233,11 +1315,13 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}
 		game.Players = players
 		game.JoinOrder = joinOrder
+		initialTraitorDM = checkTraitorRosterChange(game)
 		return true
 	}()
 	if !gameFound {
 		return
 	}
+	cmd.sendTraitorRosterDM(s, initialTraitorDM)
 
 	pingText, allowedMentions := pingOnce(joinOrder)
 	roleCounts := "" // best-effort: if this somehow errors, just omit the breakdown rather than failing the announcement

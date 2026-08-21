@@ -859,3 +859,58 @@ func TestWolfVoteParticipant(t *testing.T) {
 		t.Error("converted Cursed Wolf should be a wolf-vote participant")
 	}
 }
+
+func TestWolfRosterLabels(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"w1", "cub1", "traitor1", "cw1", "villager1"},
+		Players: map[string]*player{
+			"w1":        {UserID: "w1", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"cub1":      {UserID: "cub1", Label: "Cub", Role: roleWolfCub, Faction: factionWolf, Alive: true},
+			"traitor1":  {UserID: "traitor1", Label: "Trai", Role: roleTraitor, Faction: factionWolf, Alive: true},
+			"cw1":       {UserID: "cw1", Label: "CW", Role: roleCursedWolf, Faction: factionVillager, Alive: true},
+			"villager1": {UserID: "villager1", Label: "Vil", Role: roleVillager, Faction: factionVillager, Alive: true},
+		},
+	}
+	got := wolfRosterLabels(game)
+	want := []string{"Cub", "Wolf"} // sorted; excludes Traitor themself and the not-yet-converted Cursed Wolf
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("wolfRosterLabels() = %v, want %v", got, want)
+	}
+
+	// After conversion, the Cursed Wolf joins the roster.
+	game.Players["cw1"].Faction = factionWolf
+	got = wolfRosterLabels(game)
+	want = []string{"CW", "Cub", "Wolf"}
+	if len(got) != len(want) {
+		t.Fatalf("wolfRosterLabels() after conversion = %v, want %v", got, want)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Errorf("wolfRosterLabels() after conversion = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestCheckTraitorRosterChangeNoOpWhenUnchanged(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"w1", "traitor1"},
+		Players: map[string]*player{
+			"w1":       {UserID: "w1", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"traitor1": {UserID: "traitor1", Label: "Trai", Role: roleTraitor, Faction: factionWolf, Alive: true},
+		},
+	}
+	first := checkTraitorRosterChange(game)
+	if first == nil || first.TraitorUserID != "traitor1" || len(first.Labels) != 1 || first.Labels[0] != "Wolf" {
+		t.Fatalf("first checkTraitorRosterChange() = %+v, want a DM naming Wolf", first)
+	}
+	second := checkTraitorRosterChange(game)
+	if second != nil {
+		t.Errorf("second checkTraitorRosterChange() with no roster change = %+v, want nil", second)
+	}
+
+	game.Players["w1"].Alive = false
+	third := checkTraitorRosterChange(game)
+	if third == nil || len(third.Labels) != 0 {
+		t.Errorf("checkTraitorRosterChange() after the only wolf dies = %+v, want an empty-roster DM", third)
+	}
+}

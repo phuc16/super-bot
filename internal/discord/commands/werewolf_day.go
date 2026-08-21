@@ -205,6 +205,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		revealOnDeath  bool
 		summary        string
 		aliveThreadID  string
+		traitorDM      *wolfRosterChangeDM
 	)
 	func() {
 		cmd.mu.Lock()
@@ -246,6 +247,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		}
 		deadIDs = append(deadIDs, idsOf(hunterRevenged)...)
 		applyWolfCubBonusBiteFlag(game, deadIDs)
+		traitorDM = checkTraitorRosterChange(game)
 		revealOnDeath = game.RevealOnDeath
 		summary = aliveDeadSummary(game)
 
@@ -278,6 +280,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 	if !gameFound {
 		return
 	}
+	cmd.sendTraitorRosterDM(s, traitorDM)
 	if lynchedPlayer != nil {
 		removeFromAliveThread(s, aliveThreadID, lynchedPlayer.UserID)
 	}
@@ -329,6 +332,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		guildID         string
 		priorOverwrite  *discordgo.PermissionOverwrite
 		channelUnlocked bool
+		traitorDM       *wolfRosterChangeDM
 	)
 	func() {
 		cmd.mu.Lock()
@@ -355,6 +359,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, id)...)
 		}
 		applyWolfCubBonusBiteFlag(game, append(append([]string(nil), removedIDs...), idsOf(hunterRevenged)...))
+		traitorDM = checkTraitorRosterChange(game)
 		if len(hunterRevenged) > 0 && len(game.History) > 0 {
 			game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
 		}
@@ -379,6 +384,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		for _, p := range hunterRevenged {
 			removeFromAliveThread(s, aliveThreadID, p.UserID)
 		}
+		cmd.sendTraitorRosterDM(s, traitorDM)
 		if len(removedNames) > 0 {
 			cmd.announceAFKRemovals(s, channelID, removedNames)
 		}
