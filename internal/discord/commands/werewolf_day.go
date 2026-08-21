@@ -474,6 +474,8 @@ func formatRoundBlock(r roundLog) string {
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được bác sĩ cứu)", r.WolfTargetLabel)
 		case r.WitchSavedLabel != "":
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được phù thủy cứu)", r.WolfTargetLabel)
+		case r.CursedWolfConverted != "":
+			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (nhưng đã biến thành Sói Nguyền, không chết)", r.WolfTargetLabel)
 		default:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s", r.WolfTargetLabel)
 		}

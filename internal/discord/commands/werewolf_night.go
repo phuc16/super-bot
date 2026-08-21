@@ -259,6 +259,32 @@ func applyHunterRevengeChain(game *werewolfGame, deadID string) []*player {
 	return revenged
 }
 
+// wolfBiteOutcome is what happens to one wolf-vote target at resolution
+// time.
+type wolfBiteOutcome int
+
+const (
+	wolfBiteSpare wolfBiteOutcome = iota
+	wolfBiteKill
+	wolfBiteConvert
+)
+
+// resolveWolfBiteOutcome decides a single target's fate: spared (Doctor
+// protection or Witch heal covered them — no death, no conversion),
+// killed (the ordinary case), or converted (a not-saved Cursed Wolf
+// survives by flipping to wolf-faction instead of dying — spec §4c). Pure
+// — callers apply the actual Alive/Faction mutation themselves.
+func resolveWolfBiteOutcome(targetRole role, saved bool) wolfBiteOutcome {
+	switch {
+	case saved:
+		return wolfBiteSpare
+	case targetRole == roleCursedWolf:
+		return wolfBiteConvert
+	default:
+		return wolfBiteKill
+	}
+}
+
 // hunterRevengeLine renders the shared announcement line used wherever a
 // Hunter's locked-in target dies alongside them — resolveVote, handleLeave,
 // and announceHunterRevenge.
@@ -838,10 +864,17 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		saved := doctorSaved || witchHealed
 
 		var killedID string
-		if resolvedTarget != "" && !saved {
+		var cursedWolfConvertedLabel string
+		if resolvedTarget != "" {
 			if target, exists := game.Players[resolvedTarget]; exists && target.Alive {
-				target.Alive = false
-				killedID = resolvedTarget
+				switch resolveWolfBiteOutcome(target.Role, saved) {
+				case wolfBiteKill:
+					target.Alive = false
+					killedID = resolvedTarget
+				case wolfBiteConvert:
+					target.Faction = factionWolf
+					cursedWolfConvertedLabel = target.Label
+				}
 			}
 		}
 
@@ -888,6 +921,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			if poisonedPlayer != nil {
 				entry.WitchPoisonedLabel = poisonedPlayer.Label
 			}
+			entry.CursedWolfConverted = cursedWolfConvertedLabel
 			if len(hunterRevenged) > 0 {
 				entry.HunterRevengeLabel = hunterRevenged[0].Label
 			}

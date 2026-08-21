@@ -304,18 +304,19 @@ const (
 // Zero-value fields (a role that's already dead, or not in this game's
 // ratio) are omitted when rendering.
 type roundLog struct {
-	Round              int
-	WolfTargetLabel    string
-	WolfTargetSaved    bool
-	WolfVoteTied       bool
-	DoctorTargetLabel  string
-	SeerTargetLabel    string
-	SeerResult         role
-	VoteBreakdown      map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
-	LynchedLabel       string
-	HunterRevengeLabel string // who died from Hunter's revenge this round, "" if it didn't trigger
-	WitchSavedLabel    string // who the Witch healed this round, "" if she didn't heal
-	WitchPoisonedLabel string // who the Witch poisoned this round, "" if she didn't poison
+	Round               int
+	WolfTargetLabel     string
+	WolfTargetSaved     bool
+	WolfVoteTied        bool
+	DoctorTargetLabel   string
+	SeerTargetLabel     string
+	SeerResult          role
+	VoteBreakdown       map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
+	LynchedLabel        string
+	HunterRevengeLabel  string // who died from Hunter's revenge this round, "" if it didn't trigger
+	WitchSavedLabel     string // who the Witch healed this round, "" if she didn't heal
+	WitchPoisonedLabel  string // who the Witch poisoned this round, "" if she didn't poison
+	CursedWolfConverted string // label, if a not-saved Cursed Wolf converted to wolf-faction this round instead of dying
 }
 
 // werewolfGame tracks one in-progress Werewolf game for a single channel,

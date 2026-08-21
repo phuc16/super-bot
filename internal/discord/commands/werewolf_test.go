@@ -343,6 +343,38 @@ func TestFormatRoundBlockWolfVoteTiedWithPoisonNotContradictory(t *testing.T) {
 	}
 }
 
+func TestResolveWolfBiteOutcome(t *testing.T) {
+	cases := []struct {
+		name       string
+		targetRole role
+		saved      bool
+		want       wolfBiteOutcome
+	}{
+		{"villager, not saved, dies", roleVillager, false, wolfBiteKill},
+		{"villager, saved, spared", roleVillager, true, wolfBiteSpare},
+		{"cursed wolf, not saved, converts", roleCursedWolf, false, wolfBiteConvert},
+		{"cursed wolf, saved, spared (no conversion either)", roleCursedWolf, true, wolfBiteSpare},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveWolfBiteOutcome(c.targetRole, c.saved); got != c.want {
+				t.Errorf("resolveWolfBiteOutcome(%v, %v) = %v, want %v", c.targetRole, c.saved, got, c.want)
+			}
+		})
+	}
+}
+
+func TestFormatRoundBlockCursedWolfConverted(t *testing.T) {
+	r := roundLog{Round: 2, WolfTargetLabel: "Chi", CursedWolfConverted: "Chi"}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "biến thành Sói Nguyền") {
+		t.Errorf("formatRoundBlock() = %q, want it to mention the conversion", got)
+	}
+	if strings.Contains(got, "Chi đã chết") {
+		t.Errorf("formatRoundBlock() = %q, must not imply Chi died", got)
+	}
+}
+
 // TestWitchHasChoicePredicate exercises the same boolean formula used
 // (inline, under cmd.mu) in resolveNight to decide whether to prompt/wait
 // on the Witch at all. The formula itself is tightly coupled to the locked
