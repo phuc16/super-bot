@@ -150,6 +150,26 @@ func TestDealRolesAssignsDisruptor(t *testing.T) {
 	}
 }
 
+func TestDealRolesAssignsCupid(t *testing.T) {
+	joinOrder := []string{"u1", "u2", "u3"}
+	labels := map[string]string{"u1": "A", "u2": "B", "u3": "C"}
+	ratio := roleRatio{Werewolves: 1, Cupids: 1}
+	players := dealRoles(joinOrder, labels, ratio)
+
+	var cupidCount int
+	for _, p := range players {
+		if p.Role == roleCupid {
+			cupidCount++
+			if p.Faction != factionVillager {
+				t.Errorf("Cupid has faction %v, want factionVillager", p.Faction)
+			}
+		}
+	}
+	if cupidCount != 1 {
+		t.Errorf("dealRoles() dealt %d Cupids, want 1", cupidCount)
+	}
+}
+
 func TestCheckWinConditionOngoing(t *testing.T) {
 	players := map[string]*player{
 		"w1": {UserID: "w1", Role: roleWerewolf, Faction: factionWolf, Alive: true},

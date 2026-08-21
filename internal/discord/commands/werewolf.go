@@ -36,6 +36,7 @@ type roleRatio struct {
 	WolfCubs     int
 	CursedWolves int
 	Traitors     int
+	Cupids       int
 }
 
 // rolesForPlayerCount returns the role ratio for a given player count, or an
@@ -258,6 +259,7 @@ func dealRoles(joinOrder []string, labels map[string]string, ratio roleRatio) ma
 	assign(ratio.Witches, roleWitch)
 	assign(ratio.Hunters, roleHunter)
 	assign(ratio.Disruptors, roleDisruptor)
+	assign(ratio.Cupids, roleCupid)
 	for ; idx < len(shuffled); idx++ {
 		id := shuffled[idx]
 		players[id] = &player{UserID: id, Label: labels[id], Role: roleVillager, Faction: factionForRole(roleVillager), Alive: true}
