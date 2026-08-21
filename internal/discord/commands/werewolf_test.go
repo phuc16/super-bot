@@ -1133,3 +1133,89 @@ func TestWerewolfDefinitionHasCustomRolesOption(t *testing.T) {
 		t.Error("'start' subcommand is missing a boolean 'custom-roles' option")
 	}
 }
+
+func TestRoleCountMax(t *testing.T) {
+	cases := []struct {
+		r    role
+		want int
+	}{
+		{roleSeer, 1},
+		{roleDoctor, 1},
+		{roleWitch, 1},
+		{roleHunter, 1},
+		{roleDisruptor, 1},
+		{roleCupid, 1},
+		{roleTraitor, 1},
+		{roleWerewolf, 12},
+		{roleWolfCub, 12},
+		{roleCursedWolf, 12},
+		{roleVillager, 12},
+	}
+	for _, c := range cases {
+		if got := roleCountMax(c.r, 12); got != c.want {
+			t.Errorf("roleCountMax(%v, 12) = %d, want %d", c.r, got, c.want)
+		}
+	}
+}
+
+func TestBalanceScore(t *testing.T) {
+	counts := map[role]int{roleWerewolf: 2, roleVillager: 3, roleSeer: 1}
+	want := rolePoints[roleWerewolf]*2 + rolePoints[roleVillager]*3 + rolePoints[roleSeer]*1
+	if got := balanceScore(counts); got != want {
+		t.Errorf("balanceScore() = %d, want %d", got, want)
+	}
+}
+
+func TestRoleCountConfirmValid(t *testing.T) {
+	cases := []struct {
+		name        string
+		counts      map[role]int
+		playerCount int
+		want        bool
+	}{
+		{"exact total, both sides present", map[role]int{roleWerewolf: 2, roleVillager: 5}, 7, true},
+		{"total too low", map[role]int{roleWerewolf: 2, roleVillager: 3}, 7, false},
+		{"total too high", map[role]int{roleWerewolf: 2, roleVillager: 6}, 7, false},
+		{"no wolf side", map[role]int{roleVillager: 7}, 7, false},
+		{"no villager side", map[role]int{roleWerewolf: 7}, 7, false},
+		{"cursed wolf counts as wolf-side", map[role]int{roleCursedWolf: 1, roleVillager: 6}, 7, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := roleCountConfirmValid(c.counts, c.playerCount); got != c.want {
+				t.Errorf("roleCountConfirmValid(%v, %d) = %v, want %v", c.counts, c.playerCount, got, c.want)
+			}
+		})
+	}
+}
+
+func TestRoleRatioFromCounts(t *testing.T) {
+	counts := map[role]int{
+		roleWerewolf: 3, roleWolfCub: 1, roleCursedWolf: 1, roleTraitor: 1,
+		roleSeer: 1, roleDoctor: 1, roleWitch: 1, roleHunter: 1, roleDisruptor: 1, roleCupid: 1,
+		roleVillager: 4,
+	}
+	got := roleRatioFromCounts(counts)
+	want := roleRatio{
+		Werewolves: 3, WolfCubs: 1, CursedWolves: 1, Traitors: 1,
+		Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1, Cupids: 1,
+	}
+	if got != want {
+		t.Errorf("roleRatioFromCounts() = %+v, want %+v (roleVillager count is intentionally absent — dealRoles fills the remainder)", got, want)
+	}
+}
+
+func TestRoleCountEditorContentShowsCountsAndBalance(t *testing.T) {
+	counts := map[role]int{roleWerewolf: 2, roleVillager: 3}
+	got := roleCountEditorContent("wolf", counts, 5)
+	if !strings.Contains(got, "Ma Sói") || !strings.Contains(got, "2") {
+		t.Errorf("roleCountEditorContent(wolf) = %q, want it to mention Ma Sói's count", got)
+	}
+	if !strings.Contains(got, "5") {
+		t.Errorf("roleCountEditorContent(wolf) = %q, want the player-count total to appear", got)
+	}
+	villager := roleCountEditorContent("villager", counts, 5)
+	if !strings.Contains(villager, "Dân Làng") || !strings.Contains(villager, "3") {
+		t.Errorf("roleCountEditorContent(villager) = %q, want it to mention Dân Làng's count", villager)
+	}
+}
