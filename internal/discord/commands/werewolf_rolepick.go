@@ -128,7 +128,8 @@ func roleCountConfirmValid(counts map[role]int, playerCount int) bool {
 	for _, r := range roleCountVillagerSideRoles {
 		villagerSide += counts[r]
 	}
-	return wolfSide+villagerSide == playerCount && wolfSide >= 1 && villagerSide >= 1
+	wolfVoteParticipants := counts[roleWerewolf] + counts[roleWolfCub]
+	return wolfSide+villagerSide == playerCount && wolfSide >= 1 && villagerSide >= 1 && wolfVoteParticipants >= 1
 }
 
 // roleRatioFromCounts converts the editor's counts into a roleRatio for

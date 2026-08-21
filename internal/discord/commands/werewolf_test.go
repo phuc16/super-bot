@@ -1235,7 +1235,8 @@ func TestRoleCountConfirmValid(t *testing.T) {
 		{"total too high", map[role]int{roleWerewolf: 2, roleVillager: 6}, 7, false},
 		{"no wolf side", map[role]int{roleVillager: 7}, 7, false},
 		{"no villager side", map[role]int{roleWerewolf: 7}, 7, false},
-		{"cursed wolf counts as wolf-side", map[role]int{roleCursedWolf: 1, roleVillager: 6}, 7, true},
+		{"cursed wolf alone is not enough — no wolf-vote-participant", map[role]int{roleCursedWolf: 1, roleVillager: 6}, 7, false},
+		{"werewolf plus cursed wolf is valid", map[role]int{roleWerewolf: 1, roleCursedWolf: 1, roleVillager: 5}, 7, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1243,6 +1244,37 @@ func TestRoleCountConfirmValid(t *testing.T) {
 				t.Errorf("roleCountConfirmValid(%v, %d) = %v, want %v", c.counts, c.playerCount, got, c.want)
 			}
 		})
+	}
+}
+
+func TestOneOfEachSpecialRoleConfirmsAndDeals(t *testing.T) {
+	counts := map[role]int{
+		roleWerewolf: 1, roleWolfCub: 1,
+		roleSeer: 1, roleDoctor: 1, roleWitch: 1, roleHunter: 1, roleDisruptor: 1, roleCupid: 1, roleTraitor: 1,
+		roleVillager: 3,
+	}
+	const playerCount = 12
+	if !roleCountConfirmValid(counts, playerCount) {
+		t.Fatalf("roleCountConfirmValid(%v, %d) = false, want true", counts, playerCount)
+	}
+	ratio := roleRatioFromCounts(counts)
+
+	joinOrder := make([]string, playerCount)
+	labels := make(map[string]string, playerCount)
+	for i := range joinOrder {
+		joinOrder[i] = fmt.Sprintf("u%d", i)
+		labels[joinOrder[i]] = fmt.Sprintf("Player%d", i)
+	}
+	players := dealRoles(joinOrder, labels, ratio)
+
+	dealtCounts := make(map[role]int)
+	for _, p := range players {
+		dealtCounts[p.Role]++
+	}
+	for r, want := range counts {
+		if got := dealtCounts[r]; got != want {
+			t.Errorf("dealt %d of role %v, want %d", got, r, want)
+		}
 	}
 }
 
