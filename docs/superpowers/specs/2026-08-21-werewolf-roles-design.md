@@ -73,7 +73,7 @@ Revised per-round flow:
 
 Today's `handleWolfTarget` is first-click-wins: whoever votes first locks the pack's target for the round, and other wolves' differing clicks are silently rejected. With player counts going up to 20 (packs of 4-6+ wolves), this stops being fair. Replace it with a real plurality vote:
 
-- `game.WolfVotes map[string]string` (wolf userID → target userID), replacing the single `game.NightTarget string`. Any wolf can vote or change their vote any time before the deadline (`handleWolfTarget` always overwrites, never rejects a re-vote).
+- `game.WolfVotes map[string]string` (wolf userID → target userID), replacing the single `game.NightTarget string`. Each wolf votes **once** per round — `handleWolfTarget` rejects a second vote from the same wolf (ephemeral "you've already voted this round") rather than letting them overwrite it. This is a deliberate correction from an earlier draft that allowed re-voting: with changeable votes, the night could fast-forward to a premature tie the instant every wolf cast a first (disagreeing) vote, with no time left to actually coordinate — since wolves already share a private thread and can discuss in plain text before voting, "discuss first, vote once" is both simpler and produces fewer accidental no-kill nights than "vote now, maybe reconsider later."
 - After every vote, the bot edits a single message in the wolf thread (the same message the target-select menu is attached to) to show a live breakdown: per-target vote count, and a per-wolf list of who's currently voted for whom — matching the reference's transparency level, but scoped to the private wolf thread instead of a shared screen, so nothing leaks outside it.
 - At resolution: tally `game.WolfVotes`. The target(s) with the most votes win — normally 1 target, or 2 if the Wolf-Cub bonus bite is active this round (section 4b's flag), in which case the top 2 distinct targets by vote count are both attacked.
 - **Tie handling:** if the top vote count is shared by more than the number of targets needed (i.e., a genuine tie for the last kill slot), that slot produces no kill — consistent with how the existing day-lynch vote already treats ties as "nobody dies." (With the normal 1-target case, any tie for first place means no kill at all that night.)
@@ -108,7 +108,7 @@ Every night, as each acting role finishes deciding, the bot posts a short, ident
 
 "Decided" is the same moment each role's *existing* private confirmation already fires, so this is one extra `ChannelMessageSendComplex` call (`AllowedMentions: &discordgo.MessageAllowedMentions{}`, no mentions in the text) added alongside each role's current ephemeral/DM confirmation, not a new tracking mechanism:
 
-- **Wolf pack:** since votes are changeable anytime (section 4a), there's no single "locked" moment anymore — post once, the moment every alive wolf has cast at least one vote (i.e., the same condition `nightActionsComplete` now uses for the wolf-vote-complete check). Not re-posted if a wolf changes their vote afterward.
+- **Wolf pack:** posted once, the moment every alive wolf has cast their (single, final) vote — the same condition `nightActionsComplete` uses for the wolf-vote-complete check.
 - **Seer:** on `handleSeerCheck` success.
 - **Guard:** on `handleDoctorProtect`/Guard-equivalent success.
 - **Witch:** on her explicit confirm (heal / poison / "không làm gì" — any of the three finalizes and posts).
