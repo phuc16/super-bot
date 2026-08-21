@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -27,6 +28,94 @@ const (
 // private thread, given how many wolves are alive this round.
 func wolfDiscussWindowFor(wolfCount int) time.Duration {
 	return wolfDiscussBase + wolfDiscussPerWolf*time.Duration(wolfCount)
+}
+
+// tallyWolfVotes resolves the wolf pack's plurality vote into up to topN
+// kill targets. Targets are picked one slot at a time, highest remaining
+// vote count first; a genuine tie for a slot (two or more targets sharing
+// the highest remaining count, when only one slot is left to fill) drops
+// that slot entirely rather than picking arbitrarily — consistent with how
+// the existing day-lynch vote already treats ties as "nobody dies." ok is
+// false only when there were no votes at all, or the very first slot ties.
+func tallyWolfVotes(votes map[string]string, topN int) (targets []string, ok bool) {
+	counts := make(map[string]int)
+	for _, target := range votes {
+		counts[target]++
+	}
+	if len(counts) == 0 {
+		return nil, false
+	}
+
+	remaining := make(map[string]int, len(counts))
+	for target, c := range counts {
+		remaining[target] = c
+	}
+
+	for len(targets) < topN && len(remaining) > 0 {
+		max := 0
+		for _, c := range remaining {
+			if c > max {
+				max = c
+			}
+		}
+		var tied []string
+		for target, c := range remaining {
+			if c == max {
+				tied = append(tied, target)
+			}
+		}
+		if len(tied) > 1 {
+			// Tie for this slot: it's dropped, and no lower-count target
+			// can un-tie it, so stop entirely rather than continuing to a
+			// slot that would out-rank a tied target.
+			break
+		}
+		targets = append(targets, tied[0])
+		delete(remaining, tied[0])
+	}
+
+	return targets, len(targets) > 0
+}
+
+// wolfVoteSummary renders the live per-target vote count and per-wolf
+// current pick, shown (and re-edited on every vote) inside the private wolf
+// thread so the pack can coordinate openly with each other — nothing here
+// is ever posted outside that thread.
+func wolfVoteSummary(votes map[string]string, wolves, targets []*player) string {
+	labelByID := make(map[string]string, len(targets))
+	for _, t := range targets {
+		labelByID[t.UserID] = t.Label
+	}
+
+	counts := make(map[string]int)
+	for _, targetID := range votes {
+		counts[targetID]++
+	}
+
+	var b strings.Builder
+	b.WriteString("**Số phiếu:**")
+	if len(counts) == 0 {
+		b.WriteString(" chưa có phiếu nào.")
+	} else {
+		for _, t := range targets {
+			if c := counts[t.UserID]; c > 0 {
+				fmt.Fprintf(&b, "\n%s: %d phiếu", t.Label, c)
+			}
+		}
+	}
+
+	b.WriteString("\n\n**Lượt chọn:**")
+	for _, w := range wolves {
+		pick := "Chưa chọn"
+		if targetID, voted := votes[w.UserID]; voted {
+			if label, ok := labelByID[targetID]; ok {
+				pick = label
+			}
+		}
+		fmt.Fprintf(&b, "\n%s: %s", w.Label, pick)
+	}
+
+	return b.String()
 }
 
 func alivePlayersOfRole(game *werewolfGame, r role) []*player {
@@ -92,6 +181,14 @@ func copyPlayers(ps []*player) []*player {
 	return out
 }
 
+func idsOf(ps []*player) []string {
+	ids := make([]string, len(ps))
+	for idx, p := range ps {
+		ids[idx] = p.UserID
+	}
+	return ids
+}
+
 // runNightPhase resets this round's night state, opens the wolf thread and
 // seer/doctor DMs, waits for actions (or the timer), then resolves the night.
 func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string, seq uint64) {
@@ -118,7 +215,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		gameFound = true
 		game.Phase = phaseNight
 		game.Round++
-		game.NightTarget = ""
+		game.WolfVotes = make(map[string]string)
 		game.SeerActed = false
 		game.SeerTarget = ""
 		game.SeerResult = roleVillager
@@ -218,18 +315,28 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 		}
 	}
 
-	wolfIDs := make([]string, len(wolves))
-	for idx, w := range wolves {
-		wolfIDs[idx] = w.UserID
-	}
-	pingText, allowedMentions := pingOnce(wolfIDs)
-	if _, err := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🐺 %s Chọn mục tiêu để tấn công đêm nay. Lượt chọn đầu tiên sẽ được tính.", pingText),
+	pingText, allowedMentions := pingOnce(idsOf(wolves))
+	content := fmt.Sprintf(
+		"🐺 %s Chọn mục tiêu để tấn công đêm nay. Có thể đổi phiếu bất cứ lúc nào trước khi hết giờ.\n\n%s",
+		pingText, wolfVoteSummary(nil, wolves, targets),
+	)
+	msg, err := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
+		Content:         content,
 		Components:      targetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets),
 		AllowedMentions: allowedMentions,
-	}); err != nil {
+	})
+	if err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post wolf target select")
+		return
 	}
+
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+			g.WolfTargetMessageID = msg.ID
+		}
+	}()
 }
 
 // dmWolvesIndependently is the fallback when the wolf thread can't be
@@ -280,8 +387,13 @@ func (cmd *WerewolfCommand) dmDoctorPrompt(s *discordgo.Session, channelID strin
 }
 
 func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
-	if len(alivePlayersOfRole(game, roleWerewolf)) > 0 && game.NightTarget == "" {
-		return false
+	wolves := alivePlayersOfRole(game, roleWerewolf)
+	if len(wolves) > 0 {
+		for _, w := range wolves {
+			if _, voted := game.WolfVotes[w.UserID]; !voted {
+				return false
+			}
+		}
 	}
 	if len(alivePlayersOfRole(game, roleSeer)) > 0 && !game.SeerActed {
 		return false
@@ -352,9 +464,12 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		gameFound = true
 		aliveThreadID = game.AliveThreadID
 
+		wolfTargets, _ := tallyWolfVotes(game.WolfVotes, 1)
 		wolfTargetLabel := ""
-		if game.NightTarget != "" {
-			if target, exists := game.Players[game.NightTarget]; exists {
+		var resolvedTarget string
+		if len(wolfTargets) > 0 {
+			resolvedTarget = wolfTargets[0]
+			if target, exists := game.Players[resolvedTarget]; exists {
 				wolfTargetLabel = target.Label
 			}
 		}
@@ -366,22 +481,21 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		}
 
 		var killedID string
-		if game.NightTarget != "" {
-			if game.NightTarget == game.DoctorProtect {
+		if resolvedTarget != "" {
+			if resolvedTarget == game.DoctorProtect {
 				saved = true
-			} else if target, exists := game.Players[game.NightTarget]; exists && target.Alive {
+			} else if target, exists := game.Players[resolvedTarget]; exists && target.Alive {
 				target.Alive = false
-				killedID = game.NightTarget
+				killedID = resolvedTarget
 			}
 		}
 
-		if game.NightTarget == "" {
-			for _, w := range alivePlayersOfRole(game, roleWerewolf) {
-				game.AFKStrikes[w.UserID]++
-			}
-		} else {
-			for _, w := range alivePlayersOfRole(game, roleWerewolf) {
+		wolves := alivePlayersOfRole(game, roleWerewolf)
+		for _, w := range wolves {
+			if _, voted := game.WolfVotes[w.UserID]; voted {
 				game.AFKStrikes[w.UserID] = 0
+			} else {
+				game.AFKStrikes[w.UserID]++
 			}
 		}
 		for _, p := range alivePlayersOfRole(game, roleSeer) {
@@ -467,6 +581,8 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	targetID := values[0]
 	clickerID := interactionUserID(i)
 
+	var threadID, messageID string
+	var wolves, targets []*player
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
 	if !ok || game.Phase != phaseNight {
@@ -485,18 +601,36 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
 		return
 	}
-	alreadyLocked := game.NightTarget != ""
-	if !alreadyLocked {
-		game.NightTarget = targetID
+	game.WolfVotes[clickerID] = targetID
+	threadID = game.WolfThreadID
+	messageID = game.WolfTargetMessageID
+	wolves = copyPlayers(alivePlayersOfRole(game, roleWerewolf))
+	targets = copyPlayers(aliveNonWolves(game))
+	votesCopy := make(map[string]string, len(game.WolfVotes))
+	for k, v := range game.WolfVotes {
+		votesCopy[k] = v
 	}
-	locked := game.NightTarget
 	cmd.mu.Unlock()
 
-	if alreadyLocked {
-		respondComponentEphemeralMentioned(s, i, fmt.Sprintf("Cả bầy đã chốt mục tiêu: <@%s>.", locked))
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Bạn đã chọn: <@%s>. Có thể đổi lại bất cứ lúc nào.", targetID))
+
+	if threadID == "" || messageID == "" {
 		return
 	}
-	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chốt mục tiêu: <@%s>.", targetID))
+	summary := wolfVoteSummary(votesCopy, wolves, targets)
+	pingText, allowedMentions := pingOnce(idsOf(wolves))
+	content := fmt.Sprintf(
+		"🐺 %s Chọn mục tiêu để tấn công đêm nay. Có thể đổi phiếu bất cứ lúc nào trước khi hết giờ.\n\n%s",
+		pingText, summary,
+	)
+	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:         threadID,
+		ID:              messageID,
+		Content:         &content,
+		AllowedMentions: allowedMentions,
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to update wolf vote summary")
+	}
 }
 
 func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {

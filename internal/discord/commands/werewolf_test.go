@@ -354,3 +354,66 @@ func TestRolePointsCoversEveryRole(t *testing.T) {
 		}
 	}
 }
+
+func TestTallyWolfVotesSingleWinner(t *testing.T) {
+	votes := map[string]string{"wolf1": "x", "wolf2": "x", "wolf3": "y"}
+	targets, ok := tallyWolfVotes(votes, 1)
+	if !ok {
+		t.Fatal("expected ok=true (no tie)")
+	}
+	if len(targets) != 1 || targets[0] != "x" {
+		t.Errorf("got %v, want [x]", targets)
+	}
+}
+
+func TestTallyWolfVotesTieProducesNoKill(t *testing.T) {
+	votes := map[string]string{"wolf1": "x", "wolf2": "y"}
+	_, ok := tallyWolfVotes(votes, 1)
+	if ok {
+		t.Fatal("expected ok=false on a genuine tie for the only kill slot")
+	}
+}
+
+func TestTallyWolfVotesEmpty(t *testing.T) {
+	targets, ok := tallyWolfVotes(map[string]string{}, 1)
+	if ok || len(targets) != 0 {
+		t.Errorf("expected ok=false and no targets for empty votes, got targets=%v ok=%v", targets, ok)
+	}
+}
+
+func TestTallyWolfVotesTopTwo(t *testing.T) {
+	// x:3, y:2, z:1 -- top 2 by count are x and y, no tie for either slot.
+	votes := map[string]string{
+		"wolf1": "x", "wolf2": "x", "wolf3": "x",
+		"wolf4": "y", "wolf5": "y",
+		"wolf6": "z",
+	}
+	targets, ok := tallyWolfVotes(votes, 2)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %v", targets)
+	}
+	got := map[string]bool{targets[0]: true, targets[1]: true}
+	if !got["x"] || !got["y"] {
+		t.Errorf("expected targets to be {x, y}, got %v", targets)
+	}
+}
+
+func TestTallyWolfVotesTopTwoWithTieForSecondSlot(t *testing.T) {
+	// x:2 (clear first), y:1, z:1 (tied for the second slot) -- x is a kill,
+	// the second slot ties and produces no second kill.
+	votes := map[string]string{
+		"wolf1": "x", "wolf2": "x",
+		"wolf3": "y",
+		"wolf4": "z",
+	}
+	targets, ok := tallyWolfVotes(votes, 2)
+	if !ok {
+		t.Fatal("expected ok=true (first slot is unambiguous)")
+	}
+	if len(targets) != 1 || targets[0] != "x" {
+		t.Errorf("expected only [x] (second slot tied, dropped), got %v", targets)
+	}
+}
