@@ -317,6 +317,9 @@ type roundLog struct {
 	WitchSavedLabel     string // who the Witch healed this round, "" if she didn't heal
 	WitchPoisonedLabel  string // who the Witch poisoned this round, "" if she didn't poison
 	CursedWolfConverted string // label, if a not-saved Cursed Wolf converted to wolf-faction this round instead of dying
+
+	WolfBonusBite        bool     // this round used the Wolf-Cub 2-target bite
+	WolfBiteOutcomeLines []string // one pre-formatted line per resolved target this round, used only when WolfBonusBite is true — see formatRoundBlock
 }
 
 // werewolfGame tracks one in-progress Werewolf game for a single channel,
@@ -346,6 +349,8 @@ type werewolfGame struct {
 	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round
 	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
 	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
+	WolfBonusBiteNextNight        bool                           // armed when a Wolf Cub dies (any cause); consumed at the start of the next night's wolf-vote resolution to select 2 targets instead of 1
+	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2 if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a 2-target select-menu pick, reset each round in runNightPhase
 	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
 	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor handlers against a late click landing during the Witch's stage-2 window. Does NOT gate Witch or Hunter handlers.
 	Votes                         map[string]string              // voterID -> targetID, reset each day
@@ -867,6 +872,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	p.Alive = false
 	leftPlayer := copyPlayer(p)
 	hunterRevenged := applyHunterRevengeChain(game, userID)
+	applyWolfCubBonusBiteFlag(game, append([]string{userID}, idsOf(hunterRevenged)...))
 	if len(hunterRevenged) > 0 && len(game.History) > 0 {
 		game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
 	}

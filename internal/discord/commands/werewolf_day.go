@@ -240,6 +240,12 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		if lynchedPlayer != nil {
 			hunterRevenged = applyHunterRevengeChain(game, lynchedPlayer.UserID)
 		}
+		var deadIDs []string
+		if lynchedPlayer != nil {
+			deadIDs = append(deadIDs, lynchedPlayer.UserID)
+		}
+		deadIDs = append(deadIDs, idsOf(hunterRevenged)...)
+		applyWolfCubBonusBiteFlag(game, deadIDs)
 		revealOnDeath = game.RevealOnDeath
 		summary = aliveDeadSummary(game)
 
@@ -348,6 +354,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		for _, id := range removedIDs {
 			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, id)...)
 		}
+		applyWolfCubBonusBiteFlag(game, append(append([]string(nil), removedIDs...), idsOf(hunterRevenged)...))
 		if len(hunterRevenged) > 0 && len(game.History) > 0 {
 			game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
 		}
@@ -466,7 +473,12 @@ func formatRoundBlock(r roundLog) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n\n**Đêm/Ngày %d:**", r.Round)
 	poisoned := r.WitchPoisonedLabel != ""
-	if r.WolfTargetLabel != "" {
+	if r.WolfBonusBite && len(r.WolfBiteOutcomeLines) > 0 {
+		b.WriteString("\n🐺🐺 Sói cắn 2 mục tiêu (Sói Con đã ngã xuống đêm trước):")
+		for _, line := range r.WolfBiteOutcomeLines {
+			fmt.Fprintf(&b, "\n%s", line)
+		}
+	} else if r.WolfTargetLabel != "" {
 		switch {
 		case r.WolfTargetSaved && poisoned:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được bác sĩ cứu, nhưng đêm đó vẫn có người chết vì trúng độc)", r.WolfTargetLabel)

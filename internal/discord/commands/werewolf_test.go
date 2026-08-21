@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bwmarrin/discordgo"
 )
 
 func TestRolesForPlayerCount(t *testing.T) {
@@ -398,15 +400,15 @@ func TestWitchHasChoicePredicate(t *testing.T) {
 		{true, true, false},
 	}
 	for _, c := range cases {
-		resolvedTarget := ""
-		biteTargetID := ""
+		var resolvedTargets []string
+		var biteTargets []*player
 		if c.hasBite {
-			resolvedTarget = "u2"
-			biteTargetID = "u2"
+			resolvedTargets = []string{"u2"}
+			biteTargets = []*player{someTarget}
 		}
-		hasChoice := !c.poisonUsed || (!c.healUsed && resolvedTarget != "")
+		hasChoice := !c.poisonUsed || (!c.healUsed && len(resolvedTargets) > 0)
 
-		_ = witchActionComponents("chan", biteTargetID, c.healUsed, c.poisonUsed, []*player{someTarget})
+		_ = witchActionComponents("chan", biteTargets, c.healUsed, c.poisonUsed, []*player{someTarget})
 		rendersPoisonRow := !c.poisonUsed
 		rendersHealButton := c.hasBite && !c.healUsed
 		wouldRenderChoice := rendersPoisonRow || rendersHealButton
@@ -647,6 +649,89 @@ func TestAssignRolesDealsWitchAndHunterAt11Players(t *testing.T) {
 	}
 	if counts[roleHunter] != 1 {
 		t.Errorf("expected exactly 1 Hunter at 11 players, got %d", counts[roleHunter])
+	}
+}
+
+func TestApplyWolfCubBonusBiteFlag(t *testing.T) {
+	game := &werewolfGame{
+		Players: map[string]*player{
+			"cub":  {UserID: "cub", Role: roleWolfCub},
+			"wolf": {UserID: "wolf", Role: roleWerewolf},
+		},
+	}
+	applyWolfCubBonusBiteFlag(game, []string{"wolf"})
+	if game.WolfBonusBiteNextNight {
+		t.Error("a plain Werewolf's death must not arm the bonus bite")
+	}
+	applyWolfCubBonusBiteFlag(game, []string{"wolf", "cub"})
+	if !game.WolfBonusBiteNextNight {
+		t.Error("a Wolf Cub's death must arm the bonus bite")
+	}
+	applyWolfCubBonusBiteFlag(game, []string{"wolf"})
+	if !game.WolfBonusBiteNextNight {
+		t.Error("the flag must be additive — a later non-Cub death must not clear it")
+	}
+}
+
+func TestFormatRoundBlockWolfBonusBite(t *testing.T) {
+	r := roundLog{
+		Round:                3,
+		WolfBonusBite:        true,
+		WolfBiteOutcomeLines: []string{"An: chết", "Binh: được Bác Sĩ cứu"},
+	}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "An: chết") || !strings.Contains(got, "Binh: được Bác Sĩ cứu") {
+		t.Errorf("formatRoundBlock() = %q, want both outcome lines present", got)
+	}
+}
+
+func TestTallyWolfVotesTopTwoUnanimousYieldsOne(t *testing.T) {
+	// Bonus bite armed but the pack agrees: only one distinct target, so the
+	// round must fall back to the ordinary single-target path.
+	targets, ok := tallyWolfVotes(map[string]string{"w1": "a", "w2": "a"}, 2)
+	if !ok || len(targets) != 1 || targets[0] != "a" {
+		t.Fatalf("unanimous tallyWolfVotes(topN=2) = %v, %v; want [a], true", targets, ok)
+	}
+}
+
+func TestWitchActionComponentsHealControlShape(t *testing.T) {
+	a := &player{UserID: "a", Label: "An"}
+	b := &player{UserID: "b", Label: "Binh"}
+	poison := []*player{a, b}
+
+	countHealControls := func(rows []discordgo.MessageComponent) (buttons, menus int) {
+		for _, row := range rows {
+			ar, isRow := row.(discordgo.ActionsRow)
+			if !isRow {
+				continue
+			}
+			for _, c := range ar.Components {
+				switch v := c.(type) {
+				case discordgo.Button:
+					if v.CustomID == werewolfWitchHealID+"chan" {
+						buttons++
+					}
+				case discordgo.SelectMenu:
+					if v.CustomID == werewolfWitchHealID+"chan" {
+						menus++
+					}
+				}
+			}
+		}
+		return buttons, menus
+	}
+
+	btns, menus := countHealControls(witchActionComponents("chan", []*player{a}, false, false, poison))
+	if btns != 1 || menus != 0 {
+		t.Errorf("one bite target: got %d heal buttons, %d heal menus; want 1, 0", btns, menus)
+	}
+	btns, menus = countHealControls(witchActionComponents("chan", []*player{a, b}, false, false, poison))
+	if btns != 0 || menus != 1 {
+		t.Errorf("two bite targets: got %d heal buttons, %d heal menus; want 0, 1", btns, menus)
+	}
+	btns, menus = countHealControls(witchActionComponents("chan", []*player{a, b}, true, false, poison))
+	if btns != 0 || menus != 0 {
+		t.Errorf("two bite targets with heal used: got %d heal buttons, %d heal menus; want 0, 0", btns, menus)
 	}
 }
 

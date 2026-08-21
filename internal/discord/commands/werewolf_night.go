@@ -43,11 +43,10 @@ func wolfDiscussWindowFor(wolfCount int) time.Duration {
 // kill targets. Targets are picked one slot at a time, highest remaining
 // vote count first. The moment any slot's fill produces a tie among the
 // remaining candidates, that slot is dropped and no further slots are
-// filled — this plan only ever calls this with topN=1, so this
-// simplification is untested at topN>1; a topN=2 consumer (e.g. a future
-// "pack gets 2 kills" mechanic) should re-examine whether an exact 2-way
-// tie for the top 2 slots combined (e.g. counts of 2,2,1) should still
-// select both tied targets rather than producing zero kills. ok is false
+// filled. The Wolf-Cub bonus bite calls this with topN=2: an exact 2-way
+// tie for the top slot (e.g. counts of 2,2,1) therefore still yields zero
+// targets rather than selecting both tied players — deliberate, so a split
+// pack never gets a free double kill out of its own indecision. ok is false
 // only when there were no votes at all, or the very first slot ties.
 func tallyWolfVotes(votes map[string]string, topN int) (targets []string, ok bool) {
 	counts := make(map[string]int)
@@ -292,6 +291,36 @@ func hunterRevengeLine(p *player) string {
 	return fmt.Sprintf("🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label)
 }
 
+// applyWolfCubBonusBiteFlag arms game.WolfBonusBiteNextNight if any of the
+// given just-died player IDs was a Wolf Cub. Additive — never clears an
+// already-armed flag — so every death-application site (night kill/
+// poison/Hunter-revenge, day lynch, AFK removal, voluntary leave) can call
+// it independently after applying its own deaths, in any order, without
+// needing to coordinate with the others. Must be called with cmd.mu held.
+func applyWolfCubBonusBiteFlag(game *werewolfGame, deadIDs []string) {
+	for _, id := range deadIDs {
+		if p, ok := game.Players[id]; ok && p.Role == roleWolfCub {
+			game.WolfBonusBiteNextNight = true
+			return
+		}
+	}
+}
+
+// playersByIDs looks up each ID in game.Players, skipping any that don't
+// exist (shouldn't happen — every ID here came from game.Players itself
+// moments earlier — but this keeps the lookup total rather than panicking
+// on a theoretical race). Must be called with cmd.mu held; the returned
+// pointers are live and must be copyPlayer'd before escaping the lock.
+func playersByIDs(game *werewolfGame, ids []string) []*player {
+	var result []*player
+	for _, id := range ids {
+		if p, ok := game.Players[id]; ok {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 func targetSelectMenu(customID, placeholder string, targets []*player) []discordgo.MessageComponent {
 	options := make([]discordgo.SelectMenuOption, 0, len(targets))
 	for _, p := range targets {
@@ -378,6 +407,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.WitchPoisonTarget = ""
 		game.WitchActedThisRound = false
 		game.WitchPromptedThisRound = false
+		game.NightBiteTargetIDs = nil
 		game.HunterActedThisRound = false
 		game.NightActionsClosed = false
 		game.History = append(game.History, roundLog{Round: game.Round})
@@ -567,16 +597,22 @@ func (cmd *WerewolfCommand) dmHunterPrompt(s *discordgo.Session, channelID strin
 }
 
 // witchActionComponents builds the Witch's action message: an optional
-// poison target-select row (omitted if she's already used it), and a
-// button row with a heal option (omitted if there's no valid bite target,
-// or she's already used it) plus an always-present skip button.
-func witchActionComponents(channelID string, biteTargetID string, healUsed, poisonUsed bool, poisonTargets []*player) []discordgo.MessageComponent {
+// poison target-select row (omitted if she's already used it), and a heal
+// control (omitted if there's no valid bite target, or she's already used
+// it) plus an always-present skip button. The heal control is a plain
+// confirm button when there's exactly one bite target (she can only be
+// healing "the" bite target) and a target-select menu when there are two
+// (the Wolf-Cub bonus bite) — she has to pick which one to save.
+func witchActionComponents(channelID string, biteTargets []*player, healUsed, poisonUsed bool, poisonTargets []*player) []discordgo.MessageComponent {
 	var rows []discordgo.MessageComponent
 	if !poisonUsed {
 		rows = append(rows, targetSelectMenu(werewolfWitchPoisonID+channelID, "☠️ Đầu độc ai đó (bỏ qua nếu không muốn)", poisonTargets)[0])
 	}
+	if len(biteTargets) > 1 && !healUsed {
+		rows = append(rows, targetSelectMenu(werewolfWitchHealID+channelID, "💊 Cứu một trong hai người bị cắn", biteTargets)[0])
+	}
 	buttons := []discordgo.MessageComponent{}
-	if biteTargetID != "" && !healUsed {
+	if len(biteTargets) == 1 && !healUsed {
 		buttons = append(buttons, discordgo.Button{
 			Label:    "💊 Cứu người bị cắn",
 			Style:    discordgo.SuccessButton,
@@ -592,19 +628,23 @@ func witchActionComponents(channelID string, biteTargetID string, healUsed, pois
 	return rows
 }
 
-func (cmd *WerewolfCommand) dmWitchPrompt(s *discordgo.Session, channelID string, witch *player, biteTargetID, biteTargetLabel string, healUsed, poisonUsed bool, poisonTargets []*player) {
+func (cmd *WerewolfCommand) dmWitchPrompt(s *discordgo.Session, channelID string, witch *player, biteTargets []*player, healUsed, poisonUsed bool, poisonTargets []*player) {
 	dm, err := s.UserChannelCreate(witch.UserID)
 	if err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to open DM for witch")
 		return
 	}
 	bittenText := "Không ai bị cắn đêm nay."
-	if biteTargetLabel != "" {
-		bittenText = fmt.Sprintf("Sói cắn: **%s** đêm nay.", biteTargetLabel)
+	if len(biteTargets) > 0 {
+		labels := make([]string, len(biteTargets))
+		for idx, p := range biteTargets {
+			labels[idx] = p.Label
+		}
+		bittenText = fmt.Sprintf("Sói cắn: **%s** đêm nay.", strings.Join(labels, ", "))
 	}
 	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
 		Content:    fmt.Sprintf("🧙 %s Bạn muốn cứu, đầu độc ai đó, hay không làm gì?", bittenText),
-		Components: witchActionComponents(channelID, biteTargetID, healUsed, poisonUsed, poisonTargets),
+		Components: witchActionComponents(channelID, biteTargets, healUsed, poisonUsed, poisonTargets),
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to DM witch prompt")
 	}
@@ -700,13 +740,14 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 	var (
 		gameFound          bool
 		threadID           string
-		resolvedTarget     string
-		wolfTargetLabel    string
+		resolvedTargets    []string
+		wolfTargetLabels   []string
+		bonusBite          bool
 		wolfVoteTied       bool
-		doctorSaved        bool
 		aliveThreadID      string
 		witch              *player
 		witchPoisonTargets []*player
+		biteTargetPlayers  []*player
 	)
 	func() {
 		cmd.mu.Lock()
@@ -720,12 +761,22 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 
 		aliveWolves := aliveWolfVoters(game)
 		validVotes := validWolfVotes(game.WolfVotes, aliveWolves, game.Players)
-		wolfTargets, tallyOK := tallyWolfVotes(validVotes, 1)
+		topN := 1
+		if game.WolfBonusBiteNextNight {
+			topN = 2
+		}
+		game.WolfBonusBiteNextNight = false // consumed regardless of outcome — a tie still spends the bonus
+		wolfTargets, tallyOK := tallyWolfVotes(validVotes, topN)
+		// The bonus only actually *fires* when the tally really produced two
+		// distinct targets. A unanimous pack with the bonus armed still bites
+		// one player, and that round must stay on the ordinary single-target
+		// message/recap path.
+		bonusBite = len(wolfTargets) > 1
 		wolfVoteTied = !tallyOK && len(validVotes) > 0
-		if len(wolfTargets) > 0 {
-			resolvedTarget = wolfTargets[0]
-			if target, exists := game.Players[resolvedTarget]; exists {
-				wolfTargetLabel = target.Label
+		resolvedTargets = wolfTargets
+		for _, id := range resolvedTargets {
+			if target, exists := game.Players[id]; exists {
+				wolfTargetLabels = append(wolfTargetLabels, target.Label)
 			}
 		}
 		doctorTargetLabel := ""
@@ -734,7 +785,6 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 				doctorTargetLabel = target.Label
 			}
 		}
-		doctorSaved = resolvedTarget != "" && resolvedTarget == game.DoctorProtect
 
 		for _, w := range aliveWolves {
 			if _, voted := game.WolfVotes[w.UserID]; voted {
@@ -768,9 +818,13 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			witchPoisonTargets = copyPlayers(aliveExcept(game, witch.UserID))
 		}
 
+		biteTargetPlayers = copyPlayers(playersByIDs(game, resolvedTargets))
+		game.NightBiteTargetIDs = append([]string(nil), resolvedTargets...)
+
 		if n := len(game.History); n > 0 {
 			entry := &game.History[n-1]
-			entry.WolfTargetLabel = wolfTargetLabel
+			entry.WolfTargetLabel = strings.Join(wolfTargetLabels, ", ")
+			entry.WolfBonusBite = bonusBite
 			entry.WolfVoteTied = wolfVoteTied
 			entry.DoctorTargetLabel = doctorTargetLabel
 			if game.SeerTarget != "" {
@@ -810,19 +864,19 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			// yet, and the heal button only when there's a bite target to
 			// heal and the potion isn't used yet. Otherwise she has nothing
 			// clickable but "skip", so don't bother prompting/waiting.
-			hasChoice = !poisonUsed || (!healUsed && resolvedTarget != "")
+			hasChoice = !poisonUsed || (!healUsed && len(resolvedTargets) > 0)
 			if hasChoice {
 				g.WitchPromptedThisRound = true
 			}
 		}()
 		if hasChoice {
-			cmd.dmWitchPrompt(s, channelID, witch, resolvedTarget, wolfTargetLabel, healUsed, poisonUsed, witchPoisonTargets)
+			cmd.dmWitchPrompt(s, channelID, witch, biteTargetPlayers, healUsed, poisonUsed, witchPoisonTargets)
 			deadline := time.Now().Add(witchActionWindow)
 			cmd.waitForWitchAction(channelID, deadline, seq)
 		}
 	}
 
-	cmd.finalizeNightResolution(s, channelID, seq, resolvedTarget, doctorSaved, wolfVoteTied, aliveThreadID)
+	cmd.finalizeNightResolution(s, channelID, seq, resolvedTargets, bonusBite, wolfVoteTied, aliveThreadID)
 }
 
 // finalizeNightResolution applies the wolf-bite death (accounting for
@@ -830,15 +884,18 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 // one, chains Hunter's revenge off of either death, builds the recap
 // fields and the public result message, then hands off to the win-check
 // and day-discuss exactly like the old single-stage resolveNight used to.
-func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channelID string, seq uint64, resolvedTarget string, doctorSaved, wolfVoteTied bool, aliveThreadID string) {
+func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channelID string, seq uint64, resolvedTargets []string, bonusBite, wolfVoteTied bool, aliveThreadID string) {
 	var (
-		gameFound      bool
-		revealOnDeath  bool
-		killedPlayer   *player
-		poisonedPlayer *player
-		witchHealed    bool
-		hunterRevenged []*player
-		summary        string
+		gameFound           bool
+		revealOnDeath       bool
+		killedPlayers       []*player
+		poisonedPlayer      *player
+		doctorSaved         bool
+		witchHealed         bool
+		cursedWolfConverted string
+		biteOutcomeLines    []string
+		hunterRevenged      []*player
+		summary             string
 	)
 	func() {
 		cmd.mu.Lock()
@@ -860,21 +917,51 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		// closes the window completely.
 		game.WitchPromptedThisRound = false
 
-		witchHealed = resolvedTarget != "" && game.WitchSaveTarget == "heal"
-		saved := doctorSaved || witchHealed
+		// witchHealTarget resolves the two heal encodings into one target ID:
+		// the "heal" sentinel (single-target button path) means "the lone
+		// bite target", while any other non-empty value is an explicit ID
+		// picked from the two-target select menu.
+		var witchHealTarget string
+		switch {
+		case game.WitchSaveTarget == "heal" && len(resolvedTargets) > 0:
+			witchHealTarget = resolvedTargets[0]
+		case game.WitchSaveTarget != "" && game.WitchSaveTarget != "heal":
+			witchHealTarget = game.WitchSaveTarget
+		}
+		// doctorSaved/witchHealed keep the exact meaning they had in the
+		// single-target implementation (computed from the picks alone, not
+		// from whether the bite actually resolved to a spare) so the
+		// non-bonus-bite result-message cascade below is unchanged.
+		for _, id := range resolvedTargets {
+			if id == game.DoctorProtect {
+				doctorSaved = true
+			}
+		}
+		witchHealed = len(resolvedTargets) > 0 && game.WitchSaveTarget == "heal"
 
-		var killedID string
-		var cursedWolfConvertedLabel string
-		if resolvedTarget != "" {
-			if target, exists := game.Players[resolvedTarget]; exists && target.Alive {
-				switch resolveWolfBiteOutcome(target.Role, saved) {
-				case wolfBiteKill:
-					target.Alive = false
-					killedID = resolvedTarget
-				case wolfBiteConvert:
-					target.Faction = factionWolf
-					cursedWolfConvertedLabel = target.Label
+		var killedIDs []string
+		for _, targetID := range resolvedTargets {
+			target, exists := game.Players[targetID]
+			if !exists || !target.Alive {
+				continue
+			}
+			doctorSavedThis := targetID == game.DoctorProtect
+			witchHealedThis := witchHealTarget != "" && targetID == witchHealTarget
+			switch resolveWolfBiteOutcome(target.Role, doctorSavedThis || witchHealedThis) {
+			case wolfBiteKill:
+				target.Alive = false
+				killedIDs = append(killedIDs, targetID)
+				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: chết", target.Label))
+			case wolfBiteConvert:
+				target.Faction = factionWolf
+				cursedWolfConverted = target.Label
+				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: biến thành Sói Nguyền, không chết", target.Label))
+			case wolfBiteSpare:
+				reason := "Bác Sĩ cứu"
+				if witchHealedThis && !doctorSavedThis {
+					reason = "Phù Thủy cứu"
 				}
+				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: được %s", target.Label, reason))
 			}
 		}
 
@@ -894,18 +981,23 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			}
 		}
 
-		if killedID != "" {
-			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, killedID)...)
+		for _, id := range killedIDs {
+			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, id)...)
 		}
 		if poisonedID != "" {
 			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, poisonedID)...)
 		}
 
+		deadThisResolution := append([]string(nil), killedIDs...)
+		if poisonedID != "" {
+			deadThisResolution = append(deadThisResolution, poisonedID)
+		}
+		deadThisResolution = append(deadThisResolution, idsOf(hunterRevenged)...)
+		applyWolfCubBonusBiteFlag(game, deadThisResolution)
+
 		revealOnDeath = game.RevealOnDeath
 		summary = aliveDeadSummary(game)
-		if killedID != "" {
-			killedPlayer = copyPlayer(game.Players[killedID])
-		}
+		killedPlayers = copyPlayers(playersByIDs(game, killedIDs))
 		if poisonedID != "" {
 			poisonedPlayer = copyPlayer(game.Players[poisonedID])
 		}
@@ -913,25 +1005,28 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		if n := len(game.History); n > 0 {
 			entry := &game.History[n-1]
 			entry.WolfTargetSaved = doctorSaved
-			if witchHealed {
-				if target, exists := game.Players[resolvedTarget]; exists {
+			if witchHealTarget != "" {
+				if target, exists := game.Players[witchHealTarget]; exists {
 					entry.WitchSavedLabel = target.Label
 				}
 			}
 			if poisonedPlayer != nil {
 				entry.WitchPoisonedLabel = poisonedPlayer.Label
 			}
-			entry.CursedWolfConverted = cursedWolfConvertedLabel
+			entry.CursedWolfConverted = cursedWolfConverted
 			if len(hunterRevenged) > 0 {
 				entry.HunterRevengeLabel = hunterRevenged[0].Label
+			}
+			if bonusBite {
+				entry.WolfBiteOutcomeLines = biteOutcomeLines
 			}
 		}
 	}()
 	if !gameFound {
 		return
 	}
-	if killedPlayer != nil {
-		removeFromAliveThread(s, aliveThreadID, killedPlayer.UserID)
+	for _, p := range killedPlayers {
+		removeFromAliveThread(s, aliveThreadID, p.UserID)
 	}
 	if poisonedPlayer != nil {
 		removeFromAliveThread(s, aliveThreadID, poisonedPlayer.UserID)
@@ -942,10 +1037,15 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 
 	var resultMsg string
 	switch {
-	case killedPlayer != nil && revealOnDeath:
-		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", killedPlayer.Label, killedPlayer.Role.label())
-	case killedPlayer != nil:
-		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", killedPlayer.Label)
+	case bonusBite:
+		// Two-target round: the single-target cascade below can't represent
+		// "one target died, the other was saved" — list each target's own
+		// outcome instead. Only reachable once a Wolf Cub has died.
+		resultMsg = "🌙 **Kết quả đêm qua:**\n" + strings.Join(biteOutcomeLines, "\n")
+	case len(killedPlayers) == 1 && revealOnDeath:
+		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", killedPlayers[0].Label, killedPlayers[0].Role.label())
+	case len(killedPlayers) == 1:
+		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", killedPlayers[0].Label)
 	case doctorSaved && poisonedPlayer == nil:
 		resultMsg = "🛡️ Bác Sĩ đã cứu sống mục tiêu đêm qua — không ai chết!"
 	case doctorSaved:
@@ -1234,7 +1334,29 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Bạn đã dùng bình cứu rồi.")
 		return
 	}
-	game.WitchSaveTarget = "heal" // sentinel: the actual target is resolved from the wolf-bite target at finalize time
+	if values := i.MessageComponentData().Values; len(values) > 0 {
+		// Two-target select-menu path (Wolf-Cub bonus bite): the option list
+		// was built from game.NightBiteTargetIDs, but re-validate against it
+		// directly rather than trusting the client payload.
+		targetID := values[0]
+		valid := false
+		for _, id := range game.NightBiteTargetIDs {
+			if id == targetID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+			return
+		}
+		game.WitchSaveTarget = targetID
+	} else {
+		// Single-target button path: sentinel resolved against the lone bite
+		// target at finalize time.
+		game.WitchSaveTarget = "heal"
+	}
 	game.WitchHealUsed = true
 	game.WitchActedThisRound = true
 	cmd.mu.Unlock()
