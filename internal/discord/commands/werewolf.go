@@ -290,6 +290,7 @@ const (
 	resultOngoing gameResult = iota
 	resultVillagersWin
 	resultWerewolvesWin
+	resultLoversWin
 )
 
 // checkWinCondition: villagers win when every werewolf is dead; werewolves
@@ -319,6 +320,33 @@ func checkWinCondition(players map[string]*player) gameResult {
 	default:
 		return resultOngoing
 	}
+}
+
+// checkWinConditionWithLovers wraps checkWinCondition with the standard
+// Cupid "mixed-faction lovers" rule (per Ultimate Werewolf): if Cupid
+// paired two players from opposing factions and both are still alive when
+// they're the only two players left standing, they win together as their
+// own third party instead of either faction winning — overriding the
+// normal faction-based result. Lovers from the SAME faction don't need
+// this special case: they already win normally whenever their shared
+// faction wins, with no extra tracking required.
+func checkWinConditionWithLovers(players map[string]*player, loverIDs [2]string) gameResult {
+	if loverIDs[0] != "" && loverIDs[1] != "" {
+		lover1, ok1 := players[loverIDs[0]]
+		lover2, ok2 := players[loverIDs[1]]
+		if ok1 && ok2 && lover1.Alive && lover2.Alive && lover1.Faction != lover2.Faction {
+			aliveCount := 0
+			for _, p := range players {
+				if p.Alive {
+					aliveCount++
+				}
+			}
+			if aliveCount == 2 {
+				return resultLoversWin
+			}
+		}
+	}
+	return checkWinCondition(players)
 }
 
 // tallyVotes counts votes and returns every target tied for the most votes.

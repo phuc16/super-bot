@@ -409,7 +409,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 			}
 		}
 
-		result = checkWinCondition(game.Players)
+		result = checkWinConditionWithLovers(game.Players, game.LoverIDs)
 		if result == resultOngoing {
 			return
 		}
@@ -496,8 +496,27 @@ func (cmd *WerewolfCommand) announceLoverDeaths(s *discordgo.Session, channelID 
 
 func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolfGame, result gameResult, afkRemoved []string) {
 	winner := "🐺 **Ma Sói thắng!**"
-	if result == resultVillagersWin {
+	switch result {
+	case resultVillagersWin:
 		winner = "🏡 **Dân Làng thắng!**"
+	case resultLoversWin:
+		// Standard Ultimate Werewolf "mixed-faction lovers" rule: the two
+		// lovers win together as their own team, and Cupid wins alongside
+		// them too (even if Cupid isn't part of the pair, and even if
+		// Cupid has already died) — unless Cupid IS one of the two lovers,
+		// in which case they're already named as part of the couple.
+		var loverLabels []string
+		for _, id := range game.LoverIDs {
+			if p, exists := game.Players[id]; exists {
+				loverLabels = append(loverLabels, p.Label)
+			}
+		}
+		winner = fmt.Sprintf("💘 **Cặp đôi %s thắng!** Họ sống sót đến cuối cùng dù thuộc hai phe khác nhau.", strings.Join(loverLabels, " & "))
+		for _, p := range game.Players {
+			if p.Role == roleCupid && p.UserID != game.LoverIDs[0] && p.UserID != game.LoverIDs[1] {
+				winner += fmt.Sprintf(" 💘 %s (Thần Tình Yêu) cũng thắng cùng họ.", p.Label)
+			}
+		}
 	}
 
 	var roles strings.Builder

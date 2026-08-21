@@ -223,6 +223,21 @@ func aliveExcept(game *werewolfGame, excludeID string) []*player {
 	return result
 }
 
+// alivePlayers returns every alive player in game, self included — used
+// by Cupid's target list, since Cupid is explicitly allowed to pair
+// themself with someone else (the standard Ultimate Werewolf rule: "they
+// can choose themselves or anyone else").
+func alivePlayers(game *werewolfGame) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // hunterRevengeStep checks whether the player who just died (deadID) was
 // the Hunter with a locked-in target; if so, kills that target too
 // (unless already dead) and returns a copy of them. Returns nil if no
@@ -500,7 +515,7 @@ func (cmd *WerewolfCommand) dmCupidPrompt(s *discordgo.Session, channelID string
 		return
 	}
 	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
-		Content:    "💘 Chọn đúng 2 người để ghép thành một cặp đôi. Đây là lựa chọn một lần duy nhất, không thể đổi sau khi xác nhận.",
+		Content:    "💘 Chọn đúng 2 người để ghép thành một cặp đôi — bạn có thể chọn cả chính mình. Đây là lựa chọn một lần duy nhất, không thể đổi sau khi xác nhận.",
 		Components: cupidPairSelectMenu(werewolfCupidPairID+channelID, "Chọn 2 người", targets),
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to DM cupid prompt")
@@ -677,7 +692,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		if game.Round == 1 {
 			if cupids := alivePlayersOfRole(game, roleCupid); len(cupids) > 0 {
 				cupid = copyPlayer(cupids[0])
-				cupidTargets = copyPlayers(aliveExcept(game, cupid.UserID))
+				cupidTargets = copyPlayers(alivePlayers(game))
 			}
 		}
 

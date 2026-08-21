@@ -281,6 +281,81 @@ func TestCheckWinConditionAllDeadMidGame(t *testing.T) {
 	}
 }
 
+func TestCheckWinConditionWithLoversMixedFactionLastTwoWin(t *testing.T) {
+	players := map[string]*player{
+		"wolf":     {UserID: "wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+		"villager": {UserID: "villager", Role: roleVillager, Faction: factionVillager, Alive: true},
+	}
+	got := checkWinConditionWithLovers(players, [2]string{"wolf", "villager"})
+	if got != resultLoversWin {
+		t.Errorf("mixed-faction lovers as the last two alive: got %v, want resultLoversWin", got)
+	}
+}
+
+func TestCheckWinConditionWithLoversSameFactionUsesNormalRule(t *testing.T) {
+	players := map[string]*player{
+		"wolf1": {UserID: "wolf1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+		"wolf2": {UserID: "wolf2", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+	}
+	got := checkWinConditionWithLovers(players, [2]string{"wolf1", "wolf2"})
+	if got != resultWerewolvesWin {
+		t.Errorf("same-faction lovers: got %v, want resultWerewolvesWin (normal rule, no special case)", got)
+	}
+}
+
+func TestCheckWinConditionWithLoversMixedFactionButOthersAliveIsOngoing(t *testing.T) {
+	players := map[string]*player{
+		"wolf":      {UserID: "wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+		"villager":  {UserID: "villager", Role: roleVillager, Faction: factionVillager, Alive: true},
+		"bystander": {UserID: "bystander", Role: roleVillager, Faction: factionVillager, Alive: true},
+	}
+	got := checkWinConditionWithLovers(players, [2]string{"wolf", "villager"})
+	if got != resultOngoing {
+		t.Errorf("mixed lovers with a third player still alive: got %v, want resultOngoing (normal rule applies since the couple isn't the last two yet — 1 wolf vs. 2 others, not outnumbered)", got)
+	}
+}
+
+func TestCheckWinConditionWithLoversOneDeadUsesNormalRule(t *testing.T) {
+	players := map[string]*player{
+		"wolf":     {UserID: "wolf", Role: roleWerewolf, Faction: factionWolf, Alive: false},
+		"villager": {UserID: "villager", Role: roleVillager, Faction: factionVillager, Alive: true},
+	}
+	got := checkWinConditionWithLovers(players, [2]string{"wolf", "villager"})
+	if got != resultVillagersWin {
+		t.Errorf("one lover already dead: got %v, want resultVillagersWin (normal rule, no couple left to win)", got)
+	}
+}
+
+func TestCheckWinConditionWithLoversNoPairingUsesNormalRule(t *testing.T) {
+	players := map[string]*player{
+		"wolf":     {UserID: "wolf", Role: roleWerewolf, Faction: factionWolf, Alive: false},
+		"villager": {UserID: "villager", Role: roleVillager, Faction: factionVillager, Alive: true},
+	}
+	got := checkWinConditionWithLovers(players, [2]string{"", ""})
+	if got != resultVillagersWin {
+		t.Errorf("no Cupid pairing this game: got %v, want resultVillagersWin", got)
+	}
+}
+
+func TestAlivePlayersIncludesEveryoneEvenSelf(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"a", "b", "c"},
+		Players: map[string]*player{
+			"a": {UserID: "a", Label: "A", Alive: true},
+			"b": {UserID: "b", Label: "B", Alive: true},
+			"c": {UserID: "c", Label: "C", Alive: false},
+		},
+	}
+	got := alivePlayers(game)
+	if len(got) != 2 {
+		t.Fatalf("alivePlayers() = %d players, want 2 (dead player C excluded)", len(got))
+	}
+	ids := map[string]bool{got[0].UserID: true, got[1].UserID: true}
+	if !ids["a"] || !ids["b"] {
+		t.Errorf("alivePlayers() = %v, want both a and b present (an actor must see themself in their own target list, e.g. Cupid picking self)", got)
+	}
+}
+
 func TestTallyVotesSingleWinner(t *testing.T) {
 	votes := map[string]string{"a": "x", "b": "x", "c": "y"}
 	top, tie := tallyVotes(votes)

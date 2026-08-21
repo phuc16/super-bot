@@ -543,7 +543,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Luật thắng thua — theo từng vai trò",
-						Value:  "**Phe Sói (thắng cùng nhau):** 🐺 Sói thường, 🐺👶 Sói Con, 🎭 Kẻ Phản Bội — thuộc phe Sói ngay từ đầu.\n🐺✨ Sói Nguyền — bắt đầu thuộc phe **Dân** (thắng cùng Dân nếu ván kết thúc trước khi biến hình); nếu bị cắn mà sống sót, chuyển sang phe **Sói** và từ đó thắng cùng Sói.\n**Phe Dân (thắng cùng nhau):** 👤 Dân Làng, 🔮 Tiên Tri, 💉 Bảo Vệ, 🧙 Phù Thủy, 🏹 Thợ Săn, 🤫 Kẻ Phá Hoại, 💘 Thần Tình Yêu — luôn thuộc phe Dân, luôn thắng khi phe Dân thắng dù bản thân còn sống hay đã chết vào cuối ván.",
+						Value:  "**Phe Sói (thắng cùng nhau):** 🐺 Sói thường, 🐺👶 Sói Con, 🎭 Kẻ Phản Bội — thuộc phe Sói ngay từ đầu.\n🐺✨ Sói Nguyền — bắt đầu thuộc phe **Dân** (thắng cùng Dân nếu ván kết thúc trước khi biến hình); nếu bị cắn mà sống sót, chuyển sang phe **Sói** và từ đó thắng cùng Sói.\n**Phe Dân (thắng cùng nhau):** 👤 Dân Làng, 🔮 Tiên Tri, 💉 Bảo Vệ, 🧙 Phù Thủy, 🏹 Thợ Săn, 🤫 Kẻ Phá Hoại, 💘 Thần Tình Yêu — luôn thuộc phe Dân, luôn thắng khi phe Dân thắng dù bản thân còn sống hay đã chết vào cuối ván.\n💘 **Cặp đôi khác phe**: nếu Thần Tình Yêu ghép 2 người khác phe (1 Sói + 1 Dân), họ tách thành phe thứ ba — chỉ thắng nếu cả hai sống đến khi là 2 người cuối cùng. Thần Tình Yêu cũng thắng theo (dù còn sống hay đã chết), trừ khi là 1 trong 2 người đó.",
 						Inline: false,
 					},
 					{
@@ -564,7 +564,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Vai trò đặc biệt phe Dân",
-						Value:  "🔮 **Tiên Tri** — DM mỗi đêm: soi một người, biết có phải Sói không.\n💉 **Bảo Vệ** — DM mỗi đêm: bảo vệ một người khỏi bị Sói cắn (không bảo vệ cùng một người 2 đêm liên tiếp).\n🧙 **Phù Thủy** — DM mỗi đêm sau khi biết ai bị cắn: cứu người bị cắn (1 lần/ván) và/hoặc đầu độc ai đó khác (1 lần/ván, bỏ qua được sự bảo vệ của Bảo Vệ).\n🏹 **Thợ Săn** — DM chọn mục tiêu bất cứ lúc nào; nếu chết (bất kỳ lý do gì), mục tiêu đó chết theo. Có thể đổi lựa chọn qua các đêm.\n🤫 **Kẻ Phá Hoại** — DM mỗi đêm: chọn người sẽ bị làm câm lặng trong thread thảo luận *hôm sau*.\n💘 **Thần Tình Yêu** — DM chỉ đêm đầu tiên: chọn đúng 2 người ghép đôi. Một người chết thì người kia chết theo ngay.",
+						Value:  "🔮 **Tiên Tri** — DM mỗi đêm: soi một người, biết có phải Sói không.\n💉 **Bảo Vệ** — DM mỗi đêm: bảo vệ một người khỏi bị Sói cắn (không bảo vệ cùng một người 2 đêm liên tiếp).\n🧙 **Phù Thủy** — DM mỗi đêm sau khi biết ai bị cắn: cứu người bị cắn (1 lần/ván) và/hoặc đầu độc ai đó khác (1 lần/ván, bỏ qua được sự bảo vệ của Bảo Vệ).\n🏹 **Thợ Săn** — DM chọn mục tiêu bất cứ lúc nào; nếu chết (bất kỳ lý do gì), mục tiêu đó chết theo. Có thể đổi lựa chọn qua các đêm.\n🤫 **Kẻ Phá Hoại** — DM mỗi đêm: chọn người sẽ bị làm câm lặng trong thread thảo luận *hôm sau*.\n💘 **Thần Tình Yêu** — DM chỉ đêm đầu tiên: chọn đúng 2 người ghép đôi (có thể chọn cả chính mình). Một người chết thì người kia chết theo ngay.",
 						Inline: false,
 					},
 					{
@@ -620,7 +620,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Winning rule — by role",
-					Value:  "**Wolf faction (win together):** 🐺 Werewolf, 🐺👶 Wolf Cub, 🎭 Traitor — wolf-faction from the start.\n🐺✨ Cursed Wolf — starts **villager**-faction (wins with villagers if the game ends before it converts); if it's bitten and survives, it flips to **wolf**-faction and from then on wins with the wolves instead.\n**Villager faction (win together):** 👤 Villager, 🔮 Seer, 💉 Guard, 🧙 Witch, 🏹 Hunter, 🤫 Disruptor, 💘 Cupid — always villager-faction, always win when villagers win, regardless of whether they're personally still alive at the end.",
+					Value:  "**Wolf faction (win together):** 🐺 Werewolf, 🐺👶 Wolf Cub, 🎭 Traitor — wolf-faction from the start.\n🐺✨ Cursed Wolf — starts **villager**-faction (wins with villagers if the game ends before it converts); if it's bitten and survives, it flips to **wolf**-faction and from then on wins with the wolves instead.\n**Villager faction (win together):** 👤 Villager, 🔮 Seer, 💉 Guard, 🧙 Witch, 🏹 Hunter, 🤫 Disruptor, 💘 Cupid — always villager-faction, always win when villagers win, regardless of whether they're personally still alive at the end.\n💘 **Mixed-faction couple**: if Cupid pairs two players from opposing factions (1 Wolf + 1 Villager), they split off into their own third party — winning only if both survive down to being the last 2 players left. Cupid wins with them too (alive or dead), unless Cupid is one of the two.",
 					Inline: false,
 				},
 				{
@@ -641,7 +641,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Villager-side special roles",
-					Value:  "🔮 **Seer** — DM each night: check one player, learn if they're wolf-faction or not.\n💉 **Guard** — DM each night: protect one player from the wolves' bite (can't protect the same person two nights in a row).\n🧙 **Witch** — DM each night, after the bite is known: heal the bitten player (once per game) and/or poison anyone else (once per game, bypasses the Guard's protection).\n🏹 **Hunter** — DM: pick a target any time; if the Hunter dies (any cause), that target dies too. The pick persists and can be changed on a later night.\n🤫 **Disruptor** — DM each night: pick someone to be muted in the day-discuss thread the *following* day.\n💘 **Cupid** — DM on the first night only: pick exactly 2 players to fall in love. If either dies, the other dies too, immediately.",
+					Value:  "🔮 **Seer** — DM each night: check one player, learn if they're wolf-faction or not.\n💉 **Guard** — DM each night: protect one player from the wolves' bite (can't protect the same person two nights in a row).\n🧙 **Witch** — DM each night, after the bite is known: heal the bitten player (once per game) and/or poison anyone else (once per game, bypasses the Guard's protection).\n🏹 **Hunter** — DM: pick a target any time; if the Hunter dies (any cause), that target dies too. The pick persists and can be changed on a later night.\n🤫 **Disruptor** — DM each night: pick someone to be muted in the day-discuss thread the *following* day.\n💘 **Cupid** — DM on the first night only: pick exactly 2 players to fall in love — Cupid may pick themself as one of the two. If either dies, the other dies too, immediately.",
 					Inline: false,
 				},
 				{
