@@ -1006,6 +1006,24 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 
 // dmRoleReveals DMs each listed player their assigned role, returning the
 // IDs of anyone the bot couldn't reach (DMs closed/blocked).
+// roleInteractionNote explains, per role, when the bot DMs and where that
+// role does its talking — appended to the role-reveal DM so players know
+// what to expect without reading /help werewolf.
+func roleInteractionNote(r role) string {
+	switch r {
+	case roleWerewolf, roleWolfCub, roleCursedWolf:
+		return "Bạn sẽ hành động trong thread riêng của bầy Sói mỗi đêm."
+	case roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor:
+		return "Bot sẽ nhắn tin riêng (DM) cho bạn mỗi đêm để chọn hành động."
+	case roleCupid:
+		return "Bot sẽ nhắn tin riêng (DM) cho bạn chỉ vào đêm đầu tiên."
+	case roleTraitor:
+		return "Bot sẽ nhắn tin riêng cho bạn biết ai là Sói khi bắt đầu ván (và mỗi khi danh sách Sói thay đổi) — bạn không có hành động ban đêm."
+	default:
+		return "Bạn không có hành động riêng — thảo luận cùng mọi người vào ban ngày."
+	}
+}
+
 func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[string]*player, ids []string) []string {
 	var unreachable []string
 	for _, id := range ids {
@@ -1018,7 +1036,10 @@ func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[stri
 			unreachable = append(unreachable, id)
 			continue
 		}
-		content := fmt.Sprintf("🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.", p.Role.label())
+		content := fmt.Sprintf(
+			"🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.\n%s\n\n💬 Mọi người thảo luận công khai tại thread \"🏡 Thảo luận Ma Sói\" vào ban ngày; kênh chính chỉ dùng để xem thông báo pha (đêm/ngày/bỏ phiếu) và bỏ phiếu.",
+			p.Role.label(), roleInteractionNote(p.Role),
+		)
 		if _, err := s.ChannelMessageSend(dm.ID, content); err != nil {
 			unreachable = append(unreachable, id)
 		}
