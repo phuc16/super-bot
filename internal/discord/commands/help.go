@@ -548,7 +548,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Thảo luận & bỏ phiếu",
-						Value:  "**Thảo luận ban ngày**: người còn sống trò chuyện trong một thread riêng — thời gian tăng theo số người còn lại. Kênh chính bị khoá chỉ cho bot đăng, chỉ hiện thông báo pha/kết quả.\n**Bỏ phiếu ban ngày**: chọn người muốn treo cổ từ menu, hoặc chọn hẳn \"Không treo cổ ai\". Ai nhiều phiếu nhất bị treo cổ; hoà phiếu tuyệt đối hoặc đủ phiếu bỏ qua thì không ai bị treo cổ hôm đó.\n**Ban đêm (Sói)**: bầy Sói bỏ phiếu cùng nhau trong thread riêng của mình — mỗi Sói bỏ phiếu một lần (đã chọn là khoá, không đổi được), mục tiêu của bầy quyết định theo đa số; Sói hoà phiếu thì đêm đó không ai chết.",
+						Value:  "**Thảo luận ban ngày**: người còn sống trò chuyện trong một thread riêng — thời gian tăng theo số người còn lại. Kênh chính bị khoá chỉ cho bot đăng, chỉ hiện thông báo pha/kết quả.\n**Bỏ phiếu ban ngày**: chọn người muốn treo cổ, hoặc chọn \"Không treo cổ ai\" (bỏ qua) — bỏ qua chỉ là một lựa chọn như bất kỳ ai khác. **Không cần quá bán hay số phiếu tối thiểu**, chỉ cần nhiều phiếu nhất là thắng. Không ai bị treo cổ nếu \"bỏ qua\" nhiều phiếu nhất, hoặc nếu hoà phiếu tuyệt đối giữa các lựa chọn dẫn đầu.\n**Ban đêm (Sói)**: bầy Sói bỏ phiếu trong thread riêng — mỗi Sói bỏ phiếu 1 lần (khoá, không đổi được), quyết định theo cách tương tự (nhiều phiếu nhất, không quá bán); hoà phiếu thì đêm đó không ai chết.",
 						Inline: false,
 					},
 				},
@@ -625,7 +625,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Discussion & voting",
-					Value:  "**Day-discuss**: everyone still alive talks in a private thread — the window scales with how many players are left. The main channel is locked to bot-only chat and only posts phase/result announcements.\n**Day-vote**: pick who to lynch from a select menu, or explicitly choose \"Không treo cổ ai\" (don't lynch anyone). Most votes wins; an exact tie, or enough skip votes, means nobody is lynched that day.\n**Night (wolves)**: the pack votes together in their own private thread — every wolf votes once (locked in, no changing your mind), and the pack's target is decided by simple majority; a tie among wolves means no kill that night.",
+					Value:  "**Day-discuss**: everyone still alive talks in a private thread — the window scales with how many players are left. The main channel is locked to bot-only chat and only posts phase/result announcements.\n**Day-vote**: pick who to lynch from a select menu, or explicitly choose \"Không treo cổ ai\" (skip). \"Skip\" is just another candidate in the tally, counted the exact same way as a player — there's **no majority/quorum required**, just a plain plurality: whoever (or whichever choice) gets strictly the most votes wins. Nobody is lynched if Skip gets the most votes outright, **or** if there's an exact tie for the most votes between any candidates (two players, or a player and Skip).\n**Night (wolves)**: the pack votes together in their own private thread — every wolf votes once (locked in, no changing your mind), and the pack's target is decided the same way (plurality, no quorum); an exact tie among wolves means no kill that night.",
 					Inline: false,
 				},
 			},
