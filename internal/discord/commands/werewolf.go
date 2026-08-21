@@ -1276,6 +1276,26 @@ func roleInteractionNote(r role) string {
 	}
 }
 
+// roleWinCondition returns the win-condition explanation shown in the
+// role-reveal DM, so every player learns not just how their role acts but
+// what actually needs to happen for them to win — this is spelled out in
+// full for the whole game in /help werewolf, but a player shouldn't have
+// to go re-read that separately just to know their own win condition.
+func roleWinCondition(r role) string {
+	switch r {
+	case roleWerewolf, roleWolfCub:
+		return "🏆 Bạn thắng cùng **phe Sói**: khi số người phe Sói còn sống ≥ số người còn lại — không cần giết hết, chỉ cần không còn bị áp đảo."
+	case roleCursedWolf:
+		return "🏆 Hiện bạn thắng cùng **phe Dân** (như Dân thường). Nếu bị Sói cắn mà sống sót, bạn chuyển sang **phe Sói** và từ đó thắng cùng Sói thay vì Dân."
+	case roleTraitor:
+		return "🏆 Bạn luôn thắng cùng **phe Sói**, dù Tiên Tri soi bạn ra \"không phải Sói\" và bạn không bỏ phiếu cắn cùng bầy. Nếu mọi Sói khác chết mà bạn còn sống, bạn tự động trở thành Sói thường."
+	case roleCupid:
+		return "🏆 Bạn thắng cùng **phe Dân** như bình thường — trừ khi 2 người bạn ghép đôi thuộc 2 phe khác nhau và cả hai sống sót đến khi là 2 người cuối cùng, lúc đó bạn thắng cùng họ (dù còn sống hay đã chết) trừ khi chính bạn là 1 trong 2 người đó."
+	default:
+		return "🏆 Bạn thắng cùng **phe Dân**: khi toàn bộ phe Sói đã chết."
+	}
+}
+
 func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[string]*player, ids []string) []string {
 	var unreachable []string
 	for _, id := range ids {
@@ -1289,8 +1309,8 @@ func (cmd *WerewolfCommand) dmRoleReveals(s *discordgo.Session, players map[stri
 			continue
 		}
 		content := fmt.Sprintf(
-			"🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.\n%s\n\n💬 Mọi người thảo luận công khai tại thread \"🏡 Thảo luận Ma Sói\" vào ban ngày; kênh chính chỉ dùng để xem thông báo giai đoạn (đêm/ngày/bỏ phiếu) và bỏ phiếu.",
-			p.Role.label(), roleInteractionNote(p.Role),
+			"🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.\n%s\n%s\n\n💬 Mọi người thảo luận công khai tại thread \"🏡 Thảo luận Ma Sói\" vào ban ngày; kênh chính chỉ dùng để xem thông báo giai đoạn (đêm/ngày/bỏ phiếu) và bỏ phiếu.",
+			p.Role.label(), roleInteractionNote(p.Role), roleWinCondition(p.Role),
 		)
 		if _, err := s.ChannelMessageSend(dm.ID, content); err != nil {
 			unreachable = append(unreachable, id)

@@ -1375,6 +1375,61 @@ func TestWinnerNamesWithRolesLoversWinCupidIsOneOfThePair(t *testing.T) {
 	}
 }
 
+func TestRoleWinConditionEveryRoleMentionsItsSide(t *testing.T) {
+	cases := []struct {
+		r    role
+		side string
+	}{
+		{roleVillager, "Dân"},
+		{roleSeer, "Dân"},
+		{roleDoctor, "Dân"},
+		{roleWitch, "Dân"},
+		{roleHunter, "Dân"},
+		{roleDisruptor, "Dân"},
+		{roleWerewolf, "Sói"},
+		{roleWolfCub, "Sói"},
+		{roleCursedWolf, "Dân"}, // pre-conversion wording
+		{roleTraitor, "Sói"},
+		{roleCupid, "Dân"}, // default wording; mixed-lovers exception is spelled out in the text too
+	}
+	for _, tc := range cases {
+		got := roleWinCondition(tc.r)
+		if got == "" {
+			t.Errorf("roleWinCondition(%v) is empty", tc.r)
+		}
+		if !strings.Contains(got, tc.side) {
+			t.Errorf("roleWinCondition(%v) = %q, want it to mention %q", tc.r, got, tc.side)
+		}
+	}
+}
+
+func TestRoleWinConditionTraitorAndCursedWolfDiffer(t *testing.T) {
+	// Both are wolf-adjacent villager-passing roles but have opposite
+	// current-win-side wording: Traitor always wins with wolves, Cursed
+	// Wolf wins with villagers until it converts.
+	traitor := roleWinCondition(roleTraitor)
+	cursed := roleWinCondition(roleCursedWolf)
+	if !strings.Contains(traitor, "phe Sói") {
+		t.Errorf("roleWinCondition(roleTraitor) = %q, want it to say the Traitor wins with the wolf side", traitor)
+	}
+	if !strings.Contains(cursed, "phe Dân") {
+		t.Errorf("roleWinCondition(roleCursedWolf) = %q, want it to say the Cursed Wolf currently wins with the villager side", cursed)
+	}
+}
+
+func TestDMRoleRevealContentIncludesWinCondition(t *testing.T) {
+	players := map[string]*player{
+		"u1": {UserID: "u1", Label: "P1", Role: roleTraitor},
+	}
+	content := fmt.Sprintf(
+		"🐺 Ván Ma Sói bắt đầu! Vai trò của bạn là: **%s**.\n%s\n%s\n\n💬 test",
+		players["u1"].Role.label(), roleInteractionNote(players["u1"].Role), roleWinCondition(players["u1"].Role),
+	)
+	if !strings.Contains(content, "🏆") {
+		t.Errorf("role-reveal content = %q, want it to include the win-condition line", content)
+	}
+}
+
 func TestWerewolfDefinitionHasCustomRolesOption(t *testing.T) {
 	cmd := NewWerewolfCommand()
 	def := cmd.Definition()
