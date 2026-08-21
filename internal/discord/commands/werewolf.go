@@ -188,49 +188,30 @@ func wolfRosterLabels(game *werewolfGame) []string {
 	return labels
 }
 
-// wolfRosterChangeDM is what checkTraitorRosterChange hands back for the
-// caller to send after releasing cmd.mu.
-type wolfRosterChangeDM struct {
+// wolfRosterDM is what traitorRosterDM hands back for the caller to send
+// after releasing cmd.mu.
+type wolfRosterDM struct {
 	TraitorUserID string
 	Labels        []string
 }
 
-// checkTraitorRosterChange must be called with cmd.mu held, after any
-// wolf-faction membership change (a death by any cause, or a Cursed Wolf
-// conversion). Returns non-nil only when a live Traitor exists AND the
-// current wolf roster differs from the last one they were sent — updates
-// game.TraitorLastRosterLabels as a side effect, so a repeat call with no
-// further change is a cheap no-op. Safe to call unconditionally at the end
-// of every death-application site's locked section.
-func checkTraitorRosterChange(game *werewolfGame) *wolfRosterChangeDM {
+// traitorRosterDM must be called with cmd.mu held. Returns non-nil only
+// when a live Traitor exists — spec §4d (amended 2026-08-22): the roster
+// DM resends unconditionally once per night (plus once at role
+// assignment), not only when the roster actually changed, so the Traitor
+// never has to guess whether something shifted since their last DM.
+func traitorRosterDM(game *werewolfGame) *wolfRosterDM {
 	traitors := alivePlayersOfRole(game, roleTraitor)
 	if len(traitors) == 0 {
 		return nil
 	}
-	labels := wolfRosterLabels(game)
-	if stringSlicesEqual(labels, game.TraitorLastRosterLabels) {
-		return nil
-	}
-	game.TraitorLastRosterLabels = labels
-	return &wolfRosterChangeDM{TraitorUserID: traitors[0].UserID, Labels: append([]string(nil), labels...)}
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return &wolfRosterDM{TraitorUserID: traitors[0].UserID, Labels: wolfRosterLabels(game)}
 }
 
 // sendTraitorRosterDM sends dm's roster to the Traitor. No-op if dm is nil
-// (checkTraitorRosterChange found no live Traitor or no change) — every
-// call site can pass its result through unconditionally.
-func (cmd *WerewolfCommand) sendTraitorRosterDM(s *discordgo.Session, dm *wolfRosterChangeDM) {
+// (traitorRosterDM found no live Traitor) — every call site can pass its
+// result through unconditionally.
+func (cmd *WerewolfCommand) sendTraitorRosterDM(s *discordgo.Session, dm *wolfRosterDM) {
 	if dm == nil {
 		return
 	}
@@ -429,7 +410,6 @@ type werewolfGame struct {
 	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
 	WolfBonusBiteNextNight        bool                           // armed when a Wolf Cub dies (any cause); consumed at the start of the next night's wolf-vote resolution to select 2 targets instead of 1
 	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2 if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a 2-target select-menu pick, reset each round in runNightPhase
-	TraitorLastRosterLabels       []string                       // the wolf roster the Traitor was last DMed, sorted — nil until their first DM; compared against on every wolf-faction membership change to avoid re-sending an unchanged roster
 	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
 	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor handlers against a late click landing during the Witch's stage-2 window. Does NOT gate Witch or Hunter handlers.
 	Votes                         map[string]string              // voterID -> targetID, reset each day
@@ -952,7 +932,6 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	leftPlayer := copyPlayer(p)
 	hunterRevenged := applyHunterRevengeChain(game, userID)
 	applyWolfCubBonusBiteFlag(game, append([]string{userID}, idsOf(hunterRevenged)...))
-	traitorDM := checkTraitorRosterChange(game)
 	if len(hunterRevenged) > 0 && len(game.History) > 0 {
 		game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
 	}
@@ -966,7 +945,6 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	for _, hp := range hunterRevenged {
 		removeFromAliveThread(s, aliveThreadID, hp.UserID)
 	}
-	cmd.sendTraitorRosterDM(s, traitorDM)
 	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
 
 	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
@@ -1305,7 +1283,7 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}
 	}
 
-	var initialTraitorDM *wolfRosterChangeDM
+	var initialTraitorDM *wolfRosterDM
 	gameFound := func() bool {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -1315,7 +1293,7 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}
 		game.Players = players
 		game.JoinOrder = joinOrder
-		initialTraitorDM = checkTraitorRosterChange(game)
+		initialTraitorDM = traitorRosterDM(game)
 		return true
 	}()
 	if !gameFound {

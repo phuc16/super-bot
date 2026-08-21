@@ -387,6 +387,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		doctorTargets  []*player
 		hunter         *player
 		hunterTargets  []*player
+		traitorDM      *wolfRosterDM
 	)
 	func() {
 		cmd.mu.Lock()
@@ -444,11 +445,14 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 			hunter = copyPlayer(hunters[0])
 			hunterTargets = copyPlayers(aliveExcept(game, hunter.UserID))
 		}
+
+		traitorDM = traitorRosterDM(game)
 	}()
 	if !gameFound {
 		return
 	}
 	muteAliveThread(s, guildID, aliveThreadID)
+	cmd.sendTraitorRosterDM(s, traitorDM)
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ, Thợ Săn đang hành động trong tin nhắn riêng...\n\n%s", round, summary),
@@ -896,7 +900,6 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		biteOutcomeLines    []string
 		hunterRevenged      []*player
 		summary             string
-		traitorDM           *wolfRosterChangeDM
 	)
 	func() {
 		cmd.mu.Lock()
@@ -995,7 +998,6 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		}
 		deadThisResolution = append(deadThisResolution, idsOf(hunterRevenged)...)
 		applyWolfCubBonusBiteFlag(game, deadThisResolution)
-		traitorDM = checkTraitorRosterChange(game)
 
 		revealOnDeath = game.RevealOnDeath
 		summary = aliveDeadSummary(game)
@@ -1027,7 +1029,6 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 	if !gameFound {
 		return
 	}
-	cmd.sendTraitorRosterDM(s, traitorDM)
 	for _, p := range killedPlayers {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)
 	}

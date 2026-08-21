@@ -914,7 +914,7 @@ func TestWolfRosterLabels(t *testing.T) {
 	}
 }
 
-func TestCheckTraitorRosterChangeNoOpWhenUnchanged(t *testing.T) {
+func TestTraitorRosterDM(t *testing.T) {
 	game := &werewolfGame{
 		JoinOrder: []string{"w1", "traitor1"},
 		Players: map[string]*player{
@@ -922,18 +922,27 @@ func TestCheckTraitorRosterChangeNoOpWhenUnchanged(t *testing.T) {
 			"traitor1": {UserID: "traitor1", Label: "Trai", Role: roleTraitor, Faction: factionWolf, Alive: true},
 		},
 	}
-	first := checkTraitorRosterChange(game)
+	// Spec §4d (amended 2026-08-22): the roster DM resends unconditionally
+	// every time it's requested — no "only if changed" gating — so a
+	// repeat call with no roster change still returns a non-nil DM.
+	first := traitorRosterDM(game)
 	if first == nil || first.TraitorUserID != "traitor1" || len(first.Labels) != 1 || first.Labels[0] != "Wolf" {
-		t.Fatalf("first checkTraitorRosterChange() = %+v, want a DM naming Wolf", first)
+		t.Fatalf("first traitorRosterDM() = %+v, want a DM naming Wolf", first)
 	}
-	second := checkTraitorRosterChange(game)
-	if second != nil {
-		t.Errorf("second checkTraitorRosterChange() with no roster change = %+v, want nil", second)
+	second := traitorRosterDM(game)
+	if second == nil || len(second.Labels) != 1 || second.Labels[0] != "Wolf" {
+		t.Errorf("second traitorRosterDM() with no roster change = %+v, want a DM naming Wolf again, not nil", second)
 	}
 
 	game.Players["w1"].Alive = false
-	third := checkTraitorRosterChange(game)
+	third := traitorRosterDM(game)
 	if third == nil || len(third.Labels) != 0 {
-		t.Errorf("checkTraitorRosterChange() after the only wolf dies = %+v, want an empty-roster DM", third)
+		t.Errorf("traitorRosterDM() after the only wolf dies = %+v, want an empty-roster DM", third)
+	}
+
+	game.Players["traitor1"].Alive = false
+	fourth := traitorRosterDM(game)
+	if fourth != nil {
+		t.Errorf("traitorRosterDM() with no live Traitor = %+v, want nil", fourth)
 	}
 }
