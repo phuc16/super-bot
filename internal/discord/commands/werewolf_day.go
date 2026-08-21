@@ -162,7 +162,14 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 		summary = aliveDeadSummary(game)
 		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
+		// Same liveness check runDayDiscuss applies before setting the mute:
+		// if the target died overnight no per-member overwrite was ever
+		// created, and deleting a nonexistent one just logs an API error
+		// every round.
 		mutedUserID = game.DisruptorTarget
+		if target, exists := game.Players[mutedUserID]; mutedUserID == "" || !exists || !target.Alive {
+			mutedUserID = ""
+		}
 	}()
 	if !gameFound {
 		return
