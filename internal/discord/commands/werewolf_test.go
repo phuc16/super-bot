@@ -19,6 +19,14 @@ func TestRolesForPlayerCount(t *testing.T) {
 		{10, roleRatio{Werewolves: 2, Seers: 1, Doctors: 1}},
 		{11, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
 		{12, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
+		{13, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
+		{14, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
+		{15, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}},
+		{16, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}},
+		{17, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}},
+		{18, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}},
+		{19, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}},
+		{20, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}},
 	}
 	for _, c := range cases {
 		got, err := rolesForPlayerCount(c.n)
@@ -35,8 +43,8 @@ func TestRolesForPlayerCountOutOfRange(t *testing.T) {
 	if _, err := rolesForPlayerCount(4); err == nil {
 		t.Error("expected error for 4 players, got nil")
 	}
-	if _, err := rolesForPlayerCount(13); err == nil {
-		t.Error("expected error for 13 players, got nil")
+	if _, err := rolesForPlayerCount(21); err == nil {
+		t.Error("expected error for 21 players, got nil")
 	}
 }
 
@@ -80,7 +88,7 @@ func TestAssignRolesOutOfRange(t *testing.T) {
 
 func TestCheckWinConditionOngoing(t *testing.T) {
 	players := map[string]*player{
-		"w1": {UserID: "w1", Role: roleWerewolf, Alive: true},
+		"w1": {UserID: "w1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
 		"v1": {UserID: "v1", Role: roleVillager, Alive: true},
 		"v2": {UserID: "v2", Role: roleVillager, Alive: true},
 	}
@@ -101,8 +109,8 @@ func TestCheckWinConditionVillagersWin(t *testing.T) {
 
 func TestCheckWinConditionWerewolvesWin(t *testing.T) {
 	players := map[string]*player{
-		"w1": {UserID: "w1", Role: roleWerewolf, Alive: true},
-		"w2": {UserID: "w2", Role: roleWerewolf, Alive: true},
+		"w1": {UserID: "w1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+		"w2": {UserID: "w2", Role: roleWerewolf, Faction: factionWolf, Alive: true},
 		"v1": {UserID: "v1", Role: roleVillager, Alive: true},
 	}
 	if got := checkWinCondition(players); got != resultWerewolvesWin {
@@ -289,5 +297,60 @@ func TestChunkRecapMessagesSplitsOnRoundBoundary(t *testing.T) {
 func TestChunkRecapMessagesEmptyHistory(t *testing.T) {
 	if got := chunkRecapMessages(nil, 2000); got != nil {
 		t.Errorf("expected nil for empty history, got %v", got)
+	}
+}
+
+func TestFactionForRole(t *testing.T) {
+	cases := []struct {
+		r    role
+		want faction
+	}{
+		{roleVillager, factionVillager},
+		{roleWerewolf, factionWolf},
+		{roleSeer, factionVillager},
+		{roleDoctor, factionVillager},
+		{roleWolfCub, factionWolf},
+		{roleCursedWolf, factionVillager}, // starts villager-faction; flips to wolf on conversion (later plan)
+		{roleTraitor, factionWolf},
+		{roleWitch, factionVillager},
+		{roleHunter, factionVillager},
+		{roleDisruptor, factionVillager},
+		{roleCupid, factionVillager},
+	}
+	for _, c := range cases {
+		if got := factionForRole(c.r); got != c.want {
+			t.Errorf("factionForRole(%v) = %v, want %v", c.r, got, c.want)
+		}
+	}
+}
+
+func TestRolePointsCoversEveryRole(t *testing.T) {
+	allRoles := []role{
+		roleVillager, roleWerewolf, roleSeer, roleDoctor,
+		roleWolfCub, roleCursedWolf, roleTraitor,
+		roleWitch, roleHunter, roleDisruptor, roleCupid,
+	}
+	for _, r := range allRoles {
+		if _, ok := rolePoints[r]; !ok {
+			t.Errorf("rolePoints missing entry for role %v", r)
+		}
+	}
+	want := map[role]int{
+		roleWerewolf:   -6,
+		roleWolfCub:    -8,
+		roleCursedWolf: -4,
+		roleTraitor:    -6,
+		roleVillager:   1,
+		roleSeer:       3,
+		roleDoctor:     3,
+		roleWitch:      4,
+		roleHunter:     3,
+		roleDisruptor:  -2,
+		roleCupid:      -3,
+	}
+	for r, wantPoints := range want {
+		if got := rolePoints[r]; got != wantPoints {
+			t.Errorf("rolePoints[%v] = %d, want %d", r, got, wantPoints)
+		}
 	}
 }

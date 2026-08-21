@@ -21,7 +21,7 @@ var werewolfSeqCounter uint64
 
 const (
 	werewolfMinPlayers = 5
-	werewolfMaxPlayers = 12
+	werewolfMaxPlayers = 20
 )
 
 // roleRatio describes how many of each special role a game of a given size gets.
@@ -45,8 +45,12 @@ func rolesForPlayerCount(n int) (roleRatio, error) {
 		return roleRatio{Werewolves: 1, Seers: 1}, nil
 	case n <= 10:
 		return roleRatio{Werewolves: 2, Seers: 1, Doctors: 1}, nil
-	default: // 11-12
+	case n <= 14:
 		return roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}, nil
+	case n <= 17:
+		return roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}, nil
+	default: // 18-20
+		return roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}, nil
 	}
 }
 
@@ -57,6 +61,13 @@ const (
 	roleWerewolf
 	roleSeer
 	roleDoctor
+	roleWolfCub
+	roleCursedWolf
+	roleTraitor
+	roleWitch
+	roleHunter
+	roleDisruptor
+	roleCupid
 )
 
 func (r role) label() string {
@@ -67,16 +78,72 @@ func (r role) label() string {
 		return "Tiên Tri"
 	case roleDoctor:
 		return "Bác Sĩ"
+	case roleWolfCub:
+		return "Sói Con"
+	case roleCursedWolf:
+		return "Sói Nguyền"
+	case roleTraitor:
+		return "Kẻ Phản Bội"
+	case roleWitch:
+		return "Phù Thủy"
+	case roleHunter:
+		return "Thợ Săn"
+	case roleDisruptor:
+		return "Kẻ Phá Hoại"
+	case roleCupid:
+		return "Thần Tình Yêu"
 	default:
 		return "Dân Làng"
 	}
 }
 
+// faction determines win-condition membership, independent of role — every
+// role's faction matches intuition except Cursed Wolf, which starts
+// villager-faction and flips to wolf-faction on conversion (a later plan);
+// that's exactly why Faction is a stored, mutable field on player rather
+// than derived from Role on every read.
+type faction int
+
+const (
+	factionVillager faction = iota
+	factionWolf
+)
+
+// factionForRole returns the faction a freshly-dealt player of role r
+// starts in. Only used at deal time (assignRoles) — Cursed Wolf's Faction
+// is mutated directly at runtime afterward, not re-derived from this.
+func factionForRole(r role) faction {
+	switch r {
+	case roleWerewolf, roleWolfCub, roleTraitor:
+		return factionWolf
+	default:
+		return factionVillager
+	}
+}
+
+// rolePoints is the manual role-pick UI's balance-score input (a later
+// plan) — not used by rolesForPlayerCount's runtime logic, which stays a
+// fixed lookup table.
+var rolePoints = map[role]int{
+	roleWerewolf:   -6,
+	roleWolfCub:    -8,
+	roleCursedWolf: -4,
+	roleTraitor:    -6,
+	roleVillager:   1,
+	roleSeer:       3,
+	roleDoctor:     3,
+	roleWitch:      4,
+	roleHunter:     3,
+	roleDisruptor:  -2,
+	roleCupid:      -3,
+}
+
 type player struct {
-	UserID string
-	Label  string
-	Role   role
-	Alive  bool
+	UserID  string
+	Label   string
+	Role    role
+	Faction faction
+	Alive   bool
 }
 
 // assignRoles shuffles a copy of joinOrder and deals roles per rolesForPlayerCount.
@@ -96,7 +163,7 @@ func assignRoles(joinOrder []string, labels map[string]string) (map[string]*play
 		for k := 0; k < count; k++ {
 			id := shuffled[idx]
 			idx++
-			players[id] = &player{UserID: id, Label: labels[id], Role: r, Alive: true}
+			players[id] = &player{UserID: id, Label: labels[id], Role: r, Faction: factionForRole(r), Alive: true}
 		}
 	}
 	assign(ratio.Werewolves, roleWerewolf)
@@ -104,7 +171,7 @@ func assignRoles(joinOrder []string, labels map[string]string) (map[string]*play
 	assign(ratio.Doctors, roleDoctor)
 	for ; idx < len(shuffled); idx++ {
 		id := shuffled[idx]
-		players[id] = &player{UserID: id, Label: labels[id], Role: roleVillager, Alive: true}
+		players[id] = &player{UserID: id, Label: labels[id], Role: roleVillager, Faction: factionForRole(roleVillager), Alive: true}
 	}
 	return players, nil
 }
@@ -130,7 +197,7 @@ func checkWinCondition(players map[string]*player) gameResult {
 		if !p.Alive {
 			continue
 		}
-		if p.Role == roleWerewolf {
+		if p.Faction == factionWolf {
 			aliveWolves++
 		} else {
 			aliveOthers++
