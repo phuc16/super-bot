@@ -2203,7 +2203,7 @@ This task has no code changes and requires a real Discord server with the bot in
 Checklist to hand over:
 
 - [ ] Run an 11+ player game. Confirm the role-assigned announcement's breakdown includes "🧙 Phù Thủy: 1 · 🏹 Thợ Săn: 1".
-- [ ] Confirm Hunter gets a nightly DM target-select, can change their pick on a later night while still alive, and that AFK strikes accrue if they never act.
+- [ ] Confirm Hunter gets a nightly DM target-select, can change their pick on a later night while still alive, and that going quiet (never re-picking) does NOT accrue AFK strikes or block night completion — per spec §4f, Hunter is exempt from that gating since re-picking is optional.
 - [ ] Confirm Witch's DM only arrives *after* the night-result would otherwise be known (i.e. after the wolf vote resolves and the wolf thread is deleted) — she should see who was bitten (or "Không ai bị cắn"), with a poison target-select menu (only present if she hasn't used it) and a heal button (only present if there's a bite target and she hasn't used it) plus a skip button.
 - [ ] Confirm heal actually prevents the wolf-bite death (message says "🧙 Phù Thủy đã cứu sống mục tiêu..."), and that it's single-use — try to heal again on a later night and confirm the button is gone.
 - [ ] Confirm poison kills the chosen target even if Doctor protected them that same night (poison bypasses protection), and that it's single-use similarly.
