@@ -1372,7 +1372,11 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			}
 		}
 		if biteSparedCount > 0 {
-			lines = append(lines, "🌫️ Có người khác cũng bị Sói cắn nhưng thoát chết trong bí ẩn.")
+			if len(killedPlayers) > 0 {
+				lines = append(lines, "🌫️ Có người khác cũng bị Sói cắn nhưng thoát chết trong bí ẩn.")
+			} else {
+				lines = append(lines, "🌫️ Có người bị Sói cắn nhưng thoát chết trong bí ẩn.")
+			}
 		}
 		resultMsg = strings.Join(lines, "\n")
 	case bonusBite && poisonedPlayer == nil:
