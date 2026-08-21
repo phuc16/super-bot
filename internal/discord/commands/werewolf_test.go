@@ -1345,3 +1345,25 @@ func TestRoleCountCustomIDPrefixesDoNotCollide(t *testing.T) {
 		t.Errorf("encoded role = %q, want %d", parts[1], int(roleWerewolf))
 	}
 }
+
+func TestFormatRoleCountsAnnouncementCountsActualRoster(t *testing.T) {
+	players := map[string]*player{
+		"a": {Role: roleWerewolf}, "b": {Role: roleWerewolf},
+		"c": {Role: roleWolfCub},
+		"d": {Role: roleSeer},
+		"e": {Role: roleVillager}, "f": {Role: roleVillager},
+	}
+	got := formatRoleCountsAnnouncement(players)
+	if !strings.Contains(got, "Ma Sói: 2") {
+		t.Errorf("formatRoleCountsAnnouncement() = %q, want it to count 2 Werewolves", got)
+	}
+	if !strings.Contains(got, "Sói Con: 1") {
+		t.Errorf("formatRoleCountsAnnouncement() = %q, want it to count 1 Wolf Cub", got)
+	}
+	if !strings.Contains(got, "Dân Làng: 2") {
+		t.Errorf("formatRoleCountsAnnouncement() = %q, want it to count 2 Villagers", got)
+	}
+	if strings.Contains(got, "Bác Sĩ") {
+		t.Errorf("formatRoleCountsAnnouncement() = %q, want a zero-count role (Doctor) omitted", got)
+	}
+}

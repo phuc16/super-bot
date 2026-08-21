@@ -1389,12 +1389,7 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 	cmd.sendTraitorRosterDM(s, initialTraitorDM)
 
 	pingText, allowedMentions := pingOnce(joinOrder)
-	roleCounts := "" // best-effort: if this somehow errors, just omit the breakdown rather than failing the announcement
-	if ratio, err := rolesForPlayerCount(len(joinOrder)); err == nil {
-		villagers := len(joinOrder) - ratio.Werewolves - ratio.Seers - ratio.Doctors - ratio.Witches - ratio.Hunters - ratio.Disruptors
-		roleCounts = fmt.Sprintf("\n🐺 Sói: %d · 🔮 Tiên Tri: %d · 💉 Bác Sĩ: %d · 🧙 Phù Thủy: %d · 🏹 Thợ Săn: %d · 🤫 Kẻ Phá Hoại: %d · 👤 Dân Làng: %d",
-			ratio.Werewolves, ratio.Seers, ratio.Doctors, ratio.Witches, ratio.Hunters, ratio.Disruptors, villagers)
-	}
+	roleCounts := formatRoleCountsAnnouncement(players)
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         fmt.Sprintf("🐺 Vai trò đã được gửi riêng cho từng người! %s%s", pingText, roleCounts),
 		AllowedMentions: allowedMentions,

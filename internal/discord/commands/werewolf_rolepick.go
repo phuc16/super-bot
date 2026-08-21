@@ -10,6 +10,64 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// roleEmoji is the emoji prefix used in player-facing role-count text —
+// role.label() itself is plain text, so this is the announcement/editor
+// layer's own small mapping, kept separate from role.label() since not
+// every caller of label() wants an emoji prefix.
+func roleEmoji(r role) string {
+	switch r {
+	case roleWerewolf:
+		return "🐺"
+	case roleWolfCub:
+		return "🐺👶"
+	case roleCursedWolf:
+		return "🐺✨"
+	case roleTraitor:
+		return "🎭"
+	case roleSeer:
+		return "🔮"
+	case roleDoctor:
+		return "💉"
+	case roleWitch:
+		return "🧙"
+	case roleHunter:
+		return "🏹"
+	case roleDisruptor:
+		return "🤫"
+	case roleCupid:
+		return "💘"
+	default:
+		return "👤"
+	}
+}
+
+// formatRoleCountsAnnouncement builds the role-count breakdown for
+// startPreflight's role-assigned announcement, counting the players map
+// that was ACTUALLY dealt — correct for both the fixed table and a
+// custom-roles game, unlike re-deriving from rolesForPlayerCount (which
+// only ever agrees with reality on the fixed-table path, since that path
+// alone is what it can see). Zero-count roles are omitted; Villager
+// (whatever's left over) is always listed last if present.
+func formatRoleCountsAnnouncement(players map[string]*player) string {
+	counts := make(map[role]int)
+	for _, p := range players {
+		counts[p.Role]++
+	}
+	var parts []string
+	for _, r := range append(append([]role{}, roleCountWolfSideRoles...), roleCountVillagerSideRoles...) {
+		if r == roleVillager {
+			continue // rendered last, below
+		}
+		if c := counts[r]; c > 0 {
+			parts = append(parts, fmt.Sprintf("%s %s: %d", roleEmoji(r), r.label(), c))
+		}
+	}
+	if c := counts[roleVillager]; c > 0 {
+		parts = append(parts, fmt.Sprintf("%s %s: %d", roleEmoji(roleVillager), roleVillager.label(), c))
+	}
+	return "\n" + strings.Join(parts, " · ")
+}
+
 const (
 	werewolfRoleCountID        = "ww:rolecount:"
 	werewolfRoleCountConfirmID = "ww:rolecountconfirm:"
