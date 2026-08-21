@@ -18,6 +18,7 @@ const (
 	werewolfWitchPoisonID     = "ww:witchpoison:"
 	werewolfWitchSkipID       = "ww:witchskip:"
 	werewolfDisruptorTargetID = "ww:disruptortarget:"
+	werewolfCupidPairID       = "ww:cupidpair:"
 
 	// nightActionWindow is the solo window for the Seer and Doctor, who each
 	// act alone. Wolves get their own, longer window — see
@@ -347,6 +348,104 @@ func targetSelectMenu(customID, placeholder string, targets []*player) []discord
 	}
 }
 
+// cupidPairSelectMenu builds Cupid's round-1 pairing select — a single
+// multi-select requiring exactly 2 picks, simpler than the reference's
+// sequential click-twice UX and equivalent in outcome.
+func cupidPairSelectMenu(customID, placeholder string, targets []*player) []discordgo.MessageComponent {
+	options := make([]discordgo.SelectMenuOption, 0, len(targets))
+	for _, p := range targets {
+		options = append(options, discordgo.SelectMenuOption{
+			Label: truncateLabel(p.Label),
+			Value: p.UserID,
+		})
+	}
+	minValues := 2
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					MenuType:    discordgo.StringSelectMenu,
+					CustomID:    customID,
+					Placeholder: placeholder,
+					Options:     options,
+					MinValues:   &minValues,
+					MaxValues:   2,
+				},
+			},
+		},
+	}
+}
+
+func (cmd *WerewolfCommand) dmCupidPrompt(s *discordgo.Session, channelID string, cupid *player, targets []*player) {
+	dm, err := s.UserChannelCreate(cupid.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for cupid")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "💘 Chọn đúng 2 người để ghép thành một cặp đôi. Đây là lựa chọn một lần duy nhất, không thể đổi sau khi xác nhận.",
+		Components: cupidPairSelectMenu(werewolfCupidPairID+channelID, "Chọn 2 người", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM cupid prompt")
+	}
+}
+
+func (cmd *WerewolfCommand) handleCupidPair(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) != 2 {
+		respondComponentEphemeral(s, i, "Phải chọn đúng 2 người.")
+		return
+	}
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.Round != 1 {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isCupid := game.Players[clickerID]
+	if !isCupid || clicker.Role != roleCupid || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Thần Tình Yêu còn sống mới được ghép đôi.")
+		return
+	}
+	if game.LoverIDs[0] != "" || game.LoverIDs[1] != "" {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã chọn cặp đôi rồi.")
+		return
+	}
+	target1, exists1 := game.Players[values[0]]
+	target2, exists2 := game.Players[values[1]]
+	if !exists1 || !target1.Alive || !exists2 || !target2.Alive || values[0] == values[1] {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	game.LoverIDs = [2]string{values[0], values[1]}
+	label1, label2 := target1.Label, target2.Label
+	id1, id2 := values[0], values[1]
+	cmd.mu.Unlock()
+
+	respondComponentEphemeral(s, i, fmt.Sprintf("💘 Đã ghép: %s ❤️ %s.", label1, label2))
+	announceRoleDecided(s, channelID, "💘 Thần Tình Yêu")
+
+	for _, pair := range []struct{ toID, partnerLabel string }{
+		{id1, label2},
+		{id2, label1},
+	} {
+		dm, err := s.UserChannelCreate(pair.toID)
+		if err != nil {
+			log.Error().Err(err).Str("user_id", pair.toID).Msg("werewolf: failed to open DM for lover reveal")
+			continue
+		}
+		if _, err := s.ChannelMessageSend(dm.ID, fmt.Sprintf("💘 Thần Tình Yêu đã ghép bạn với **%s**. Nếu một trong hai người chết, người còn lại cũng chết theo.", pair.partnerLabel)); err != nil {
+			log.Error().Err(err).Str("user_id", pair.toID).Msg("werewolf: failed to DM lover reveal")
+		}
+	}
+}
+
 // copyPlayer returns a fresh *player holding a value copy of p, safe to read
 // without cmd.mu held — unlike p itself, which handleLeave (and other
 // handlers) can mutate concurrently at any time.
@@ -390,6 +489,8 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		hunterTargets    []*player
 		disruptor        *player
 		disruptorTargets []*player
+		cupid            *player
+		cupidTargets     []*player
 		traitorDM        *wolfRosterDM
 	)
 	func() {
@@ -456,6 +557,13 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 			disruptorTargets = copyPlayers(aliveExcept(game, disruptor.UserID))
 		}
 
+		if game.Round == 1 {
+			if cupids := alivePlayersOfRole(game, roleCupid); len(cupids) > 0 {
+				cupid = copyPlayer(cupids[0])
+				cupidTargets = copyPlayers(aliveExcept(game, cupid.UserID))
+			}
+		}
+
 		traitorDM = traitorRosterDM(game)
 	}()
 	if !gameFound {
@@ -483,6 +591,9 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	}
 	if disruptor != nil {
 		cmd.dmDisruptorPrompt(s, channelID, disruptor, disruptorTargets)
+	}
+	if cupid != nil {
+		cmd.dmCupidPrompt(s, channelID, cupid, cupidTargets)
 	}
 
 	totalWindow := nightActionWindow

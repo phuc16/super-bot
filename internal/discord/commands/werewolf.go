@@ -409,6 +409,7 @@ type werewolfGame struct {
 	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
 	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
 	DisruptorTarget               string                         // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss/day-vote phase transition to apply/remove the per-member mute
+	LoverIDs                      [2]string                      // set once by Cupid on round 1; ["", ""] means no pairing was made
 	DisruptorActedThisRound       bool                           // reset each round; true once the Disruptor has made at least one pick this round — gates the progress announcement to the first pick only, mirroring Hunter's pre-AFK-exemption shape
 	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
 	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
@@ -1395,6 +1396,8 @@ func (cmd *WerewolfCommand) HandleComponent(s *discordgo.Session, i *discordgo.I
 		cmd.handleHunterTarget(s, i, strings.TrimPrefix(customID, werewolfHunterTargetID))
 	case strings.HasPrefix(customID, werewolfDisruptorTargetID):
 		cmd.handleDisruptorTarget(s, i, strings.TrimPrefix(customID, werewolfDisruptorTargetID))
+	case strings.HasPrefix(customID, werewolfCupidPairID):
+		cmd.handleCupidPair(s, i, strings.TrimPrefix(customID, werewolfCupidPairID))
 	case strings.HasPrefix(customID, werewolfWitchHealID):
 		cmd.handleWitchHeal(s, i, strings.TrimPrefix(customID, werewolfWitchHealID))
 	case strings.HasPrefix(customID, werewolfWitchPoisonID):
