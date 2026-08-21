@@ -73,15 +73,35 @@ func (cmd *HelpCommand) Handle(s *discordgo.Session, i *discordgo.InteractionCre
 		embeds = []*discordgo.MessageEmbed{cmd.getGeneralHelp(lang)}
 	}
 
+	if len(embeds) == 0 {
+		return
+	}
+
+	// Discord's 6000-char embed budget applies to the SUM of every embed in
+	// one message, not to each embed individually — so multi-embed help
+	// (werewolf) can't ship all its embeds in a single response even though
+	// each one individually fits under 6000. Send the first as the actual
+	// interaction response, then any remaining embeds as separate ephemeral
+	// followup messages.
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Embeds: embeds,
+			Embeds: []*discordgo.MessageEmbed{embeds[0]},
 			Flags:  discordgo.MessageFlagsEphemeral,
 		},
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send help response")
+		return
+	}
+
+	for _, embed := range embeds[1:] {
+		if _, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+			Embeds: []*discordgo.MessageEmbed{embed},
+			Flags:  discordgo.MessageFlagsEphemeral,
+		}); err != nil {
+			log.Error().Err(err).Msg("Failed to send help followup embed")
+		}
 	}
 }
 
