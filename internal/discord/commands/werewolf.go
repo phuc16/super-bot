@@ -1294,11 +1294,11 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}
 	}
 
-	// deal uses the starter's custom ratio when there is one and it still
-	// fits the (possibly shrunken) roster; otherwise it falls back to the
-	// fixed table, which is also the only safe option once unreachable
-	// players have been dropped and the custom ratio claims more seats than
-	// remain.
+	// deal uses the starter's custom ratio when there is one and it fits the
+	// original roster (roleCountConfirmValid already guarantees this sums to
+	// the original player count); otherwise it falls back to the fixed
+	// table. Only used for the initial deal below — the post-DM-drop
+	// reassignment always uses assignRoles directly, never a custom ratio.
 	deal := func(order []string) (map[string]*player, error) {
 		if customRatio != nil && roleRatioTotal(*customRatio) <= len(order) {
 			return dealRoles(order, labels, *customRatio), nil
@@ -1353,7 +1353,13 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 				return
 			}
 
-			reassigned, err := deal(joinOrder)
+			// Deliberately always falls back to the fixed table here — a
+			// custom ratio was only guaranteed to fit the original roster
+			// size, and re-deriving a smaller custom ratio proportionally
+			// isn't worth the complexity. Reusing the custom ratio against a
+			// shrunken roster would silently absorb every dropped player out
+			// of the villager pool, tilting balance toward the wolves.
+			reassigned, err := assignRoles(joinOrder, labels)
 			if err != nil {
 				sendPlain("❌ Không thể chia lại vai trò: " + err.Error())
 				cmd.abortGameStillCurrent(s, channelID, seq)

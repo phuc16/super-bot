@@ -171,6 +171,62 @@ func TestDealRolesAssignsCupid(t *testing.T) {
 	}
 }
 
+func TestRoleRatioTotal(t *testing.T) {
+	tests := []struct {
+		name string
+		r    roleRatio
+		want int
+	}{
+		{"empty", roleRatio{}, 0},
+		{"single werewolf", roleRatio{Werewolves: 1}, 1},
+		{"wolf side mix", roleRatio{Werewolves: 2, WolfCubs: 1, CursedWolves: 1, Traitors: 1}, 5},
+		{"villager side mix", roleRatio{Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1, Cupids: 1}, 6},
+		{"all roles", roleRatio{
+			Werewolves: 1, WolfCubs: 1, CursedWolves: 1, Traitors: 1,
+			Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1, Cupids: 1,
+		}, 10},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := roleRatioTotal(tt.r); got != tt.want {
+				t.Errorf("roleRatioTotal(%+v) = %d, want %d", tt.r, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDealRolesExactSeatBoundary guards the panic-guard property Fix 1
+// depends on for the first (original) preflight deal call site: a custom
+// ratio whose total exactly equals len(joinOrder) must be fully claimed by
+// dealRoles, with zero seats left over for roleVillager, and must not panic.
+func TestDealRolesExactSeatBoundary(t *testing.T) {
+	joinOrder := []string{"u1", "u2", "u3", "u4"}
+	labels := map[string]string{"u1": "A", "u2": "B", "u3": "C", "u4": "D"}
+	ratio := roleRatio{Werewolves: 1, Seers: 1, Doctors: 1, Traitors: 1}
+	if total := roleRatioTotal(ratio); total != len(joinOrder) {
+		t.Fatalf("test setup: roleRatioTotal(ratio) = %d, want %d (exact seat boundary)", total, len(joinOrder))
+	}
+
+	players := dealRoles(joinOrder, labels, ratio)
+
+	if len(players) != len(joinOrder) {
+		t.Fatalf("dealRoles() produced %d players, want %d", len(players), len(joinOrder))
+	}
+	counts := make(map[role]int)
+	for _, p := range players {
+		counts[p.Role]++
+	}
+	want := map[role]int{roleWerewolf: 1, roleSeer: 1, roleDoctor: 1, roleTraitor: 1}
+	for r, wantCount := range want {
+		if counts[r] != wantCount {
+			t.Errorf("counts[%v] = %d, want %d", r, counts[r], wantCount)
+		}
+	}
+	if counts[roleVillager] != 0 {
+		t.Errorf("counts[roleVillager] = %d, want 0 (ratio exactly claims every seat)", counts[roleVillager])
+	}
+}
+
 func TestCheckWinConditionOngoing(t *testing.T) {
 	players := map[string]*player{
 		"w1": {UserID: "w1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
@@ -1228,8 +1284,8 @@ func TestRoleCountButtonRowsShape(t *testing.T) {
 		t.Fatalf("wolf-side rows = %d, want 3 (2 button rows + confirm)", len(rows))
 	}
 	rows = roleCountButtonRows("chan1", roleCountVillagerSideRoles, counts, 8)
-	if len(rows) != 5 {
-		t.Fatalf("villager-side rows = %d, want 5 (4 button rows + confirm)", len(rows))
+	if len(rows) > 5 {
+		t.Fatalf("too many rows: %d, Discord's limit is 5", len(rows))
 	}
 	for idx, row := range rows {
 		ar, ok := row.(discordgo.ActionsRow)
@@ -1239,6 +1295,18 @@ func TestRoleCountButtonRowsShape(t *testing.T) {
 		if len(ar.Components) > 5 {
 			t.Errorf("row %d has %d components, Discord allows at most 5", idx, len(ar.Components))
 		}
+	}
+
+	last, ok := rows[len(rows)-1].(discordgo.ActionsRow)
+	if !ok || len(last.Components) == 0 {
+		t.Fatalf("last row = %+v, want an ActionsRow with at least one component", rows[len(rows)-1])
+	}
+	confirmBtn, ok := last.Components[0].(discordgo.Button)
+	if !ok {
+		t.Fatalf("last row's first component is %T, want discordgo.Button", last.Components[0])
+	}
+	if !strings.HasPrefix(confirmBtn.CustomID, werewolfRoleCountConfirmID) {
+		t.Errorf("last row's first button CustomID = %q, want prefix %q", confirmBtn.CustomID, werewolfRoleCountConfirmID)
 	}
 }
 
