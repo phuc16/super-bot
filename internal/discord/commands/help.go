@@ -415,16 +415,21 @@ func (cmd *HelpCommand) getCommandHelp(commandName string) *discordgo.MessageEmb
 		return &discordgo.MessageEmbed{
 			Title:       "🐺 `/werewolf` Command",
 			Color:       0x5865F2,
-			Description: "Play a game of Werewolf (Ma Sói): Werewolves, Villagers, a Seer, and a Doctor.",
+			Description: "Play a game of Werewolf (Ma Sói) with up to 11 roles: Werewolf, Wolf Cub, Cursed Wolf, Traitor, Villager, Seer, Guard/Doctor, Witch, Hunter, Disruptor, and Cupid.",
 			Fields: []*discordgo.MessageEmbedField{
 				{
 					Name:   "Subcommands",
-					Value:  "• `/werewolf start reveal-on-death:true|false` - Open a lobby in this channel\n• `/werewolf status` - Check the current phase/round without leaking roles\n• `/werewolf leave` - Leave the lobby, or leave a running game (counts as being eliminated)",
+					Value:  "• `/werewolf start reveal-on-death:true|false custom-roles:true|false` - Open a lobby in this channel; custom-roles opens an ephemeral role-count editor for the starter after the roster locks, instead of the default player-count table\n• `/werewolf status` - Check the current phase/round without leaking roles\n• `/werewolf leave` - Leave the lobby, or leave a running game (counts as being eliminated)",
 					Inline: false,
 				},
 				{
 					Name:   "How it works",
 					Value:  fmt.Sprintf("Anyone can Join/Leave the lobby; the starter clicks Start once %d-%d have joined. Roles are DMed privately. Each night the Werewolves get a private thread to pick a kill target (with more time as their numbers grow), the Seer and Doctor act via DM. Each day: discuss in a private alive-players thread, then vote to lynch (or explicitly skip) — a tie or a skip-win means nobody is lynched. Every phase change posts a live alive/dead roster. Repeats until one side wins, then a full round-by-round recap is posted.", werewolfMinPlayers, werewolfMaxPlayers),
+					Inline: false,
+				},
+				{
+					Name:   "Roles & interaction guide",
+					Value:  "🐺 Werewolf / Wolf Cub / Cursed Wolf (once revealed): act together each night in a private wolf thread.\n🔮 Seer / 💉 Guard / 🧙 Witch / 🏹 Hunter / 🤫 Disruptor: get a private DM each night to choose their action.\n💘 Cupid: gets a private DM only on the very first night.\n🎭 Traitor: gets a DM naming the current wolves at game start, and again every night after — no night action of their own.\n👤 Villager: no special action — just discuss and vote during the day.\nEveryone chats publicly in the alive-players thread during the day; the main channel only shows phase/vote announcements.",
 					Inline: false,
 				},
 				{

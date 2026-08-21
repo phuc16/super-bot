@@ -1174,7 +1174,7 @@ func roleInteractionNote(r role) string {
 	case roleCupid:
 		return "Bot sẽ nhắn tin riêng (DM) cho bạn chỉ vào đêm đầu tiên."
 	case roleTraitor:
-		return "Bot sẽ nhắn tin riêng cho bạn biết ai là Sói khi bắt đầu ván (và mỗi khi danh sách Sói thay đổi) — bạn không có hành động ban đêm."
+		return "Bot sẽ nhắn tin riêng cho bạn biết ai là Sói khi bắt đầu ván, và lại mỗi đêm — bạn không có hành động ban đêm."
 	default:
 		return "Bạn không có hành động riêng — thảo luận cùng mọi người vào ban ngày."
 	}
