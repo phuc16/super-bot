@@ -87,6 +87,47 @@ func TestAssignRolesOutOfRange(t *testing.T) {
 	}
 }
 
+func TestDealRolesAssignsWolfCubCursedWolfTraitor(t *testing.T) {
+	joinOrder := []string{"u1", "u2", "u3", "u4", "u5", "u6"}
+	labels := map[string]string{
+		"u1": "A", "u2": "B", "u3": "C", "u4": "D", "u5": "E", "u6": "F",
+	}
+	ratio := roleRatio{Werewolves: 1, WolfCubs: 1, CursedWolves: 1, Traitors: 1, Seers: 1}
+	players := dealRoles(joinOrder, labels, ratio)
+
+	if len(players) != len(joinOrder) {
+		t.Fatalf("dealRoles() produced %d players, want %d", len(players), len(joinOrder))
+	}
+
+	counts := make(map[role]int)
+	for _, p := range players {
+		counts[p.Role]++
+		switch p.Role {
+		case roleWerewolf, roleWolfCub, roleTraitor:
+			if p.Faction != factionWolf {
+				t.Errorf("player with role %v has faction %v, want factionWolf", p.Role, p.Faction)
+			}
+		case roleCursedWolf:
+			if p.Faction != factionVillager {
+				t.Errorf("freshly-dealt Cursed Wolf has faction %v, want factionVillager (starts as villager, flips on conversion)", p.Faction)
+			}
+		}
+	}
+	want := map[role]int{
+		roleWerewolf:   1,
+		roleWolfCub:    1,
+		roleCursedWolf: 1,
+		roleTraitor:    1,
+		roleSeer:       1,
+		roleVillager:   1,
+	}
+	for r, wantCount := range want {
+		if counts[r] != wantCount {
+			t.Errorf("counts[%v] = %d, want %d", r, counts[r], wantCount)
+		}
+	}
+}
+
 func TestCheckWinConditionOngoing(t *testing.T) {
 	players := map[string]*player{
 		"w1": {UserID: "w1", Role: roleWerewolf, Faction: factionWolf, Alive: true},

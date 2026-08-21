@@ -26,11 +26,14 @@ const (
 
 // roleRatio describes how many of each special role a game of a given size gets.
 type roleRatio struct {
-	Werewolves int
-	Seers      int
-	Doctors    int
-	Witches    int
-	Hunters    int
+	Werewolves   int
+	Seers        int
+	Doctors      int
+	Witches      int
+	Hunters      int
+	WolfCubs     int
+	CursedWolves int
+	Traitors     int
 }
 
 // rolesForPlayerCount returns the role ratio for a given player count, or an
@@ -157,13 +160,12 @@ func (p *player) isWolf() bool {
 	return p.Faction == factionWolf
 }
 
-// assignRoles shuffles a copy of joinOrder and deals roles per rolesForPlayerCount.
-func assignRoles(joinOrder []string, labels map[string]string) (map[string]*player, error) {
-	ratio, err := rolesForPlayerCount(len(joinOrder))
-	if err != nil {
-		return nil, err
-	}
-
+// dealRoles shuffles a copy of joinOrder and deals roles per ratio, filling
+// every remaining seat with roleVillager. Factored out of assignRoles so
+// Plan E's manual role-pick mode can call it directly with a
+// user-constructed ratio instead of always going through
+// rolesForPlayerCount.
+func dealRoles(joinOrder []string, labels map[string]string, ratio roleRatio) map[string]*player {
 	shuffled := make([]string, len(joinOrder))
 	copy(shuffled, joinOrder)
 	rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
@@ -178,6 +180,9 @@ func assignRoles(joinOrder []string, labels map[string]string) (map[string]*play
 		}
 	}
 	assign(ratio.Werewolves, roleWerewolf)
+	assign(ratio.WolfCubs, roleWolfCub)
+	assign(ratio.CursedWolves, roleCursedWolf)
+	assign(ratio.Traitors, roleTraitor)
 	assign(ratio.Seers, roleSeer)
 	assign(ratio.Doctors, roleDoctor)
 	assign(ratio.Witches, roleWitch)
@@ -186,7 +191,17 @@ func assignRoles(joinOrder []string, labels map[string]string) (map[string]*play
 		id := shuffled[idx]
 		players[id] = &player{UserID: id, Label: labels[id], Role: roleVillager, Faction: factionForRole(roleVillager), Alive: true}
 	}
-	return players, nil
+	return players
+}
+
+// assignRoles is dealRoles for the fixed-table path: it derives the ratio
+// from player count instead of accepting one directly.
+func assignRoles(joinOrder []string, labels map[string]string) (map[string]*player, error) {
+	ratio, err := rolesForPlayerCount(len(joinOrder))
+	if err != nil {
+		return nil, err
+	}
+	return dealRoles(joinOrder, labels, ratio), nil
 }
 
 type gameResult int
