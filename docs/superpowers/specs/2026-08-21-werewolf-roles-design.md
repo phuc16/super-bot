@@ -92,6 +92,23 @@ Nightly DM (while alive) with a target-select menu (any alive player except self
 ### 4g. Cupid
 DMs sent only on round 1, to every living player pair-selection... no — DMed once to the Cupid player only, with a 2-target select flow (pick target 1, then target 2, matching the reference's click-to-select-then-click-again-to-deselect UX, adapted to two sequential single-select Discord menus or one multi-select menu with `MaxValues: 2`). On confirm, `game.LoverIDs [2]string` is set and **both lovers are DMed** who their partner is (per your answer — deviating from the reference's "secret" house rule). Lover-death chain: wherever a player's `Alive` flips to `false` (the same four sites Task 7 already touches for alive-thread removal — lynch, wolf-kill/poison, AFK-removal, manual leave), after applying that death, check if the dying player has a living lover via `game.LoverIDs`; if so, apply a second death (reason: lover-death) to that partner, in the same resolution step. Chains only one level deep (a lover's lover-death does not itself have a lover, since `LoverIDs` only ever names the original two).
 
+### 4h. Public per-role progress notifications
+
+Every night, as each acting role finishes deciding, the bot posts a short, identity-free progress line to the **main channel** (not the wolf thread, not DMs) — e.g. "🛡️ Bảo vệ đã quyết định xong.", "🐺 Bầy Sói đã quyết định xong.", "🧙 Phù thủy đã quyết định xong.", "🏹 Thợ săn đã quyết định xong.", "🤫 Kẻ phá hoại đã quyết định xong.", "💘 Thần tình yêu đã quyết định xong." — never naming the acting player or revealing their choice, so everyone in the (locked, bot-only) main channel can watch night progress without waiting blindly, while the actual decision stays private to the DM/thread it was made in.
+
+"Decided" is the same moment each role's *existing* private confirmation already fires, so this is one extra `ChannelMessageSendComplex` call (`AllowedMentions: &discordgo.MessageAllowedMentions{}`, no mentions in the text) added alongside each role's current ephemeral/DM confirmation, not a new tracking mechanism:
+
+- **Wolf pack:** on the first successful `handleWolfTarget` lock (same moment the existing "✅ Đã chốt mục tiêu" ephemeral fires) — posted once per round, not once per wolf.
+- **Seer:** on `handleSeerCheck` success.
+- **Guard:** on `handleDoctorProtect`/Guard-equivalent success.
+- **Witch:** on her explicit confirm (heal / poison / "không làm gì" — any of the three finalizes and posts).
+- **Hunter:** on the *first* successful target pick this round (subsequent silent re-picks the same round do not re-post — avoids spamming the channel every time Hunter changes their mind).
+- **Disruptor:** same first-pick-this-round rule as Hunter.
+- **Cupid:** on confirm, round 1 only (never posts again — the role has no action after night 1).
+- **Traitor:** no notification — they have no nightly decision to make, only the one-time (or roster-change) info DM from section 4c.
+
+This does not change any timing/AFK-strike logic — it's purely an additional public announcement layered on top of the existing private confirmation flow for each role.
+
 ## 5. Recap extensions
 
 `roundLog` (already exists, populated by `resolveNight`/`resolveVote`) gains:
