@@ -417,3 +417,52 @@ func TestTallyWolfVotesTopTwoWithTieForSecondSlot(t *testing.T) {
 		t.Errorf("expected only [x] (second slot tied, dropped), got %v", targets)
 	}
 }
+
+func TestValidWolfVotesDropsDeadVoter(t *testing.T) {
+	aliveWolves := []*player{
+		{UserID: "wolf1", Alive: true},
+	}
+	allPlayers := map[string]*player{
+		"wolf1": {UserID: "wolf1", Alive: true},
+		"wolf2": {UserID: "wolf2", Alive: false}, // departed mid-round
+		"v1":    {UserID: "v1", Alive: true},
+	}
+	votes := map[string]string{"wolf1": "v1", "wolf2": "v1"}
+	got := validWolfVotes(votes, aliveWolves, allPlayers)
+	want := map[string]string{"wolf1": "v1"}
+	if len(got) != len(want) || got["wolf1"] != "v1" {
+		t.Errorf("got %v, want %v (wolf2's vote should be dropped, they're dead)", got, want)
+	}
+}
+
+func TestValidWolfVotesDropsDeadTarget(t *testing.T) {
+	aliveWolves := []*player{
+		{UserID: "wolf1", Alive: true},
+	}
+	allPlayers := map[string]*player{
+		"wolf1": {UserID: "wolf1", Alive: true},
+		"v1":    {UserID: "v1", Alive: false}, // died some other way before resolution
+	}
+	votes := map[string]string{"wolf1": "v1"}
+	got := validWolfVotes(votes, aliveWolves, allPlayers)
+	if len(got) != 0 {
+		t.Errorf("expected vote for a dead target to be dropped, got %v", got)
+	}
+}
+
+func TestValidWolfVotesKeepsLegitimateVotes(t *testing.T) {
+	aliveWolves := []*player{
+		{UserID: "wolf1", Alive: true},
+		{UserID: "wolf2", Alive: true},
+	}
+	allPlayers := map[string]*player{
+		"wolf1": {UserID: "wolf1", Alive: true},
+		"wolf2": {UserID: "wolf2", Alive: true},
+		"v1":    {UserID: "v1", Alive: true},
+	}
+	votes := map[string]string{"wolf1": "v1", "wolf2": "v1"}
+	got := validWolfVotes(votes, aliveWolves, allPlayers)
+	if len(got) != 2 || got["wolf1"] != "v1" || got["wolf2"] != "v1" {
+		t.Errorf("expected both votes kept, got %v", got)
+	}
+}

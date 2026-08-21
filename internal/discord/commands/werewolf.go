@@ -290,7 +290,7 @@ type werewolfGame struct {
 	JoinOrder                     []string                       // frozen once the game leaves phaseLobby
 	WolfThreadID                  string                         // this round's wolf-coordination thread, "" between nights
 	WolfTargetMessageID           string                         // the target-select message in the wolf thread, live-edited as votes come in
-	WolfVotes                     map[string]string              // wolfUserID -> targetUserID this round, changeable until the deadline
+	WolfVotes                     map[string]string              // wolfUserID -> targetUserID this round, locked once cast — no re-voting
 	SeerActed                     bool                           // whether the seer has acted this round
 	SeerTarget                    string                         // who the seer checked this round, "" if SeerActed is false
 	SeerResult                    role                           // that check's result — meaningless if SeerTarget == ""

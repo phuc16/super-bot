@@ -80,6 +80,32 @@ func tallyWolfVotes(votes map[string]string, topN int) (targets []string, ok boo
 	return targets, len(targets) > 0
 }
 
+// validWolfVotes filters raw votes down to the ones that should actually
+// count toward the kill tally: cast by a still-alive wolf, for a
+// still-alive target. A departed/lynched wolf's vote can no longer decide
+// the kill, and a vote for a target who died some other way before
+// resolution can't silently produce a no-kill with a misleading recap —
+// both are dropped here rather than reaching tallyWolfVotes at all. Does
+// NOT affect the AFK-strike check in resolveNight, which intentionally
+// still reads the raw, unfiltered votes map — a wolf who voted for a
+// since-dead target still acted and should not be struck.
+func validWolfVotes(votes map[string]string, aliveWolves []*player, allPlayers map[string]*player) map[string]string {
+	aliveWolfIDs := make(map[string]bool, len(aliveWolves))
+	for _, w := range aliveWolves {
+		aliveWolfIDs[w.UserID] = true
+	}
+	valid := make(map[string]string, len(votes))
+	for voterID, targetID := range votes {
+		if !aliveWolfIDs[voterID] {
+			continue
+		}
+		if target, exists := allPlayers[targetID]; exists && target.Alive {
+			valid[voterID] = targetID
+		}
+	}
+	return valid
+}
+
 // wolfVoteSummary renders the live per-target vote count and per-wolf
 // current pick, shown (and re-edited on every vote) inside the private wolf
 // thread so the pack can coordinate openly with each other — nothing here
@@ -476,22 +502,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		aliveThreadID = game.AliveThreadID
 
 		aliveWolves := alivePlayersOfRole(game, roleWerewolf)
-		aliveIDs := make(map[string]bool, len(game.Players))
-		for _, id := range game.JoinOrder {
-			if p := game.Players[id]; p.Alive {
-				aliveIDs[p.UserID] = true
-			}
-		}
-		aliveWolfIDs := make(map[string]bool, len(aliveWolves))
-		for _, w := range aliveWolves {
-			aliveWolfIDs[w.UserID] = true
-		}
-		validVotes := make(map[string]string, len(game.WolfVotes))
-		for voterID, targetID := range game.WolfVotes {
-			if aliveWolfIDs[voterID] && aliveIDs[targetID] {
-				validVotes[voterID] = targetID
-			}
-		}
+		validVotes := validWolfVotes(game.WolfVotes, aliveWolves, game.Players)
 		wolfTargets, _ := tallyWolfVotes(validVotes, 1)
 		wolfTargetLabel := ""
 		var resolvedTarget string
