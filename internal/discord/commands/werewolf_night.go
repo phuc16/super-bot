@@ -333,6 +333,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.WitchSaveTarget = ""
 		game.WitchPoisonTarget = ""
 		game.WitchActedThisRound = false
+		game.WitchPromptedThisRound = false
 		game.History = append(game.History, roundLog{Round: game.Round})
 
 		round = game.Round
@@ -619,8 +620,10 @@ func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID 
 
 // waitForWitchAction blocks until the Witch has acted (heal/poison/skip) or
 // the deadline passes. No halfway reminder — this window is short and she
-// already has all the information she needs the moment she's prompted.
-func (cmd *WerewolfCommand) waitForWitchAction(s *discordgo.Session, channelID string, deadline time.Time, seq uint64) {
+// already has all the information she needs the moment she's prompted. Unlike
+// waitForNightActions, this has no Discord-facing side effect (no reminder
+// message to send), so it takes no *discordgo.Session.
+func (cmd *WerewolfCommand) waitForWitchAction(channelID string, deadline time.Time, seq uint64) {
 	for {
 		var gameFound, done bool
 		func() {
@@ -743,18 +746,26 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 	}
 
 	if witch != nil {
-		var healUsed, poisonUsed bool
+		var healUsed, poisonUsed, hasChoice bool
 		func() {
 			cmd.mu.Lock()
 			defer cmd.mu.Unlock()
-			if g := cmd.gameIfCurrent(channelID, seq); g != nil {
-				healUsed = g.WitchHealUsed
-				poisonUsed = g.WitchPoisonUsed
+			g := cmd.gameIfCurrent(channelID, seq)
+			if g == nil {
+				return
+			}
+			healUsed = g.WitchHealUsed
+			poisonUsed = g.WitchPoisonUsed
+			hasChoice = !(healUsed && poisonUsed)
+			if hasChoice {
+				g.WitchPromptedThisRound = true
 			}
 		}()
-		cmd.dmWitchPrompt(s, channelID, witch, resolvedTarget, wolfTargetLabel, healUsed, poisonUsed, witchPoisonTargets)
-		deadline := time.Now().Add(witchActionWindow)
-		cmd.waitForWitchAction(s, channelID, deadline, seq)
+		if hasChoice {
+			cmd.dmWitchPrompt(s, channelID, witch, resolvedTarget, wolfTargetLabel, healUsed, poisonUsed, witchPoisonTargets)
+			deadline := time.Now().Add(witchActionWindow)
+			cmd.waitForWitchAction(channelID, deadline, seq)
+		}
 	}
 
 	cmd.finalizeNightResolution(s, channelID, seq, resolvedTarget, doctorSaved, wolfVoteTied, aliveThreadID)
@@ -797,6 +808,14 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 
 		var poisonedID string
 		if game.WitchPoisonTarget != "" {
+			// Known, accepted edge case: the Witch can poison the same player
+			// the wolves bit (heal/poison are only mutually exclusive with
+			// each other for OTHER targets via WitchActedThisRound). If that
+			// player already died via the wolf-kill path above, target.Alive
+			// is false here and this block silently no-ops — no double-kill,
+			// no separate poison recap line — even though WitchPoisonUsed was
+			// already set true when she chose the target. The potion is
+			// simply burned with no visible effect; this is intentional.
 			if target, exists := game.Players[game.WitchPoisonTarget]; exists && target.Alive {
 				target.Alive = false
 				poisonedID = game.WitchPoisonTarget
@@ -813,10 +832,10 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		revealOnDeath = game.RevealOnDeath
 		summary = aliveDeadSummary(game)
 		if killedID != "" {
-			killedPlayer = game.Players[killedID]
+			killedPlayer = copyPlayer(game.Players[killedID])
 		}
 		if poisonedID != "" {
-			poisonedPlayer = game.Players[poisonedID]
+			poisonedPlayer = copyPlayer(game.Players[poisonedID])
 		}
 
 		if n := len(game.History); n > 0 {
@@ -1102,6 +1121,11 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Chỉ Phù Thủy còn sống mới được cứu.")
 		return
 	}
+	if !game.WitchPromptedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
+		return
+	}
 	if game.WitchActedThisRound {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Bạn đã hành động đêm nay rồi.")
@@ -1141,6 +1165,11 @@ func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo
 		respondComponentEphemeral(s, i, "Chỉ Phù Thủy còn sống mới được đầu độc.")
 		return
 	}
+	if !game.WitchPromptedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
+		return
+	}
 	if game.WitchActedThisRound {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Bạn đã hành động đêm nay rồi.")
@@ -1178,6 +1207,11 @@ func (cmd *WerewolfCommand) handleWitchSkip(s *discordgo.Session, i *discordgo.I
 	if !isWitch || clicker.Role != roleWitch || !clicker.Alive {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ Phù Thủy còn sống mới được chọn.")
+		return
+	}
+	if !game.WitchPromptedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
 		return
 	}
 	if game.WitchActedThisRound {
