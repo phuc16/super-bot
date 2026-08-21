@@ -689,6 +689,25 @@ func TestFormatRoundBlockWolfBonusBite(t *testing.T) {
 	}
 }
 
+// TestFormatRoundBlockWolfBonusBiteEmptyOutcomeLines exercises the actual
+// bug Fix 2 closed: WolfBonusBite true but WolfBiteOutcomeLines empty (both
+// bite targets already dead by finalize time) must not fall through to the
+// legacy single-target branch, even though WolfTargetLabel is non-empty.
+func TestFormatRoundBlockWolfBonusBiteEmptyOutcomeLines(t *testing.T) {
+	r := roundLog{
+		Round:           4,
+		WolfBonusBite:   true,
+		WolfTargetLabel: "An, Binh",
+	}
+	got := formatRoundBlock(r)
+	if strings.Contains(got, "🐺 Sói cắn:") {
+		t.Errorf("formatRoundBlock() = %q, want legacy single-target branch not to render when outcome lines are empty", got)
+	}
+	if strings.Contains(got, "🐺🐺") {
+		t.Errorf("formatRoundBlock() = %q, want the bonus-bite header not to render with no outcome lines", got)
+	}
+}
+
 func TestTallyWolfVotesTopTwoUnanimousYieldsOne(t *testing.T) {
 	// Bonus bite armed but the pack agrees: only one distinct target, so the
 	// round must fall back to the ordinary single-target path.
