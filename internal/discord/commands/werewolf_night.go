@@ -139,6 +139,8 @@ func wolfVoteSummary(votes map[string]string, wolves, targets []*player) string 
 		if targetID, voted := votes[w.UserID]; voted {
 			if label, ok := labelByID[targetID]; ok {
 				pick = label
+			} else {
+				pick = "(mục tiêu đã chết)"
 			}
 		}
 		fmt.Fprintf(&b, "\n%s: %s", w.Label, pick)
@@ -172,7 +174,7 @@ func aliveNonWolves(game *werewolfGame) []*player {
 	var result []*player
 	for _, id := range game.JoinOrder {
 		p := game.Players[id]
-		if p.Alive && p.Role != roleWerewolf {
+		if p.Alive && !p.isWolf() {
 			result = append(result, p)
 		}
 	}
@@ -488,6 +490,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		revealOnDeath bool
 		killedPlayer  *player
 		saved         bool
+		wolfVoteTied  bool
 		summary       string
 		aliveThreadID string
 	)
@@ -503,7 +506,8 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 
 		aliveWolves := alivePlayersOfRole(game, roleWerewolf)
 		validVotes := validWolfVotes(game.WolfVotes, aliveWolves, game.Players)
-		wolfTargets, _ := tallyWolfVotes(validVotes, 1)
+		wolfTargets, tallyOK := tallyWolfVotes(validVotes, 1)
+		wolfVoteTied = !tallyOK && len(validVotes) > 0
 		wolfTargetLabel := ""
 		var resolvedTarget string
 		if len(wolfTargets) > 0 {
@@ -565,6 +569,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			entry := &game.History[n-1]
 			entry.WolfTargetLabel = wolfTargetLabel
 			entry.WolfTargetSaved = saved
+			entry.WolfVoteTied = wolfVoteTied
 			entry.DoctorTargetLabel = doctorTargetLabel
 			if game.SeerTarget != "" {
 				if target, exists := game.Players[game.SeerTarget]; exists {
@@ -595,6 +600,8 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", killedPlayer.Label)
 	case saved:
 		resultMsg = "🛡️ Bác Sĩ đã cứu sống mục tiêu đêm qua — không ai chết!"
+	case wolfVoteTied:
+		resultMsg = "🐺 Bầy Sói không thống nhất được mục tiêu — không ai chết trong đêm qua."
 	default:
 		resultMsg = "😴 Không ai chết trong đêm qua."
 	}
@@ -644,6 +651,7 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 		return
 	}
 	game.WolfVotes[clickerID] = targetID
+	seq := game.Seq
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Bạn đã chọn: <@%s>. Phiếu đã khóa, không thể đổi.", targetID))
@@ -660,8 +668,8 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	var threadID, messageID string
 	var wolves, targets []*player
 	cmd.mu.Lock()
-	game, ok = cmd.games[channelID]
-	if !ok {
+	game = cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
 		cmd.mu.Unlock()
 		return
 	}
@@ -726,7 +734,7 @@ func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.I
 	game.SeerActed = true
 	game.SeerTarget = targetID
 	game.SeerResult = target.Role
-	isWolf := target.Role == roleWerewolf
+	isWolf := target.isWolf()
 	cmd.mu.Unlock()
 
 	verdict := "KHÔNG PHẢI Ma Sói"

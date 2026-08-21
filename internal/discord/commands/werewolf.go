@@ -146,6 +146,15 @@ type player struct {
 	Alive   bool
 }
 
+// isWolf reports whether p currently counts as wolf-faction for win
+// condition and role-check purposes. Prefer this over comparing Role
+// directly, since Wolf Cub/Traitor (wolf-faction, non-Werewolf roles) and
+// Cursed Wolf (starts villager-faction, flips later) all need Faction-based
+// checks, not Role-based ones.
+func (p *player) isWolf() bool {
+	return p.Faction == factionWolf
+}
+
 // assignRoles shuffles a copy of joinOrder and deals roles per rolesForPlayerCount.
 func assignRoles(joinOrder []string, labels map[string]string) (map[string]*player, error) {
 	ratio, err := rolesForPlayerCount(len(joinOrder))
@@ -269,6 +278,7 @@ type roundLog struct {
 	Round             int
 	WolfTargetLabel   string
 	WolfTargetSaved   bool
+	WolfVoteTied      bool
 	DoctorTargetLabel string
 	SeerTargetLabel   string
 	SeerResult        role

@@ -259,6 +259,20 @@ func TestFormatRoundBlockOmitsDeadOrAbsentRoles(t *testing.T) {
 	}
 }
 
+func TestFormatRoundBlockWolfVoteTied(t *testing.T) {
+	tied := roundLog{Round: 3, WolfVoteTied: true}
+	got := formatRoundBlock(tied)
+	if !strings.Contains(got, "Sói không thống nhất được mục tiêu") {
+		t.Errorf("expected wolf-tie line when WolfVoteTied is true; got:\n%s", got)
+	}
+
+	notTied := roundLog{Round: 3}
+	got = formatRoundBlock(notTied)
+	if strings.Contains(got, "Sói không thống nhất được mục tiêu") {
+		t.Errorf("expected wolf-tie line to be omitted when WolfVoteTied is false; got:\n%s", got)
+	}
+}
+
 func TestChunkRecapMessagesSingleChunkWhenSmall(t *testing.T) {
 	history := []roundLog{{Round: 1, WolfTargetLabel: "A"}, {Round: 2, WolfTargetLabel: "B"}}
 	chunks := chunkRecapMessages(history, 2000)

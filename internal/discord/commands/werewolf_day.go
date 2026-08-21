@@ -434,6 +434,8 @@ func formatRoundBlock(r roundLog) string {
 		} else {
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s", r.WolfTargetLabel)
 		}
+	} else if r.WolfVoteTied {
+		b.WriteString("\n🐺 Sói không thống nhất được mục tiêu.")
 	}
 	if r.DoctorTargetLabel != "" {
 		fmt.Fprintf(&b, "\n💉 Bác sĩ bảo vệ: %s", r.DoctorTargetLabel)
