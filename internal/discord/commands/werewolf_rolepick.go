@@ -338,7 +338,7 @@ func (cmd *WerewolfCommand) handleRoleCountButton(s *discordgo.Session, i *disco
 		respondComponentEphemeral(s, i, "Đã hết thời gian hoặc ván đã bắt đầu.")
 		return
 	}
-	if i.Member.User.ID != game.StarterID {
+	if interactionUserID(i) != game.StarterID {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được chọn.")
 		return
@@ -388,7 +388,7 @@ func (cmd *WerewolfCommand) handleRoleCountConfirm(s *discordgo.Session, i *disc
 		respondComponentEphemeral(s, i, "Đã hết thời gian hoặc ván đã bắt đầu.")
 		return
 	}
-	if i.Member.User.ID != game.StarterID {
+	if interactionUserID(i) != game.StarterID {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được xác nhận.")
 		return

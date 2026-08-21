@@ -711,6 +711,25 @@ func werewolfLobbyButtons(channelID string, disabled bool) []discordgo.MessageCo
 	}
 }
 
+// werewolfCancelOnlyButtons is the lobby message's component set during
+// phaseRoleEdit: Join/Leave/Start are meaningless once registration closed,
+// but Cancel must stay reachable so an AFK starter can't hold the channel
+// locked for the whole roleEditTimeout with no way out. Same customID as
+// the lobby's own Cancel, so handleCancelLobby handles both.
+func werewolfCancelOnlyButtons(channelID string) []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    "Huỷ",
+					Style:    discordgo.DangerButton,
+					CustomID: werewolfCancelID + channelID,
+				},
+			},
+		},
+	}
+}
+
 // Definition returns the Discord application command definition
 func (cmd *WerewolfCommand) Definition() *discordgo.ApplicationCommand {
 	return &discordgo.ApplicationCommand{
@@ -1064,15 +1083,25 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 		respondComponentEphemeral(s, i, "Bàn này đã kết thúc rồi.")
 		return
 	}
-	if i.Member.User.ID != game.StarterID && !hasAdminPermission(i.Member) {
+	// Cancel stays available through phaseRoleEdit: handleStartGame's
+	// custom-roles branch keeps this button on the lobby message precisely
+	// so an AFK starter can't lock the channel for the full roleEditTimeout
+	// with no escape. Any later phase means the game is genuinely running
+	// and must be left to /werewolf leave and the normal end paths.
+	if game.Phase != phaseLobby && game.Phase != phaseRoleEdit {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Ván đã bắt đầu, không thể huỷ.")
+		return
+	}
+	if interactionUserID(i) != game.StarterID && !hasAdminPermission(i.Member) {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ người mở bàn hoặc quản trị viên mới được huỷ.")
 		return
 	}
 	// Cancel only fires from the lobby buttons, which are cleared once the
-	// game leaves phaseLobby, so WolfThreadID can't be set yet here — but
-	// clean it up defensively in case the UI ever races ahead of the phase
-	// change, mirroring the cleanup the win/end paths already do.
+	// game leaves phaseLobby/phaseRoleEdit, so WolfThreadID can't be set yet
+	// here — but clean it up defensively in case the UI ever races ahead of
+	// the phase change, mirroring the cleanup the win/end paths already do.
 	threadID := game.WolfThreadID
 	aliveThreadID := game.AliveThreadID
 	guildID := game.GuildID
@@ -1154,7 +1183,7 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
 			Content:    "🐺 Người mở bàn đang chọn vai trò tuỳ chỉnh...",
-			Components: []discordgo.MessageComponent{},
+			Components: werewolfCancelOnlyButtons(channelID),
 		},
 	})
 	cmd.sendRoleCountEditor(s, i.Interaction, channelID, playerCount, seq)
@@ -1167,8 +1196,10 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 // what to expect without reading /help werewolf.
 func roleInteractionNote(r role) string {
 	switch r {
-	case roleWerewolf, roleWolfCub, roleCursedWolf:
+	case roleWerewolf, roleWolfCub:
 		return "Bạn sẽ hành động trong thread riêng của bầy Sói mỗi đêm."
+	case roleCursedWolf:
+		return "Bạn hiện là Dân thường bình thường — nếu bị Sói cắn mà sống sót, bạn sẽ biến thành Sói Nguyền và vào thread riêng của bầy Sói từ đêm sau."
 	case roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor:
 		return "Bot sẽ nhắn tin riêng (DM) cho bạn mỗi đêm để chọn hành động."
 	case roleCupid:
