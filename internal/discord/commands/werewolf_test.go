@@ -864,6 +864,122 @@ func TestApplyHunterRevengeChainNoOpIfTargetAlreadyDead(t *testing.T) {
 	}
 }
 
+func TestApplyDeathChainsLoverOnly(t *testing.T) {
+	game := &werewolfGame{
+		LoverIDs: [2]string{"a", "b"},
+		Players: map[string]*player{
+			"a": {UserID: "a", Label: "A", Alive: false},
+			"b": {UserID: "b", Label: "B", Role: roleVillager, Alive: true},
+		},
+	}
+	chained := applyDeathChains(game, "a")
+	if len(chained) != 1 || chained[0].Reason != chainedDeathLover || chained[0].Player.UserID != "b" {
+		t.Fatalf("applyDeathChains() = %+v, want exactly one lover-death for b", chained)
+	}
+	if game.Players["b"].Alive {
+		t.Error("b should be dead after the lover-chain")
+	}
+}
+
+func TestApplyDeathChainsComposesHunterAndLover(t *testing.T) {
+	// Hunter (h) and their lover (l) are paired. h's target is t. h dies
+	// first: the chain must both revenge-kill t AND lover-kill l — two
+	// hops from one death, composing the two independent mechanics.
+	game := &werewolfGame{
+		HunterTarget: "t",
+		LoverIDs:     [2]string{"h", "l"},
+		Players: map[string]*player{
+			"h": {UserID: "h", Label: "Hunter", Role: roleHunter, Alive: false},
+			"t": {UserID: "t", Label: "Target", Role: roleVillager, Alive: true},
+			"l": {UserID: "l", Label: "Lover", Role: roleVillager, Alive: true},
+		},
+	}
+	chained := applyDeathChains(game, "h")
+	if len(chained) != 2 {
+		t.Fatalf("applyDeathChains() = %+v, want 2 chained deaths (revenge target + lover)", chained)
+	}
+	var gotT, gotL bool
+	for _, c := range chained {
+		switch c.Player.UserID {
+		case "t":
+			gotT = c.Reason == chainedDeathHunterRevenge
+		case "l":
+			gotL = c.Reason == chainedDeathLover
+		}
+	}
+	if !gotT || !gotL {
+		t.Errorf("applyDeathChains() = %+v, want both t (hunter-revenge) and l (lover) present", chained)
+	}
+	if game.Players["t"].Alive || game.Players["l"].Alive {
+		t.Error("both t and l should be dead")
+	}
+}
+
+func TestApplyDeathChainsNoLoversMatchesHunterRevengeChain(t *testing.T) {
+	newGame := func() *werewolfGame {
+		return &werewolfGame{
+			HunterTarget: "t",
+			Players: map[string]*player{
+				"h": {UserID: "h", Label: "Hunter", Role: roleHunter, Alive: false},
+				"t": {UserID: "t", Label: "Target", Role: roleVillager, Alive: true},
+			},
+		}
+	}
+	legacy := applyHunterRevengeChain(newGame(), "h")
+	unified, loverDeaths := splitChainedDeaths(applyDeathChains(newGame(), "h"))
+	if len(loverDeaths) != 0 {
+		t.Fatalf("lover chain fired with no LoverIDs set: %+v", loverDeaths)
+	}
+	if len(legacy) != len(unified) {
+		t.Fatalf("applyDeathChains produced %d kills, applyHunterRevengeChain produced %d", len(unified), len(legacy))
+	}
+	for i := range legacy {
+		if legacy[i].UserID != unified[i].UserID {
+			t.Errorf("kill %d: got %q, want %q", i, unified[i].UserID, legacy[i].UserID)
+		}
+	}
+}
+
+func TestApplyDeathChainsLoverKilledHunterRevenges(t *testing.T) {
+	// The lover-killed player is themselves the Hunter with a locked
+	// target — the second hop must still fire.
+	game := &werewolfGame{
+		HunterTarget: "t",
+		LoverIDs:     [2]string{"a", "h"},
+		Players: map[string]*player{
+			"a": {UserID: "a", Label: "A", Role: roleVillager, Alive: false},
+			"h": {UserID: "h", Label: "Hunter", Role: roleHunter, Alive: true},
+			"t": {UserID: "t", Label: "Target", Role: roleVillager, Alive: true},
+		},
+	}
+	hunterRevenged, loverDeaths := splitChainedDeaths(applyDeathChains(game, "a"))
+	if len(loverDeaths) != 1 || loverDeaths[0].UserID != "h" {
+		t.Fatalf("loverDeaths = %+v, want just h", loverDeaths)
+	}
+	if len(hunterRevenged) != 1 || hunterRevenged[0].UserID != "t" {
+		t.Fatalf("hunterRevenged = %+v, want just t", hunterRevenged)
+	}
+	if game.Players["h"].Alive || game.Players["t"].Alive {
+		t.Error("both h and t should be dead")
+	}
+}
+
+func TestFormatRoundBlockLoverDeath(t *testing.T) {
+	r := roundLog{Round: 3, LoverDeathLabel: "Lam"}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "Lam") {
+		t.Errorf("formatRoundBlock() = %q, want the lover-death mentioned", got)
+	}
+}
+
+func TestFormatRoundBlockOmitsLoverDeathWhenEmpty(t *testing.T) {
+	r := roundLog{Round: 1, WolfTargetLabel: "Alice"}
+	got := formatRoundBlock(r)
+	if strings.Contains(got, "Người yêu qua đời theo") {
+		t.Errorf("expected no lover-death line when it didn't trigger, got:\n%s", got)
+	}
+}
+
 func TestFormatRoundBlockHunterRevenge(t *testing.T) {
 	r := roundLog{Round: 3, LynchedLabel: "Alice", HunterRevengeLabel: "Bob"}
 	got := formatRoundBlock(r)

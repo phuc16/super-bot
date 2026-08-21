@@ -223,41 +223,143 @@ func aliveExcept(game *werewolfGame, excludeID string) []*player {
 	return result
 }
 
-// applyHunterRevengeChain checks whether the player who just died (deadID)
-// was the Hunter with a locked-in target; if so, kills that target too
-// (unless already dead). Note: game.HunterTarget is a single game-scoped
-// field, not per-Hunter, so if a second Hunter were ever dealt (not
-// possible with today's ratio tables, which deal exactly one), this
-// cannot produce a genuine multi-Hunter chain — it would resolve the same
-// shared target twice and safely no-op the second time via the
-// already-dead guard below, never mis-killing, but also never revenging
-// more than once per invocation. Must be called with cmd.mu held. Returns
-// value-copy snapshots of everyone killed, safe to read after unlocking
-// — callers append these to their own kill lists for alive-thread removal,
-// win-condition re-checks, and announcements.
+// hunterRevengeStep checks whether the player who just died (deadID) was
+// the Hunter with a locked-in target; if so, kills that target too
+// (unless already dead) and returns a copy of them. Returns nil if no
+// revenge-kill happens. Single-hop — applyHunterRevengeChain loops this
+// for its own standalone callers; applyDeathChains uses this directly as
+// one of the two chain types it composes. Must be called with cmd.mu held.
+func hunterRevengeStep(game *werewolfGame, deadID string) *player {
+	dead, ok := game.Players[deadID]
+	if !ok || dead.Role != roleHunter {
+		return nil
+	}
+	targetID := game.HunterTarget
+	if targetID == "" {
+		return nil
+	}
+	target, exists := game.Players[targetID]
+	if !exists || !target.Alive {
+		return nil
+	}
+	target.Alive = false
+	return copyPlayer(target)
+}
+
+// applyHunterRevengeChain loops hunterRevengeStep starting from deadID.
+// Note: game.HunterTarget is a single game-scoped field, not per-Hunter,
+// so if a second Hunter were ever dealt (not possible with today's ratio
+// tables, which deal exactly one), this cannot produce a genuine
+// multi-Hunter chain — it would resolve the same shared target twice and
+// safely no-op the second time via the already-dead guard, never
+// mis-killing, but also never revenging more than once per invocation.
+// Must be called with cmd.mu held. Returns value-copy snapshots of
+// everyone killed, safe to read after unlocking — callers append these to
+// their own kill lists for alive-thread removal, win-condition re-checks,
+// and announcements.
 func applyHunterRevengeChain(game *werewolfGame, deadID string) []*player {
 	var revenged []*player
 	queue := []string{deadID}
 	for len(queue) > 0 {
 		id := queue[0]
 		queue = queue[1:]
-		dead, ok := game.Players[id]
-		if !ok || dead.Role != roleHunter {
+		target := hunterRevengeStep(game, id)
+		if target == nil {
 			continue
 		}
-		targetID := game.HunterTarget
-		if targetID == "" {
-			continue
-		}
-		target, exists := game.Players[targetID]
-		if !exists || !target.Alive {
-			continue
-		}
-		target.Alive = false
-		revenged = append(revenged, copyPlayer(target))
-		queue = append(queue, targetID)
+		revenged = append(revenged, target)
+		queue = append(queue, target.UserID)
 	}
 	return revenged
+}
+
+// applyLoverDeathChain checks whether the player who just died (deadID)
+// has a living lover via game.LoverIDs; if so, kills that lover too and
+// returns a copy of them. Single-hop by design (spec §4h: "chains only
+// one level deep" — LoverIDs only ever names the original two players, so
+// there is nothing further to chain even if this were looped). Must be
+// called with cmd.mu held.
+func applyLoverDeathChain(game *werewolfGame, deadID string) *player {
+	if deadID == "" {
+		return nil
+	}
+	var partnerID string
+	switch deadID {
+	case game.LoverIDs[0]:
+		partnerID = game.LoverIDs[1]
+	case game.LoverIDs[1]:
+		partnerID = game.LoverIDs[0]
+	default:
+		return nil
+	}
+	if partnerID == "" {
+		return nil
+	}
+	partner, exists := game.Players[partnerID]
+	if !exists || !partner.Alive {
+		return nil
+	}
+	partner.Alive = false
+	return copyPlayer(partner)
+}
+
+type chainedDeathReason int
+
+const (
+	chainedDeathHunterRevenge chainedDeathReason = iota
+	chainedDeathLover
+)
+
+// chainedDeath pairs a copy-snapshot of a chain-killed player with why
+// they died, so callers can render the right recap/announcement line.
+type chainedDeath struct {
+	Player *player
+	Reason chainedDeathReason
+}
+
+// applyDeathChains resolves every secondary death cascading from deadID:
+// Hunter's revenge-kill and Cupid's lover-death, repeating until a pass
+// produces no new deaths. A revenge-killed or lover-killed player can
+// themselves be a Hunter with a locked target, or have a living lover, so
+// both chain types must be checked at every hop — this replaces every
+// direct call to applyHunterRevengeChain in the death-application sites
+// (resolveVote, checkAndHandleGameEnd, handleLeave, finalizeNightResolution)
+// with this unified resolver. Must be called with cmd.mu held.
+func applyDeathChains(game *werewolfGame, deadID string) []chainedDeath {
+	var result []chainedDeath
+	seen := map[string]bool{deadID: true}
+	queue := []string{deadID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if hp := hunterRevengeStep(game, id); hp != nil && !seen[hp.UserID] {
+			seen[hp.UserID] = true
+			result = append(result, chainedDeath{Player: hp, Reason: chainedDeathHunterRevenge})
+			queue = append(queue, hp.UserID)
+		}
+		if lp := applyLoverDeathChain(game, id); lp != nil && !seen[lp.UserID] {
+			seen[lp.UserID] = true
+			result = append(result, chainedDeath{Player: lp, Reason: chainedDeathLover})
+			queue = append(queue, lp.UserID)
+		}
+	}
+	return result
+}
+
+// splitChainedDeaths partitions applyDeathChains's result back into the
+// two announcement/recap shapes the existing call sites already expect
+// (hunterRevengeLine vs loverDeathLine, HunterRevengeLabel vs
+// LoverDeathLabel).
+func splitChainedDeaths(chained []chainedDeath) (hunterRevenged, loverDeaths []*player) {
+	for _, c := range chained {
+		switch c.Reason {
+		case chainedDeathHunterRevenge:
+			hunterRevenged = append(hunterRevenged, c.Player)
+		case chainedDeathLover:
+			loverDeaths = append(loverDeaths, c.Player)
+		}
+	}
+	return hunterRevenged, loverDeaths
 }
 
 // wolfBiteOutcome is what happens to one wolf-vote target at resolution
@@ -291,6 +393,12 @@ func resolveWolfBiteOutcome(targetRole role, saved bool) wolfBiteOutcome {
 // and announceHunterRevenge.
 func hunterRevengeLine(p *player) string {
 	return fmt.Sprintf("🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label)
+}
+
+// loverDeathLine renders the shared announcement line for a lover-death,
+// mirroring hunterRevengeLine's role in the same call sites.
+func loverDeathLine(p *player) string {
+	return fmt.Sprintf("💔 **%s** cũng chết theo vì mất người yêu.", p.Label)
 }
 
 // applyWolfCubBonusBiteFlag arms game.WolfBonusBiteNextNight if any of the
@@ -1047,6 +1155,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		cursedWolfConverted string
 		biteOutcomeLines    []string
 		hunterRevenged      []*player
+		loverDeaths         []*player
 		summary             string
 	)
 	func() {
@@ -1133,18 +1242,21 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			}
 		}
 
+		var chained []chainedDeath
 		for _, id := range killedIDs {
-			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, id)...)
+			chained = append(chained, applyDeathChains(game, id)...)
 		}
 		if poisonedID != "" {
-			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, poisonedID)...)
+			chained = append(chained, applyDeathChains(game, poisonedID)...)
 		}
+		hunterRevenged, loverDeaths = splitChainedDeaths(chained)
 
 		deadThisResolution := append([]string(nil), killedIDs...)
 		if poisonedID != "" {
 			deadThisResolution = append(deadThisResolution, poisonedID)
 		}
 		deadThisResolution = append(deadThisResolution, idsOf(hunterRevenged)...)
+		deadThisResolution = append(deadThisResolution, idsOf(loverDeaths)...)
 		applyWolfCubBonusBiteFlag(game, deadThisResolution)
 
 		revealOnDeath = game.RevealOnDeath
@@ -1169,6 +1281,9 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			if len(hunterRevenged) > 0 {
 				entry.HunterRevengeLabel = hunterRevenged[0].Label
 			}
+			if len(loverDeaths) > 0 {
+				entry.LoverDeathLabel = loverDeaths[0].Label
+			}
 			if bonusBite {
 				entry.WolfBiteOutcomeLines = append([]string(nil), biteOutcomeLines...)
 			}
@@ -1184,6 +1299,9 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		removeFromAliveThread(s, aliveThreadID, poisonedPlayer.UserID)
 	}
 	for _, p := range hunterRevenged {
+		removeFromAliveThread(s, aliveThreadID, p.UserID)
+	}
+	for _, p := range loverDeaths {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)
 	}
 
@@ -1232,6 +1350,9 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 	}
 	for _, p := range hunterRevenged {
 		resultMsg += "\n" + hunterRevengeLine(p)
+	}
+	for _, p := range loverDeaths {
+		resultMsg += "\n" + loverDeathLine(p)
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{

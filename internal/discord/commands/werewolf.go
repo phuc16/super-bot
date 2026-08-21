@@ -377,6 +377,7 @@ type roundLog struct {
 	VoteBreakdown       map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
 	LynchedLabel        string
 	HunterRevengeLabel  string // who died from Hunter's revenge this round, "" if it didn't trigger
+	LoverDeathLabel     string // who died from the lover-chain this round, "" if it didn't trigger
 	WitchSavedLabel     string // who the Witch healed this round, "" if she didn't heal
 	WitchPoisonedLabel  string // who the Witch poisoned this round, "" if she didn't poison
 	CursedWolfConverted string // label, if a not-saved Cursed Wolf converted to wolf-faction this round instead of dying
@@ -938,10 +939,16 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	}
 	p.Alive = false
 	leftPlayer := copyPlayer(p)
-	hunterRevenged := applyHunterRevengeChain(game, userID)
-	applyWolfCubBonusBiteFlag(game, append([]string{userID}, idsOf(hunterRevenged)...))
-	if len(hunterRevenged) > 0 && len(game.History) > 0 {
-		game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
+	chained := applyDeathChains(game, userID)
+	hunterRevenged, loverDeaths := splitChainedDeaths(chained)
+	applyWolfCubBonusBiteFlag(game, append(append([]string{userID}, idsOf(hunterRevenged)...), idsOf(loverDeaths)...))
+	if n := len(game.History); n > 0 {
+		if len(hunterRevenged) > 0 {
+			game.History[n-1].HunterRevengeLabel = hunterRevenged[0].Label
+		}
+		if len(loverDeaths) > 0 {
+			game.History[n-1].LoverDeathLabel = loverDeaths[0].Label
+		}
 	}
 	revealOnDeath := game.RevealOnDeath
 	channelID := game.ChannelID
@@ -952,6 +959,9 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	removeFromAliveThread(s, aliveThreadID, userID)
 	for _, hp := range hunterRevenged {
 		removeFromAliveThread(s, aliveThreadID, hp.UserID)
+	}
+	for _, lp := range loverDeaths {
+		removeFromAliveThread(s, aliveThreadID, lp.UserID)
 	}
 	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
 
@@ -965,6 +975,9 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	}
 	for _, hp := range hunterRevenged {
 		msg += "\n" + hunterRevengeLine(hp)
+	}
+	for _, lp := range loverDeaths {
+		msg += "\n" + loverDeathLine(lp)
 	}
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         msg,

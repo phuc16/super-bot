@@ -225,6 +225,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		gameFound      bool
 		lynchedPlayer  *player
 		hunterRevenged []*player
+		loverDeaths    []*player
 		revealOnDeath  bool
 		summary        string
 		aliveThreadID  string
@@ -261,13 +262,14 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 			}
 		}
 		if lynchedPlayer != nil {
-			hunterRevenged = applyHunterRevengeChain(game, lynchedPlayer.UserID)
+			hunterRevenged, loverDeaths = splitChainedDeaths(applyDeathChains(game, lynchedPlayer.UserID))
 		}
 		var deadIDs []string
 		if lynchedPlayer != nil {
 			deadIDs = append(deadIDs, lynchedPlayer.UserID)
 		}
 		deadIDs = append(deadIDs, idsOf(hunterRevenged)...)
+		deadIDs = append(deadIDs, idsOf(loverDeaths)...)
 		applyWolfCubBonusBiteFlag(game, deadIDs)
 		revealOnDeath = game.RevealOnDeath
 		summary = aliveDeadSummary(game)
@@ -296,6 +298,9 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 			if len(hunterRevenged) > 0 {
 				entry.HunterRevengeLabel = hunterRevenged[0].Label
 			}
+			if len(loverDeaths) > 0 {
+				entry.LoverDeathLabel = loverDeaths[0].Label
+			}
 		}
 	}()
 	if !gameFound {
@@ -305,6 +310,9 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		removeFromAliveThread(s, aliveThreadID, lynchedPlayer.UserID)
 	}
 	for _, p := range hunterRevenged {
+		removeFromAliveThread(s, aliveThreadID, p.UserID)
+	}
+	for _, p := range loverDeaths {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)
 	}
 
@@ -319,6 +327,9 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 	}
 	for _, p := range hunterRevenged {
 		resultMsg += "\n" + hunterRevengeLine(p)
+	}
+	for _, p := range loverDeaths {
+		resultMsg += "\n" + loverDeathLine(p)
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
@@ -345,6 +356,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		removedNames    []string
 		removedIDs      []string
 		hunterRevenged  []*player
+		loverDeaths     []*player
 		threadID        string
 		result          gameResult
 		endedGame       *werewolfGame
@@ -374,12 +386,21 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 				removedIDs = append(removedIDs, id)
 			}
 		}
+		var chained []chainedDeath
 		for _, id := range removedIDs {
-			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, id)...)
+			chained = append(chained, applyDeathChains(game, id)...)
 		}
-		applyWolfCubBonusBiteFlag(game, append(append([]string(nil), removedIDs...), idsOf(hunterRevenged)...))
-		if len(hunterRevenged) > 0 && len(game.History) > 0 {
-			game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
+		hunterRevenged, loverDeaths = splitChainedDeaths(chained)
+		chainDeadIDs := append(append([]string(nil), removedIDs...), idsOf(hunterRevenged)...)
+		chainDeadIDs = append(chainDeadIDs, idsOf(loverDeaths)...)
+		applyWolfCubBonusBiteFlag(game, chainDeadIDs)
+		if n := len(game.History); n > 0 {
+			if len(hunterRevenged) > 0 {
+				game.History[n-1].HunterRevengeLabel = hunterRevenged[0].Label
+			}
+			if len(loverDeaths) > 0 {
+				game.History[n-1].LoverDeathLabel = loverDeaths[0].Label
+			}
 		}
 
 		result = checkWinCondition(game.Players)
@@ -402,11 +423,17 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		for _, p := range hunterRevenged {
 			removeFromAliveThread(s, aliveThreadID, p.UserID)
 		}
+		for _, p := range loverDeaths {
+			removeFromAliveThread(s, aliveThreadID, p.UserID)
+		}
 		if len(removedNames) > 0 {
 			cmd.announceAFKRemovals(s, channelID, removedNames)
 		}
 		if len(hunterRevenged) > 0 {
 			cmd.announceHunterRevenge(s, channelID, hunterRevenged)
+		}
+		if len(loverDeaths) > 0 {
+			cmd.announceLoverDeaths(s, channelID, loverDeaths)
 		}
 		return false
 	}
@@ -446,6 +473,17 @@ func (cmd *WerewolfCommand) announceHunterRevenge(s *discordgo.Session, channelI
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		}); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to announce hunter revenge")
+		}
+	}
+}
+
+func (cmd *WerewolfCommand) announceLoverDeaths(s *discordgo.Session, channelID string, lovers []*player) {
+	for _, p := range lovers {
+		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:         loverDeathLine(p),
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to announce lover death")
 		}
 	}
 }
@@ -532,6 +570,9 @@ func formatRoundBlock(r roundLog) string {
 	}
 	if r.HunterRevengeLabel != "" {
 		fmt.Fprintf(&b, "\n🏹 Thợ săn kéo theo: %s", r.HunterRevengeLabel)
+	}
+	if r.LoverDeathLabel != "" {
+		fmt.Fprintf(&b, "\n💔 Người yêu qua đời theo: %s", r.LoverDeathLabel)
 	}
 	if r.DisruptorMutedLabel != "" {
 		fmt.Fprintf(&b, "\n🤫 Kẻ Phá Hoại làm câm lặng: %s", r.DisruptorMutedLabel)
