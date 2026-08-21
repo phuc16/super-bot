@@ -465,8 +465,11 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 func formatRoundBlock(r roundLog) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n\n**Đêm/Ngày %d:**", r.Round)
+	poisoned := r.WitchPoisonedLabel != ""
 	if r.WolfTargetLabel != "" {
 		switch {
+		case r.WolfTargetSaved && poisoned:
+			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được bác sĩ cứu, nhưng đêm đó vẫn có người chết vì trúng độc)", r.WolfTargetLabel)
 		case r.WolfTargetSaved:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được bác sĩ cứu)", r.WolfTargetLabel)
 		case r.WitchSavedLabel != "":
@@ -474,6 +477,8 @@ func formatRoundBlock(r roundLog) string {
 		default:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s", r.WolfTargetLabel)
 		}
+	} else if r.WolfVoteTied && poisoned {
+		b.WriteString("\n🐺 Sói không thống nhất được mục tiêu, nhưng đêm đó vẫn có người chết vì trúng độc.")
 	} else if r.WolfVoteTied {
 		b.WriteString("\n🐺 Sói không thống nhất được mục tiêu.")
 	}

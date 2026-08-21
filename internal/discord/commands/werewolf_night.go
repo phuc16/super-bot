@@ -335,6 +335,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.WitchActedThisRound = false
 		game.WitchPromptedThisRound = false
 		game.HunterActedThisRound = false
+		game.NightActionsClosed = false
 		game.History = append(game.History, roundLog{Round: game.Round})
 
 		round = game.Round
@@ -735,6 +736,8 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 				entry.SeerResult = game.SeerResult
 			}
 		}
+
+		game.NightActionsClosed = true
 	}()
 	if !gameFound {
 		return
@@ -757,7 +760,13 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			}
 			healUsed = g.WitchHealUsed
 			poisonUsed = g.WitchPoisonUsed
-			hasChoice = !(healUsed && poisonUsed)
+			// hasChoice mirrors witchActionComponents exactly: it's true iff
+			// at least one of {heal button, poison row} would actually
+			// render — poison row renders whenever the potion isn't used
+			// yet, and the heal button only when there's a bite target to
+			// heal and the potion isn't used yet. Otherwise she has nothing
+			// clickable but "skip", so don't bother prompting/waiting.
+			hasChoice = !poisonUsed || (!healUsed && resolvedTarget != "")
 			if hasChoice {
 				g.WitchPromptedThisRound = true
 			}
@@ -795,6 +804,17 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			return
 		}
 		gameFound = true
+
+		// Close the Witch's action window right now, before reading any of
+		// her round-scoped picks below. A click that lands after the
+		// deadline but before this lock is acquired (waitForWitchAction
+		// polls on a 2s sleep, so up to ~2s of slack) would otherwise still
+		// be accepted by the handlers, burning a lifetime potion with the
+		// round-scoped target then discarded by next round's reset and zero
+		// visible effect. The handlers already reject on
+		// !WitchPromptedThisRound with "Tin nhắn này đã hết hạn.", so this
+		// closes the window completely.
+		game.WitchPromptedThisRound = false
 
 		witchHealed = resolvedTarget != "" && game.WitchSaveTarget == "heal"
 		saved := doctorSaved || witchHealed
@@ -874,14 +894,22 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", killedPlayer.Label, killedPlayer.Role.label())
 	case killedPlayer != nil:
 		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", killedPlayer.Label)
-	case doctorSaved:
+	case doctorSaved && poisonedPlayer == nil:
 		resultMsg = "🛡️ Bác Sĩ đã cứu sống mục tiêu đêm qua — không ai chết!"
-	case witchHealed:
+	case doctorSaved:
+		resultMsg = "🛡️ Bác Sĩ đã cứu sống mục tiêu bị Sói cắn đêm qua."
+	case witchHealed && poisonedPlayer == nil:
 		resultMsg = "🧙 Phù Thủy đã cứu sống mục tiêu đêm qua — không ai chết!"
-	case wolfVoteTied:
+	case witchHealed:
+		resultMsg = "🧙 Phù Thủy đã cứu sống mục tiêu bị Sói cắn đêm qua."
+	case wolfVoteTied && poisonedPlayer == nil:
 		resultMsg = "🐺 Bầy Sói không thống nhất được mục tiêu — không ai chết trong đêm qua."
-	default:
+	case wolfVoteTied:
+		resultMsg = "🐺 Bầy Sói không thống nhất được mục tiêu."
+	case poisonedPlayer == nil:
 		resultMsg = "😴 Không ai chết trong đêm qua."
+	default:
+		resultMsg = "😴 Không ai chết vì Sói cắn đêm qua."
 	}
 	if poisonedPlayer != nil {
 		if revealOnDeath {
@@ -917,7 +945,7 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if !ok || game.Phase != phaseNight {
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
 		return
@@ -1007,7 +1035,7 @@ func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.I
 
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if !ok || game.Phase != phaseNight {
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
 		return
@@ -1053,7 +1081,7 @@ func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discord
 
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if !ok || game.Phase != phaseNight {
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
 		return

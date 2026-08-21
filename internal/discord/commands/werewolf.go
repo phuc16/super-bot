@@ -321,6 +321,7 @@ type werewolfGame struct {
 	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
 	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
 	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
+	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor handlers against a late click landing during the Witch's stage-2 window. Does NOT gate Witch or Hunter handlers.
 	Votes                         map[string]string              // voterID -> targetID, reset each day
 	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
 	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
