@@ -226,9 +226,11 @@ func aliveExcept(game *werewolfGame, excludeID string) []*player {
 // hunterRevengeStep checks whether the player who just died (deadID) was
 // the Hunter with a locked-in target; if so, kills that target too
 // (unless already dead) and returns a copy of them. Returns nil if no
-// revenge-kill happens. Single-hop — applyHunterRevengeChain loops this
-// for its own standalone callers; applyDeathChains uses this directly as
-// one of the two chain types it composes. Must be called with cmd.mu held.
+// revenge-kill happens. Single-hop — applyDeathChains (the actual
+// production consumer of this primitive) loops it alongside
+// applyLoverDeathChain; applyHunterRevengeChain (below) is now just the
+// test-oracle wrapper that TestApplyDeathChainsNoLoversMatchesHunterRevengeChain
+// uses as a reference implementation. Must be called with cmd.mu held.
 func hunterRevengeStep(game *werewolfGame, deadID string) *player {
 	dead, ok := game.Players[deadID]
 	if !ok || dead.Role != roleHunter {
@@ -247,6 +249,13 @@ func hunterRevengeStep(game *werewolfGame, deadID string) *player {
 }
 
 // applyHunterRevengeChain loops hunterRevengeStep starting from deadID.
+// After Task 5's refactor, every production death-application site calls
+// the unified applyDeathChains instead — this function has zero production
+// callers left. It is retained specifically as the behavior-preserving
+// reference implementation that TestApplyDeathChainsNoLoversMatchesHunterRevengeChain
+// uses to assert that applyDeathChains degenerates to this old Hunter-only
+// behavior whenever no lovers exist, not because any production code still
+// calls it directly.
 // Note: game.HunterTarget is a single game-scoped field, not per-Hunter,
 // so if a second Hunter were ever dealt (not possible with today's ratio
 // tables, which deal exactly one), this cannot produce a genuine

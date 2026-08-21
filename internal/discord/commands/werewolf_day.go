@@ -92,13 +92,12 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 		aliveThreadID = game.AliveThreadID
 		mutedUserID = game.DisruptorTarget
 
-		if n := len(game.History); n > 0 {
-			entry := &game.History[n-1]
-			if mutedUserID != "" {
-				if target, exists := game.Players[mutedUserID]; exists {
-					entry.DisruptorMutedLabel = target.Label
-				}
+		if target, exists := game.Players[mutedUserID]; mutedUserID != "" && exists && target.Alive {
+			if n := len(game.History); n > 0 {
+				game.History[n-1].DisruptorMutedLabel = target.Label
 			}
+		} else {
+			mutedUserID = ""
 		}
 	}()
 	if !gameFound {
@@ -575,7 +574,7 @@ func formatRoundBlock(r roundLog) string {
 		fmt.Fprintf(&b, "\n💔 Người yêu qua đời theo: %s", r.LoverDeathLabel)
 	}
 	if r.DisruptorMutedLabel != "" {
-		fmt.Fprintf(&b, "\n🤫 Kẻ Phá Hoại làm câm lặng: %s", r.DisruptorMutedLabel)
+		fmt.Fprintf(&b, "\n🤫 Kẻ phá hoại làm câm lặng: %s", r.DisruptorMutedLabel)
 	}
 	if len(r.VoteBreakdown) > 0 {
 		targets := make([]string, 0, len(r.VoteBreakdown))

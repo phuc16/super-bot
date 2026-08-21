@@ -1015,7 +1015,7 @@ func TestFormatRoundBlockWitchPoisoned(t *testing.T) {
 func TestFormatRoundBlockDisruptorMuted(t *testing.T) {
 	r := roundLog{Round: 2, DisruptorMutedLabel: "Duy"}
 	got := formatRoundBlock(r)
-	if !strings.Contains(got, "Duy") || !strings.Contains(got, "câm lặng") {
+	if !strings.Contains(got, "🤫 Kẻ phá hoại làm câm lặng: Duy") {
 		t.Errorf("formatRoundBlock() = %q, want the mute mentioned", got)
 	}
 }

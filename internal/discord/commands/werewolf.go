@@ -410,8 +410,8 @@ type werewolfGame struct {
 	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
 	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
 	DisruptorTarget               string                         // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss/day-vote phase transition to apply/remove the per-member mute
-	LoverIDs                      [2]string                      // set once by Cupid on round 1; ["", ""] means no pairing was made
 	DisruptorActedThisRound       bool                           // reset each round; true once the Disruptor has made at least one pick this round — gates the progress announcement to the first pick only, mirroring Hunter's pre-AFK-exemption shape
+	LoverIDs                      [2]string                      // set once by Cupid on round 1; ["", ""] means no pairing was made
 	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
 	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
 	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2-target case, chosen via the select menu in handleWitchHeal)
