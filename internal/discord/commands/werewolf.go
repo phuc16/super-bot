@@ -29,6 +29,8 @@ type roleRatio struct {
 	Werewolves int
 	Seers      int
 	Doctors    int
+	Witches    int
+	Hunters    int
 }
 
 // rolesForPlayerCount returns the role ratio for a given player count, or an
@@ -46,11 +48,11 @@ func rolesForPlayerCount(n int) (roleRatio, error) {
 	case n <= 10:
 		return roleRatio{Werewolves: 2, Seers: 1, Doctors: 1}, nil
 	case n <= 14:
-		return roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}, nil
+		return roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}, nil
 	case n <= 17:
-		return roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}, nil
+		return roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}, nil
 	default: // 18-20
-		return roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}, nil
+		return roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}, nil
 	}
 }
 
@@ -178,6 +180,8 @@ func assignRoles(joinOrder []string, labels map[string]string) (map[string]*play
 	assign(ratio.Werewolves, roleWerewolf)
 	assign(ratio.Seers, roleSeer)
 	assign(ratio.Doctors, roleDoctor)
+	assign(ratio.Witches, roleWitch)
+	assign(ratio.Hunters, roleHunter)
 	for ; idx < len(shuffled); idx++ {
 		id := shuffled[idx]
 		players[id] = &player{UserID: id, Label: labels[id], Role: roleVillager, Faction: factionForRole(roleVillager), Alive: true}
@@ -1149,9 +1153,9 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 	pingText, allowedMentions := pingOnce(joinOrder)
 	roleCounts := "" // best-effort: if this somehow errors, just omit the breakdown rather than failing the announcement
 	if ratio, err := rolesForPlayerCount(len(joinOrder)); err == nil {
-		villagers := len(joinOrder) - ratio.Werewolves - ratio.Seers - ratio.Doctors
-		roleCounts = fmt.Sprintf("\n🐺 Sói: %d · 🔮 Tiên Tri: %d · 💉 Bác Sĩ: %d · 👤 Dân Làng: %d",
-			ratio.Werewolves, ratio.Seers, ratio.Doctors, villagers)
+		villagers := len(joinOrder) - ratio.Werewolves - ratio.Seers - ratio.Doctors - ratio.Witches - ratio.Hunters
+		roleCounts = fmt.Sprintf("\n🐺 Sói: %d · 🔮 Tiên Tri: %d · 💉 Bác Sĩ: %d · 🧙 Phù Thủy: %d · 🏹 Thợ Săn: %d · 👤 Dân Làng: %d",
+			ratio.Werewolves, ratio.Seers, ratio.Doctors, ratio.Witches, ratio.Hunters, villagers)
 	}
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         fmt.Sprintf("🐺 Vai trò đã được gửi riêng cho từng người! %s%s", pingText, roleCounts),

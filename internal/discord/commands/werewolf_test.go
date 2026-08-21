@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,16 +18,16 @@ func TestRolesForPlayerCount(t *testing.T) {
 		{8, roleRatio{Werewolves: 2, Seers: 1, Doctors: 1}},
 		{9, roleRatio{Werewolves: 2, Seers: 1, Doctors: 1}},
 		{10, roleRatio{Werewolves: 2, Seers: 1, Doctors: 1}},
-		{11, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
-		{12, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
-		{13, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
-		{14, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1}},
-		{15, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}},
-		{16, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}},
-		{17, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1}},
-		{18, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}},
-		{19, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}},
-		{20, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1}},
+		{11, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{12, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{13, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{14, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{15, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{16, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{17, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{18, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{19, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{20, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
 	}
 	for _, c := range cases {
 		got, err := rolesForPlayerCount(c.n)
@@ -478,5 +479,29 @@ func TestValidWolfVotesKeepsLegitimateVotes(t *testing.T) {
 	got := validWolfVotes(votes, aliveWolves, allPlayers)
 	if len(got) != 2 || got["wolf1"] != "v1" || got["wolf2"] != "v1" {
 		t.Errorf("expected both votes kept, got %v", got)
+	}
+}
+
+func TestAssignRolesDealsWitchAndHunterAt11Players(t *testing.T) {
+	joinOrder := make([]string, 11)
+	labels := make(map[string]string, 11)
+	for i := range joinOrder {
+		id := fmt.Sprintf("p%d", i)
+		joinOrder[i] = id
+		labels[id] = id
+	}
+	players, err := assignRoles(joinOrder, labels)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	counts := map[role]int{}
+	for _, p := range players {
+		counts[p.Role]++
+	}
+	if counts[roleWitch] != 1 {
+		t.Errorf("expected exactly 1 Witch at 11 players, got %d", counts[roleWitch])
+	}
+	if counts[roleHunter] != 1 {
+		t.Errorf("expected exactly 1 Hunter at 11 players, got %d", counts[roleHunter])
 	}
 }
