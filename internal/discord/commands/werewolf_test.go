@@ -24,12 +24,12 @@ func TestRolesForPlayerCount(t *testing.T) {
 		{12, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
 		{13, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
 		{14, roleRatio{Werewolves: 3, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
-		{15, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
-		{16, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
-		{17, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
-		{18, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
-		{19, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
-		{20, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1}},
+		{15, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1}},
+		{16, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1}},
+		{17, roleRatio{Werewolves: 4, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1}},
+		{18, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1}},
+		{19, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1}},
+		{20, roleRatio{Werewolves: 5, Seers: 1, Doctors: 1, Witches: 1, Hunters: 1, Disruptors: 1}},
 	}
 	for _, c := range cases {
 		got, err := rolesForPlayerCount(c.n)
@@ -127,6 +127,26 @@ func TestDealRolesAssignsWolfCubCursedWolfTraitor(t *testing.T) {
 		if counts[r] != wantCount {
 			t.Errorf("counts[%v] = %d, want %d", r, counts[r], wantCount)
 		}
+	}
+}
+
+func TestDealRolesAssignsDisruptor(t *testing.T) {
+	joinOrder := []string{"u1", "u2", "u3"}
+	labels := map[string]string{"u1": "A", "u2": "B", "u3": "C"}
+	ratio := roleRatio{Werewolves: 1, Disruptors: 1}
+	players := dealRoles(joinOrder, labels, ratio)
+
+	var disruptorCount int
+	for _, p := range players {
+		if p.Role == roleDisruptor {
+			disruptorCount++
+			if p.Faction != factionVillager {
+				t.Errorf("Disruptor has faction %v, want factionVillager", p.Faction)
+			}
+		}
+	}
+	if disruptorCount != 1 {
+		t.Errorf("dealRoles() dealt %d Disruptors, want 1", disruptorCount)
 	}
 }
 
