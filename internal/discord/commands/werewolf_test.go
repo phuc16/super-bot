@@ -876,6 +876,14 @@ func TestFormatRoundBlockWitchPoisoned(t *testing.T) {
 	}
 }
 
+func TestFormatRoundBlockDisruptorMuted(t *testing.T) {
+	r := roundLog{Round: 2, DisruptorMutedLabel: "Duy"}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "Duy") || !strings.Contains(got, "câm lặng") {
+		t.Errorf("formatRoundBlock() = %q, want the mute mentioned", got)
+	}
+}
+
 func TestWolfVoteParticipant(t *testing.T) {
 	cases := []struct {
 		role role

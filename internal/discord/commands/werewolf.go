@@ -378,6 +378,7 @@ type roundLog struct {
 	WitchSavedLabel     string // who the Witch healed this round, "" if she didn't heal
 	WitchPoisonedLabel  string // who the Witch poisoned this round, "" if she didn't poison
 	CursedWolfConverted string // label, if a not-saved Cursed Wolf converted to wolf-faction this round instead of dying
+	DisruptorMutedLabel string // who was muted for the following day-discuss, "" if the Disruptor didn't act (or doesn't exist) this round
 
 	WolfBonusBite        bool     // this round used the Wolf-Cub 2-target bite
 	WolfBiteOutcomeLines []string // one pre-formatted line per resolved target this round, used only when WolfBonusBite is true — see formatRoundBlock
@@ -405,6 +406,8 @@ type werewolfGame struct {
 	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
 	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
 	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
+	DisruptorTarget               string                         // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss/day-vote phase transition to apply/remove the per-member mute
+	DisruptorActedThisRound       bool                           // reset each round; true once the Disruptor has made at least one pick this round — gates the progress announcement to the first pick only, mirroring Hunter's pre-AFK-exemption shape
 	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
 	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
 	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2-target case, chosen via the select menu in handleWitchHeal)
@@ -1388,6 +1391,8 @@ func (cmd *WerewolfCommand) HandleComponent(s *discordgo.Session, i *discordgo.I
 		cmd.handleDoctorProtect(s, i, strings.TrimPrefix(customID, werewolfDoctorProtectID))
 	case strings.HasPrefix(customID, werewolfHunterTargetID):
 		cmd.handleHunterTarget(s, i, strings.TrimPrefix(customID, werewolfHunterTargetID))
+	case strings.HasPrefix(customID, werewolfDisruptorTargetID):
+		cmd.handleDisruptorTarget(s, i, strings.TrimPrefix(customID, werewolfDisruptorTargetID))
 	case strings.HasPrefix(customID, werewolfWitchHealID):
 		cmd.handleWitchHeal(s, i, strings.TrimPrefix(customID, werewolfWitchHealID))
 	case strings.HasPrefix(customID, werewolfWitchPoisonID):

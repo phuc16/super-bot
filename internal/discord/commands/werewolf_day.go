@@ -71,6 +71,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	var summary string
 	var guildID string
 	var aliveThreadID string
+	var mutedUserID string
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -89,11 +90,26 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 		summary = aliveDeadSummary(game)
 		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
+		mutedUserID = game.DisruptorTarget
+
+		if n := len(game.History); n > 0 {
+			entry := &game.History[n-1]
+			if mutedUserID != "" {
+				if target, exists := game.Players[mutedUserID]; exists {
+					entry.DisruptorMutedLabel = target.Label
+				}
+			}
+		}
 	}()
 	if !gameFound {
 		return
 	}
 	unmuteAliveThread(s, guildID, aliveThreadID)
+	if mutedUserID != "" && aliveThreadID != "" {
+		if err := s.ChannelPermissionSet(aliveThreadID, mutedUserID, discordgo.PermissionOverwriteTypeMember, 0, discordgo.PermissionSendMessagesInThreads); err != nil {
+			log.Error().Err(err).Str("user_id", mutedUserID).Msg("werewolf: failed to apply disruptor per-member mute")
+		}
+	}
 
 	discussWindow := dayDiscussWindowFor(aliveCount)
 
@@ -128,6 +144,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 	var summary string
 	var guildID string
 	var aliveThreadID string
+	var mutedUserID string
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -146,11 +163,17 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 		summary = aliveDeadSummary(game)
 		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
+		mutedUserID = game.DisruptorTarget
 	}()
 	if !gameFound {
 		return
 	}
 	muteAliveThread(s, guildID, aliveThreadID)
+	if mutedUserID != "" && aliveThreadID != "" {
+		if err := s.ChannelPermissionDelete(aliveThreadID, mutedUserID); err != nil {
+			log.Error().Err(err).Str("user_id", mutedUserID).Msg("werewolf: failed to remove disruptor per-member mute")
+		}
+	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:    fmt.Sprintf("🗳️ **Bỏ phiếu treo cổ.** Chọn người bạn nghi ngờ, hoặc bỏ qua.\n\n%s", summary),
@@ -509,6 +532,9 @@ func formatRoundBlock(r roundLog) string {
 	}
 	if r.HunterRevengeLabel != "" {
 		fmt.Fprintf(&b, "\n🏹 Thợ săn kéo theo: %s", r.HunterRevengeLabel)
+	}
+	if r.DisruptorMutedLabel != "" {
+		fmt.Fprintf(&b, "\n🤫 Kẻ Phá Hoại làm câm lặng: %s", r.DisruptorMutedLabel)
 	}
 	if len(r.VoteBreakdown) > 0 {
 		targets := make([]string, 0, len(r.VoteBreakdown))

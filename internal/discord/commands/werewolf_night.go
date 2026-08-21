@@ -10,13 +10,14 @@ import (
 )
 
 const (
-	werewolfWolfTargetID    = "ww:wolftarget:"
-	werewolfSeerCheckID     = "ww:seercheck:"
-	werewolfDoctorProtectID = "ww:doctorprotect:"
-	werewolfHunterTargetID  = "ww:huntertarget:"
-	werewolfWitchHealID     = "ww:witchheal:"
-	werewolfWitchPoisonID   = "ww:witchpoison:"
-	werewolfWitchSkipID     = "ww:witchskip:"
+	werewolfWolfTargetID      = "ww:wolftarget:"
+	werewolfSeerCheckID       = "ww:seercheck:"
+	werewolfDoctorProtectID   = "ww:doctorprotect:"
+	werewolfHunterTargetID    = "ww:huntertarget:"
+	werewolfWitchHealID       = "ww:witchheal:"
+	werewolfWitchPoisonID     = "ww:witchpoison:"
+	werewolfWitchSkipID       = "ww:witchskip:"
+	werewolfDisruptorTargetID = "ww:disruptortarget:"
 
 	// nightActionWindow is the solo window for the Seer and Doctor, who each
 	// act alone. Wolves get their own, longer window — see
@@ -374,20 +375,22 @@ func idsOf(ps []*player) []string {
 // seer/doctor DMs, waits for actions (or the timer), then resolves the night.
 func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string, seq uint64) {
 	var (
-		gameFound      bool
-		round          int
-		summary        string
-		guildID        string
-		aliveThreadID  string
-		wolves         []*player
-		nonWolfTargets []*player
-		seer           *player
-		seerTargets    []*player
-		doctor         *player
-		doctorTargets  []*player
-		hunter         *player
-		hunterTargets  []*player
-		traitorDM      *wolfRosterDM
+		gameFound        bool
+		round            int
+		summary          string
+		guildID          string
+		aliveThreadID    string
+		wolves           []*player
+		nonWolfTargets   []*player
+		seer             *player
+		seerTargets      []*player
+		doctor           *player
+		doctorTargets    []*player
+		hunter           *player
+		hunterTargets    []*player
+		disruptor        *player
+		disruptorTargets []*player
+		traitorDM        *wolfRosterDM
 	)
 	func() {
 		cmd.mu.Lock()
@@ -410,6 +413,8 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.WitchPromptedThisRound = false
 		game.NightBiteTargetIDs = nil
 		game.HunterActedThisRound = false
+		game.DisruptorTarget = ""
+		game.DisruptorActedThisRound = false
 		game.NightActionsClosed = false
 		game.History = append(game.History, roundLog{Round: game.Round})
 
@@ -446,6 +451,11 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 			hunterTargets = copyPlayers(aliveExcept(game, hunter.UserID))
 		}
 
+		if disruptors := alivePlayersOfRole(game, roleDisruptor); len(disruptors) > 0 {
+			disruptor = copyPlayer(disruptors[0])
+			disruptorTargets = copyPlayers(aliveExcept(game, disruptor.UserID))
+		}
+
 		traitorDM = traitorRosterDM(game)
 	}()
 	if !gameFound {
@@ -455,7 +465,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	cmd.sendTraitorRosterDM(s, traitorDM)
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ, Thợ Săn đang hành động trong tin nhắn riêng...\n\n%s", round, summary),
+		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ, Thợ Săn, Kẻ Phá Hoại đang hành động trong tin nhắn riêng...\n\n%s", round, summary),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post night announcement")
@@ -470,6 +480,9 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	}
 	if hunter != nil {
 		cmd.dmHunterPrompt(s, channelID, hunter, hunterTargets)
+	}
+	if disruptor != nil {
+		cmd.dmDisruptorPrompt(s, channelID, disruptor, disruptorTargets)
 	}
 
 	totalWindow := nightActionWindow
@@ -600,6 +613,20 @@ func (cmd *WerewolfCommand) dmHunterPrompt(s *discordgo.Session, channelID strin
 	}
 }
 
+func (cmd *WerewolfCommand) dmDisruptorPrompt(s *discordgo.Session, channelID string, disruptor *player, targets []*player) {
+	dm, err := s.UserChannelCreate(disruptor.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for disruptor")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "🤫 Chọn người bạn muốn làm câm lặng trong buổi thảo luận ngày mai (có thể đổi lại trong đêm nay).",
+		Components: targetSelectMenu(werewolfDisruptorTargetID+channelID, "Chọn người để làm câm lặng", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM disruptor prompt")
+	}
+}
+
 // witchActionComponents builds the Witch's action message: an optional
 // poison target-select row (omitted if she's already used it), and a heal
 // control (omitted if there's no valid bite target, or she's already used
@@ -667,6 +694,9 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 		return false
 	}
 	if len(alivePlayersOfRole(game, roleDoctor)) > 0 && game.DoctorProtect == "" {
+		return false
+	}
+	if len(alivePlayersOfRole(game, roleDisruptor)) > 0 && game.DisruptorTarget == "" {
 		return false
 	}
 	return true
@@ -806,6 +836,13 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		}
 		for _, p := range alivePlayersOfRole(game, roleDoctor) {
 			if game.DoctorProtect != "" {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+		for _, p := range alivePlayersOfRole(game, roleDisruptor) {
+			if game.DisruptorTarget != "" {
 				game.AFKStrikes[p.UserID] = 0
 			} else {
 				game.AFKStrikes[p.UserID]++
@@ -1312,6 +1349,43 @@ func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordg
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chỉ định: <@%s>.", targetID))
 	if firstActionThisRound {
 		announceRoleDecided(s, channelID, "🏹 Thợ Săn")
+	}
+}
+
+func (cmd *WerewolfCommand) handleDisruptorTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	targetID := values[0]
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isDisruptor := game.Players[clickerID]
+	if !isDisruptor || clicker.Role != roleDisruptor || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Kẻ Phá Hoại còn sống mới được chọn.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	firstActionThisRound := !game.DisruptorActedThisRound
+	game.DisruptorTarget = targetID
+	game.DisruptorActedThisRound = true
+	cmd.mu.Unlock()
+
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chọn: <@%s>.", targetID))
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🤫 Kẻ Phá Hoại")
 	}
 }
 
