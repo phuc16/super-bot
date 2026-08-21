@@ -13,6 +13,7 @@ const (
 	werewolfWolfTargetID    = "ww:wolftarget:"
 	werewolfSeerCheckID     = "ww:seercheck:"
 	werewolfDoctorProtectID = "ww:doctorprotect:"
+	werewolfHunterTargetID  = "ww:huntertarget:"
 
 	// nightActionWindow is the solo window for the Seer and Doctor, who each
 	// act alone. Wolves get their own, longer window — see
@@ -181,6 +182,54 @@ func aliveNonWolves(game *werewolfGame) []*player {
 	return result
 }
 
+// aliveExcept returns every alive player in game except the one identified
+// by excludeID (typically the acting player themself). Order follows
+// game.JoinOrder, same as the other alive-roster helpers in this file.
+func aliveExcept(game *werewolfGame, excludeID string) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive && p.UserID != excludeID {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// applyHunterRevengeChain checks whether the player who just died (deadID)
+// was the Hunter with a locked-in target; if so, kills that target too
+// (unless already dead), and recurses in case the newly-killed target was
+// ALSO a Hunter with their own target (unreachable today, since every
+// player count deals exactly one Hunter, but this stays correct if that
+// ever changes). Must be called with cmd.mu held. Returns value-copy
+// snapshots of everyone killed by the chain, safe to read after unlocking
+// — callers append these to their own kill lists for alive-thread removal,
+// win-condition re-checks, and announcements.
+func applyHunterRevengeChain(game *werewolfGame, deadID string) []*player {
+	var revenged []*player
+	queue := []string{deadID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		dead, ok := game.Players[id]
+		if !ok || dead.Role != roleHunter {
+			continue
+		}
+		targetID := game.HunterTarget
+		if targetID == "" {
+			continue
+		}
+		target, exists := game.Players[targetID]
+		if !exists || !target.Alive {
+			continue
+		}
+		target.Alive = false
+		revenged = append(revenged, copyPlayer(target))
+		queue = append(queue, targetID)
+	}
+	return revenged
+}
+
 func targetSelectMenu(customID, placeholder string, targets []*player) []discordgo.MessageComponent {
 	options := make([]discordgo.SelectMenuOption, 0, len(targets))
 	for _, p := range targets {
@@ -245,6 +294,8 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		seerTargets    []*player
 		doctor         *player
 		doctorTargets  []*player
+		hunter         *player
+		hunterTargets  []*player
 	)
 	func() {
 		cmd.mu.Lock()
@@ -261,6 +312,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.SeerTarget = ""
 		game.SeerResult = roleVillager
 		game.DoctorProtect = ""
+		game.HunterActedThisRound = false
 		game.History = append(game.History, roundLog{Round: game.Round})
 
 		round = game.Round
@@ -290,6 +342,11 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 				}
 			}
 		}
+
+		if hunters := alivePlayersOfRole(game, roleHunter); len(hunters) > 0 {
+			hunter = copyPlayer(hunters[0])
+			hunterTargets = copyPlayers(aliveExcept(game, hunter.UserID))
+		}
 	}()
 	if !gameFound {
 		return
@@ -309,6 +366,9 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	}
 	if doctor != nil {
 		cmd.dmDoctorPrompt(s, channelID, doctor, doctorTargets)
+	}
+	if hunter != nil {
+		cmd.dmHunterPrompt(s, channelID, hunter, hunterTargets)
 	}
 
 	totalWindow := nightActionWindow
@@ -425,6 +485,20 @@ func (cmd *WerewolfCommand) dmDoctorPrompt(s *discordgo.Session, channelID strin
 	}
 }
 
+func (cmd *WerewolfCommand) dmHunterPrompt(s *discordgo.Session, channelID string, hunter *player, targets []*player) {
+	dm, err := s.UserChannelCreate(hunter.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for hunter")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "🏹 Chọn người bạn muốn chỉ định — nếu bạn chết (bất kỳ lý do gì), người này sẽ chết theo. Có thể đổi lại vào đêm sau nếu còn sống.",
+		Components: targetSelectMenu(werewolfHunterTargetID+channelID, "Chỉ định mục tiêu", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM hunter prompt")
+	}
+}
+
 func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 	wolves := alivePlayersOfRole(game, roleWerewolf)
 	if len(wolves) > 0 {
@@ -438,6 +512,9 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 		return false
 	}
 	if len(alivePlayersOfRole(game, roleDoctor)) > 0 && game.DoctorProtect == "" {
+		return false
+	}
+	if len(alivePlayersOfRole(game, roleHunter)) > 0 && !game.HunterActedThisRound {
 		return false
 	}
 	return true
@@ -549,6 +626,13 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		}
 		for _, p := range alivePlayersOfRole(game, roleDoctor) {
 			if game.DoctorProtect != "" {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+		for _, p := range alivePlayersOfRole(game, roleHunter) {
+			if game.HunterActedThisRound {
 				game.AFKStrikes[p.UserID] = 0
 			} else {
 				game.AFKStrikes[p.UserID]++
@@ -784,4 +868,37 @@ func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discord
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chọn bảo vệ: <@%s>.", targetID))
+}
+
+func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	targetID := values[0]
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isHunter := game.Players[clickerID]
+	if !isHunter || clicker.Role != roleHunter || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Thợ Săn còn sống mới được chỉ định.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	game.HunterTarget = targetID
+	game.HunterActedThisRound = true
+	cmd.mu.Unlock()
+
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chỉ định: <@%s>.", targetID))
 }

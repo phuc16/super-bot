@@ -199,11 +199,12 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 
 func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, seq uint64) {
 	var (
-		gameFound     bool
-		lynchedPlayer *player
-		revealOnDeath bool
-		summary       string
-		aliveThreadID string
+		gameFound      bool
+		lynchedPlayer  *player
+		hunterRevenged []*player
+		revealOnDeath  bool
+		summary        string
+		aliveThreadID  string
 	)
 	func() {
 		cmd.mu.Lock()
@@ -236,6 +237,9 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 				lynchedPlayer = target
 			}
 		}
+		if lynchedPlayer != nil {
+			hunterRevenged = applyHunterRevengeChain(game, lynchedPlayer.UserID)
+		}
 		revealOnDeath = game.RevealOnDeath
 		summary = aliveDeadSummary(game)
 
@@ -260,6 +264,9 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 			if lynchedPlayer != nil {
 				entry.LynchedLabel = lynchedPlayer.Label
 			}
+			if len(hunterRevenged) > 0 {
+				entry.HunterRevengeLabel = hunterRevenged[0].Label
+			}
 		}
 	}()
 	if !gameFound {
@@ -267,6 +274,9 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 	}
 	if lynchedPlayer != nil {
 		removeFromAliveThread(s, aliveThreadID, lynchedPlayer.UserID)
+	}
+	for _, p := range hunterRevenged {
+		removeFromAliveThread(s, aliveThreadID, p.UserID)
 	}
 
 	var resultMsg string
@@ -277,6 +287,9 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		resultMsg = fmt.Sprintf("⚖️ **%s** bị treo cổ.", lynchedPlayer.Label)
 	default:
 		resultMsg = "🤷 Không đủ số phiếu áp đảo, không ai bị treo cổ hôm nay."
+	}
+	for _, p := range hunterRevenged {
+		resultMsg += fmt.Sprintf("\n🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label)
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
@@ -302,6 +315,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		ended           bool
 		removedNames    []string
 		removedIDs      []string
+		hunterRevenged  []*player
 		threadID        string
 		result          gameResult
 		endedGame       *werewolfGame
@@ -331,6 +345,12 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 				removedIDs = append(removedIDs, id)
 			}
 		}
+		for _, id := range removedIDs {
+			hunterRevenged = append(hunterRevenged, applyHunterRevengeChain(game, id)...)
+		}
+		if len(hunterRevenged) > 0 && len(game.History) > 0 {
+			game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
+		}
 
 		result = checkWinCondition(game.Players)
 		if result == resultOngoing {
@@ -349,9 +369,13 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		for _, id := range removedIDs {
 			removeFromAliveThread(s, aliveThreadID, id)
 		}
+		for _, p := range hunterRevenged {
+			removeFromAliveThread(s, aliveThreadID, p.UserID)
+		}
 		if len(removedNames) > 0 {
 			cmd.announceAFKRemovals(s, channelID, removedNames)
 		}
+		cmd.announceHunterRevenge(s, channelID, hunterRevenged)
 		return false
 	}
 
@@ -380,6 +404,17 @@ func (cmd *WerewolfCommand) announceAFKRemovals(s *discordgo.Session, channelID 
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to announce AFK removals")
+	}
+}
+
+func (cmd *WerewolfCommand) announceHunterRevenge(s *discordgo.Session, channelID string, revenged []*player) {
+	for _, p := range revenged {
+		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:         fmt.Sprintf("🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label),
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to announce hunter revenge")
+		}
 	}
 }
 
@@ -442,6 +477,9 @@ func formatRoundBlock(r roundLog) string {
 	}
 	if r.SeerTargetLabel != "" {
 		fmt.Fprintf(&b, "\n🔮 Tiên tri xem: %s → %s", r.SeerTargetLabel, r.SeerResult.label())
+	}
+	if r.HunterRevengeLabel != "" {
+		fmt.Fprintf(&b, "\n🏹 Thợ săn kéo theo: %s", r.HunterRevengeLabel)
 	}
 	if len(r.VoteBreakdown) > 0 {
 		targets := make([]string, 0, len(r.VoteBreakdown))

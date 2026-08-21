@@ -279,15 +279,16 @@ const (
 // Zero-value fields (a role that's already dead, or not in this game's
 // ratio) are omitted when rendering.
 type roundLog struct {
-	Round             int
-	WolfTargetLabel   string
-	WolfTargetSaved   bool
-	WolfVoteTied      bool
-	DoctorTargetLabel string
-	SeerTargetLabel   string
-	SeerResult        role
-	VoteBreakdown     map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
-	LynchedLabel      string
+	Round              int
+	WolfTargetLabel    string
+	WolfTargetSaved    bool
+	WolfVoteTied       bool
+	DoctorTargetLabel  string
+	SeerTargetLabel    string
+	SeerResult         role
+	VoteBreakdown      map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
+	LynchedLabel       string
+	HunterRevengeLabel string // who died from Hunter's revenge this round, "" if it didn't trigger
 }
 
 // werewolfGame tracks one in-progress Werewolf game for a single channel,
@@ -310,6 +311,8 @@ type werewolfGame struct {
 	SeerResult                    role                           // that check's result — meaningless if SeerTarget == ""
 	DoctorProtect                 string                         // doctor's pick this round
 	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
+	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
+	HunterActedThisRound          bool                           // reset each round; tracks whether Hunter (re-)picked this round, for nightActionsComplete/AFK
 	Votes                         map[string]string              // voterID -> targetID, reset each day
 	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
 	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
@@ -814,6 +817,10 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 	p.Alive = false
+	hunterRevenged := applyHunterRevengeChain(game, userID)
+	if len(hunterRevenged) > 0 && len(game.History) > 0 {
+		game.History[len(game.History)-1].HunterRevengeLabel = hunterRevenged[0].Label
+	}
 	revealOnDeath := game.RevealOnDeath
 	channelID := game.ChannelID
 	seq := game.Seq
@@ -821,6 +828,9 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	cmd.mu.Unlock()
 
 	removeFromAliveThread(s, aliveThreadID, userID)
+	for _, hp := range hunterRevenged {
+		removeFromAliveThread(s, aliveThreadID, hp.UserID)
+	}
 	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
 
 	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
@@ -830,6 +840,9 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	msg := fmt.Sprintf("💨 **%s** đã rời ván.", p.Label)
 	if revealOnDeath {
 		msg = fmt.Sprintf("💨 **%s** đã rời ván. Vai trò: %s.", p.Label, p.Role.label())
+	}
+	for _, hp := range hunterRevenged {
+		msg += fmt.Sprintf("\n🏹 **%s** cũng chết theo vì Thợ Săn.", hp.Label)
 	}
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         msg,
@@ -1233,6 +1246,8 @@ func (cmd *WerewolfCommand) HandleComponent(s *discordgo.Session, i *discordgo.I
 		cmd.handleSeerCheck(s, i, strings.TrimPrefix(customID, werewolfSeerCheckID))
 	case strings.HasPrefix(customID, werewolfDoctorProtectID):
 		cmd.handleDoctorProtect(s, i, strings.TrimPrefix(customID, werewolfDoctorProtectID))
+	case strings.HasPrefix(customID, werewolfHunterTargetID):
+		cmd.handleHunterTarget(s, i, strings.TrimPrefix(customID, werewolfHunterTargetID))
 	case strings.HasPrefix(customID, werewolfVoteID):
 		cmd.handleVote(s, i, strings.TrimPrefix(customID, werewolfVoteID))
 	}

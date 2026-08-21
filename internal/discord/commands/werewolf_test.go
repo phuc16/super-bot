@@ -505,3 +505,85 @@ func TestAssignRolesDealsWitchAndHunterAt11Players(t *testing.T) {
 		t.Errorf("expected exactly 1 Hunter at 11 players, got %d", counts[roleHunter])
 	}
 }
+
+func TestApplyHunterRevengeChainTriggers(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder:    []string{"hunter1", "v1"},
+		HunterTarget: "v1",
+		Players: map[string]*player{
+			"hunter1": {UserID: "hunter1", Label: "Hunter1", Role: roleHunter, Alive: false},
+			"v1":      {UserID: "v1", Label: "V1", Role: roleVillager, Alive: true},
+		},
+	}
+	revenged := applyHunterRevengeChain(game, "hunter1")
+	if len(revenged) != 1 || revenged[0].UserID != "v1" {
+		t.Fatalf("expected v1 to be revenge-killed, got %v", revenged)
+	}
+	if game.Players["v1"].Alive {
+		t.Error("expected v1.Alive to be false after the revenge chain")
+	}
+}
+
+func TestApplyHunterRevengeChainNoOpIfDeadPlayerNotHunter(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder:    []string{"v1", "v2"},
+		HunterTarget: "v2",
+		Players: map[string]*player{
+			"v1": {UserID: "v1", Label: "V1", Role: roleVillager, Alive: false},
+			"v2": {UserID: "v2", Label: "V2", Role: roleVillager, Alive: true},
+		},
+	}
+	revenged := applyHunterRevengeChain(game, "v1")
+	if len(revenged) != 0 {
+		t.Fatalf("expected no revenge kill (v1 wasn't the Hunter), got %v", revenged)
+	}
+	if !game.Players["v2"].Alive {
+		t.Error("v2 should still be alive")
+	}
+}
+
+func TestApplyHunterRevengeChainNoOpIfNoTargetSet(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder:    []string{"hunter1", "v1"},
+		HunterTarget: "", // never picked a target
+		Players: map[string]*player{
+			"hunter1": {UserID: "hunter1", Label: "Hunter1", Role: roleHunter, Alive: false},
+			"v1":      {UserID: "v1", Label: "V1", Role: roleVillager, Alive: true},
+		},
+	}
+	revenged := applyHunterRevengeChain(game, "hunter1")
+	if len(revenged) != 0 {
+		t.Fatalf("expected no revenge kill (no target set), got %v", revenged)
+	}
+}
+
+func TestApplyHunterRevengeChainNoOpIfTargetAlreadyDead(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder:    []string{"hunter1", "v1"},
+		HunterTarget: "v1",
+		Players: map[string]*player{
+			"hunter1": {UserID: "hunter1", Label: "Hunter1", Role: roleHunter, Alive: false},
+			"v1":      {UserID: "v1", Label: "V1", Role: roleVillager, Alive: false}, // already dead some other way
+		},
+	}
+	revenged := applyHunterRevengeChain(game, "hunter1")
+	if len(revenged) != 0 {
+		t.Fatalf("expected no revenge kill (target already dead), got %v", revenged)
+	}
+}
+
+func TestFormatRoundBlockHunterRevenge(t *testing.T) {
+	r := roundLog{Round: 3, LynchedLabel: "Alice", HunterRevengeLabel: "Bob"}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "🏹 Thợ săn kéo theo: Bob") {
+		t.Errorf("expected hunter revenge line, got:\n%s", got)
+	}
+}
+
+func TestFormatRoundBlockOmitsHunterRevengeWhenEmpty(t *testing.T) {
+	r := roundLog{Round: 1, WolfTargetLabel: "Alice"}
+	got := formatRoundBlock(r)
+	if strings.Contains(got, "Thợ săn kéo theo") {
+		t.Errorf("expected no hunter-revenge line when it didn't trigger, got:\n%s", got)
+	}
+}
