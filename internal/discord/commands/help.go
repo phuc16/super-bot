@@ -415,7 +415,7 @@ func (cmd *HelpCommand) getCommandHelp(commandName string) *discordgo.MessageEmb
 		return &discordgo.MessageEmbed{
 			Title:       "🐺 `/werewolf` Command",
 			Color:       0x5865F2,
-			Description: "Play a game of Werewolf (Ma Sói) with up to 11 roles: Werewolf, Wolf Cub, Cursed Wolf, Traitor, Villager, Seer, Guard/Doctor, Witch, Hunter, Disruptor, and Cupid.",
+			Description: "Play a game of Werewolf (Ma Sói) with up to 11 roles across two factions — Wolves and Villagers. Werewolf, Wolf Cub, Cursed Wolf, Traitor, Villager, Seer, Guard/Doctor, Witch, Hunter, Disruptor, Cupid.",
 			Fields: []*discordgo.MessageEmbedField{
 				{
 					Name:   "Subcommands",
@@ -423,8 +423,33 @@ func (cmd *HelpCommand) getCommandHelp(commandName string) *discordgo.MessageEmb
 					Inline: false,
 				},
 				{
-					Name:   "How it works",
-					Value:  fmt.Sprintf("Anyone can Join/Leave the lobby; the starter clicks Start once %d-%d have joined. Roles are DMed privately. Each night the Werewolves get a private thread to pick a kill target (with more time as their numbers grow), the Seer and Doctor act via DM. Each day: discuss in a private alive-players thread, then vote to lynch (or explicitly skip) — a tie or a skip-win means nobody is lynched. Every phase change posts a live alive/dead roster. Repeats until one side wins, then a full round-by-round recap is posted.", werewolfMinPlayers, werewolfMaxPlayers),
+					Name:   "Game flow",
+					Value:  fmt.Sprintf("1️⃣ **Lobby** — anyone Join/Leave; the starter clicks Start once %d-%d have joined.\n2️⃣ **(Optional) Custom roles** — with `custom-roles:true`, the starter picks exact role counts via an ephemeral editor before dealing.\n3️⃣ **Role reveal** — everyone is DMed their role privately, with a short note on how that role acts.\n4️⃣ **Night** — the wolf pack votes on a kill target together in a private thread; Seer/Doctor/Witch/Hunter/Disruptor act via DM; Cupid acts via DM on the first night only.\n5️⃣ **Day** — discuss in a private alive-players thread, then vote to lynch (or skip).\n6️⃣ Repeat night/day until one side wins, then a full round-by-round recap posts.", werewolfMinPlayers, werewolfMaxPlayers),
+					Inline: false,
+				},
+				{
+					Name:   "Winning rule",
+					Value:  "🏡 **Villagers win** the moment every wolf-faction player is dead.\n🐺 **Wolves win** the moment wolf-faction players are at least as many as everyone else still alive — they don't need to eliminate everyone, just stop being outnumbered.\nFaction, not role name, decides this: Wolf Cub and Traitor are wolf-faction from the start; Cursed Wolf starts as a normal villager and only becomes a wolf if it's bitten by the pack and survives (converts instead of dying).",
+					Inline: false,
+				},
+				{
+					Name:   "Discussion & voting",
+					Value:  "**Day-discuss**: everyone still alive talks in a private thread — the window scales with how many players are left. The main channel is locked to bot-only chat and only posts phase/result announcements.\n**Day-vote**: pick who to lynch from a select menu, or explicitly choose \"Không treo cổ ai\" (don't lynch anyone). Most votes wins; an exact tie, or enough skip votes, means nobody is lynched that day.\n**Night (wolves)**: the pack votes together in their own private thread — every wolf votes once (locked in, no changing your mind), and the pack's target is decided by simple majority; a tie among wolves means no kill that night.",
+					Inline: false,
+				},
+				{
+					Name:   "Wolf-side roles",
+					Value:  "🐺 **Werewolf** — votes with the pack each night to pick a kill target.\n🐺👶 **Wolf Cub** — votes like a Werewolf; if it dies (any cause), the pack gets a bonus 2-target bite the *following* night.\n🐺✨ **Cursed Wolf** — starts as a normal villager (the Seer reads it as \"not a wolf\"). If the pack bites it and nobody saves it, it doesn't die — it converts into a wolf and joins the pack's vote from then on.\n🎭 **Traitor** — knows who the wolves are (DMed the roster at game start, and again every night after) but has no night action and doesn't vote with the pack.",
+					Inline: false,
+				},
+				{
+					Name:   "Villager-side special roles",
+					Value:  "🔮 **Seer** — DM each night: check one player, learn if they're wolf-faction or not.\n💉 **Guard/Doctor** — DM each night: protect one player from the wolves' bite (can't protect the same person two nights in a row).\n🧙 **Witch** — DM each night, after the bite is known: heal the bitten player (once per game) and/or poison anyone else (once per game, bypasses the Guard's protection).\n🏹 **Hunter** — DM: pick a target any time; if the Hunter dies (any cause), that target dies too. The pick persists and can be changed on a later night.\n🤫 **Disruptor** — DM each night: pick someone to be muted in the day-discuss thread the *following* day.\n💘 **Cupid** — DM on the first night only: pick exactly 2 players to fall in love. If either dies, the other dies too, immediately.",
+					Inline: false,
+				},
+				{
+					Name:   "Villager",
+					Value:  "👤 No special ability — survive, discuss, and vote.",
 					Inline: false,
 				},
 				{
@@ -444,7 +469,7 @@ func (cmd *HelpCommand) getCommandHelp(commandName string) *discordgo.MessageEmb
 				},
 				{
 					Name:   "Limits",
-					Value:  "In-memory only — a bot restart while a game is running loses it, same as `/duel-challenge-all`. Missing 2 actions/votes in a row auto-removes a player. One game per channel at a time.",
+					Value:  "In-memory only — a bot restart while a game is running loses it, same as `/duel-challenge-all`. Missing 2 actions/votes in a row auto-removes a player. One game per channel at a time. Seer, Guard, Witch, Hunter, Disruptor, Cupid, and Traitor are capped at 1 each per game, even with custom-roles — the engine only acts on the first of each.",
 					Inline: false,
 				},
 			},
