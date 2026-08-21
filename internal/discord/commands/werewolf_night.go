@@ -190,6 +190,24 @@ func aliveNonWolves(game *werewolfGame) []*player {
 	return result
 }
 
+// aliveWolfVoters returns every alive player who currently votes in the
+// wolf pack's nightly kill vote — Werewolf, Wolf Cub, and (once converted)
+// Cursed Wolf, but never Traitor. Use this instead of
+// alivePlayersOfRole(game, roleWerewolf) for wolf-thread membership,
+// voting validation, and AFK-gating; alivePlayersOfRole itself is still
+// correct for anything that genuinely means "exactly roleWerewolf" (there
+// is no such use left in this file after this task).
+func aliveWolfVoters(game *werewolfGame) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive && p.wolfVoteParticipant() {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // aliveExcept returns every alive player in game except the one identified
 // by excludeID (typically the acting player themself). Order follows
 // game.JoinOrder, same as the other alive-roster helpers in this file.
@@ -342,7 +360,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		summary = aliveDeadSummary(game)
 		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
-		wolves = copyPlayers(alivePlayersOfRole(game, roleWerewolf))
+		wolves = copyPlayers(aliveWolfVoters(game))
 		nonWolfTargets = copyPlayers(aliveNonWolves(game))
 
 		if seers := alivePlayersOfRole(game, roleSeer); len(seers) > 0 {
@@ -567,7 +585,7 @@ func (cmd *WerewolfCommand) dmWitchPrompt(s *discordgo.Session, channelID string
 }
 
 func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
-	wolves := alivePlayersOfRole(game, roleWerewolf)
+	wolves := aliveWolfVoters(game)
 	if len(wolves) > 0 {
 		for _, w := range wolves {
 			if _, voted := game.WolfVotes[w.UserID]; !voted {
@@ -674,7 +692,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		gameFound = true
 		aliveThreadID = game.AliveThreadID
 
-		aliveWolves := alivePlayersOfRole(game, roleWerewolf)
+		aliveWolves := aliveWolfVoters(game)
 		validVotes := validWolfVotes(game.WolfVotes, aliveWolves, game.Players)
 		wolfTargets, tallyOK := tallyWolfVotes(validVotes, 1)
 		wolfVoteTied = !tallyOK && len(validVotes) > 0
@@ -951,9 +969,9 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 		return
 	}
 	clicker, isWolf := game.Players[clickerID]
-	if !isWolf || clicker.Role != roleWerewolf || !clicker.Alive {
+	if !isWolf || !clicker.wolfVoteParticipant() || !clicker.Alive {
 		cmd.mu.Unlock()
-		respondComponentEphemeral(s, i, "Chỉ Ma Sói còn sống mới được chọn mục tiêu.")
+		respondComponentEphemeral(s, i, "Chỉ thành viên phe Sói còn sống mới được chọn mục tiêu.")
 		return
 	}
 	if _, alreadyVoted := game.WolfVotes[clickerID]; alreadyVoted {
@@ -968,7 +986,7 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	}
 	game.WolfVotes[clickerID] = targetID
 	allVoted := true
-	for _, w := range alivePlayersOfRole(game, roleWerewolf) {
+	for _, w := range aliveWolfVoters(game) {
 		if _, voted := game.WolfVotes[w.UserID]; !voted {
 			allVoted = false
 			break
@@ -1001,7 +1019,7 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	}
 	threadID = game.WolfThreadID
 	messageID = game.WolfTargetMessageID
-	wolves = copyPlayers(alivePlayersOfRole(game, roleWerewolf))
+	wolves = copyPlayers(aliveWolfVoters(game))
 	targets = copyPlayers(aliveNonWolves(game))
 	votesCopy := make(map[string]string, len(game.WolfVotes))
 	for k, v := range game.WolfVotes {

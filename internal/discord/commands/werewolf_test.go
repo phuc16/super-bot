@@ -715,3 +715,30 @@ func TestFormatRoundBlockWitchPoisoned(t *testing.T) {
 		t.Errorf("expected witch-poisoned line, got:\n%s", got)
 	}
 }
+
+func TestWolfVoteParticipant(t *testing.T) {
+	cases := []struct {
+		role role
+		want bool
+	}{
+		{roleWerewolf, true},
+		{roleWolfCub, true},
+		{roleTraitor, false},
+		{roleCursedWolf, false}, // pre-conversion: villager-faction, isWolf() is false
+		{roleSeer, false},
+		{roleVillager, false},
+	}
+	for _, c := range cases {
+		p := &player{Role: c.role, Faction: factionForRole(c.role)}
+		if got := p.wolfVoteParticipant(); got != c.want {
+			t.Errorf("wolfVoteParticipant() for role %v = %v, want %v", c.role, got, c.want)
+		}
+	}
+
+	// A converted Cursed Wolf: Faction flipped to factionWolf, Role stays
+	// roleCursedWolf.
+	converted := &player{Role: roleCursedWolf, Faction: factionWolf}
+	if !converted.wolfVoteParticipant() {
+		t.Error("converted Cursed Wolf should be a wolf-vote participant")
+	}
+}

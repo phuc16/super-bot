@@ -160,6 +160,16 @@ func (p *player) isWolf() bool {
 	return p.Faction == factionWolf
 }
 
+// wolfVoteParticipant reports whether p currently votes in the wolf pack's
+// nightly kill vote. Every wolf-faction player votes except the Traitor,
+// who has no night action (spec §4d) — a converted Cursed Wolf (Faction
+// flipped by a prior night's bite resolution) becomes a participant
+// starting the next night they're prompted, same as a Wolf Cub from deal
+// time.
+func (p *player) wolfVoteParticipant() bool {
+	return p.isWolf() && p.Role != roleTraitor
+}
+
 // dealRoles shuffles a copy of joinOrder and deals roles per ratio, filling
 // every remaining seat with roleVillager. Factored out of assignRoles so
 // Plan E's manual role-pick mode can call it directly with a
