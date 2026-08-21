@@ -363,6 +363,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		removedIDs      []string
 		hunterRevenged  []*player
 		loverDeaths     []*player
+		traitorPromoted []*player
 		threadID        string
 		result          gameResult
 		endedGame       *werewolfGame
@@ -400,6 +401,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		chainDeadIDs := append(append([]string(nil), removedIDs...), idsOf(hunterRevenged)...)
 		chainDeadIDs = append(chainDeadIDs, idsOf(loverDeaths)...)
 		applyWolfCubBonusBiteFlag(game, chainDeadIDs)
+		traitorPromoted = promoteTraitorIfWolvesWiped(game)
 		if n := len(game.History); n > 0 {
 			if len(hunterRevenged) > 0 {
 				game.History[n-1].HunterRevengeLabel = hunterRevenged[0].Label
@@ -421,6 +423,9 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 	}()
 	if !gameFound {
 		return true
+	}
+	for _, p := range traitorPromoted {
+		dmTraitorPromoted(s, p)
 	}
 	if !ended {
 		for _, id := range removedIDs {
@@ -494,6 +499,50 @@ func (cmd *WerewolfCommand) announceLoverDeaths(s *discordgo.Session, channelID 
 	}
 }
 
+// winnerNamesWithRoles renders "Name (Role)" for every player who shares in
+// result's victory, comma-joined — the game-end announcement previously
+// only named the winning SIDE, leaving players to cross-reference the
+// separate role list themselves to see who actually won. Standard
+// Werewolf convention: every member of the winning team shares the win,
+// dead or alive, since the team's outcome is what "winning" means (a dead
+// Seer whose team wins is still a winner). Lovers-win is the one
+// exception, handled separately since that "team" is exactly the pair
+// (plus Cupid) rather than a faction.
+func winnerNamesWithRoles(game *werewolfGame, result gameResult) string {
+	var winners []*player
+	switch result {
+	case resultVillagersWin:
+		for _, id := range game.JoinOrder {
+			if p := game.Players[id]; p.Faction == factionVillager {
+				winners = append(winners, p)
+			}
+		}
+	case resultWerewolvesWin:
+		for _, id := range game.JoinOrder {
+			if p := game.Players[id]; p.Faction == factionWolf {
+				winners = append(winners, p)
+			}
+		}
+	case resultLoversWin:
+		for _, id := range game.LoverIDs {
+			if p, exists := game.Players[id]; exists {
+				winners = append(winners, p)
+			}
+		}
+		for _, id := range game.JoinOrder {
+			p := game.Players[id]
+			if p.Role == roleCupid && p.UserID != game.LoverIDs[0] && p.UserID != game.LoverIDs[1] {
+				winners = append(winners, p)
+			}
+		}
+	}
+	names := make([]string, 0, len(winners))
+	for _, p := range winners {
+		names = append(names, fmt.Sprintf("%s (%s)", p.Label, p.Role.label()))
+	}
+	return strings.Join(names, ", ")
+}
+
 func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolfGame, result gameResult, afkRemoved []string) {
 	winner := "🐺 **Ma Sói thắng!**"
 	switch result {
@@ -519,6 +568,8 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 		}
 	}
 
+	winnersLine := winnerNamesWithRoles(game, result)
+
 	var roles strings.Builder
 	roles.WriteString("\n\n**Vai trò của mọi người:**\n")
 	for _, id := range game.JoinOrder {
@@ -536,7 +587,7 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 	}
 
 	if _, err := s.ChannelMessageSendComplex(game.ChannelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🎉 Ván Ma Sói kết thúc! %s%s%s", winner, afkNote, roles.String()),
+		Content:         fmt.Sprintf("🎉 Ván Ma Sói kết thúc! %s\n🏆 **Người thắng:** %s%s%s", winner, winnersLine, afkNote, roles.String()),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to announce game end")

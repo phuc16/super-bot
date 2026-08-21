@@ -163,6 +163,16 @@ func (p *player) isWolf() bool {
 	return p.Faction == factionWolf
 }
 
+// investigatesAsWolf reports whether p reads as a werewolf to the Seer's
+// night check. This is deliberately NOT the same as isWolf(): per the
+// standard Traitor rule, the Traitor is wolf-faction for win-condition
+// purposes but passes every standard investigation as an innocent
+// villager — only the special conversion below (promoteTraitorIfWolvesWiped)
+// ever turns them into something the Seer would flag.
+func (p *player) investigatesAsWolf() bool {
+	return p.isWolf() && p.Role != roleTraitor
+}
+
 // wolfVoteParticipant reports whether p currently votes in the wolf pack's
 // nightly kill vote. Every wolf-faction player votes except the Traitor,
 // who has no night action (spec §4d) — a converted Cursed Wolf (Faction
@@ -320,6 +330,33 @@ func checkWinCondition(players map[string]*player) gameResult {
 	default:
 		return resultOngoing
 	}
+}
+
+// promoteTraitorIfWolvesWiped implements the standard Werewolf "Traitor"
+// endgame rule: if every wolf-faction player other than the Traitor has
+// died while the Traitor is still alive, the Traitor immediately becomes a
+// full Werewolf — gaining the wolf pack's nightly kill vote from then on
+// (see wolfVoteParticipant) instead of leaving the wolf side unable to act
+// just because its only survivor never had a night action. This never
+// changes the win-condition tally itself: the Traitor already counts as
+// wolf-faction from deal time (factionForRole), so aliveWolves in
+// checkWinCondition already includes them either way. Call with cmd.mu
+// held; returns copyPlayer snapshots of every Traitor promoted this call,
+// for the caller to DM after releasing the lock (nil if none were).
+func promoteTraitorIfWolvesWiped(game *werewolfGame) []*player {
+	traitors := alivePlayersOfRole(game, roleTraitor)
+	if len(traitors) == 0 {
+		return nil
+	}
+	for _, p := range game.Players {
+		if p.Alive && p.isWolf() && p.Role != roleTraitor {
+			return nil
+		}
+	}
+	for _, t := range traitors {
+		t.Role = roleWerewolf
+	}
+	return copyPlayers(traitors)
 }
 
 // checkWinConditionWithLovers wraps checkWinCondition with the standard

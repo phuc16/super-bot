@@ -558,7 +558,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Luật thắng thua",
-						Value:  "🏡 **Phe Dân thắng** khi toàn bộ phe Sói đã chết.\n🐺 **Phe Sói thắng** khi số người phe Sói ≥ số người còn lại — không cần giết hết, chỉ cần không còn bị áp đảo.\nPhe (chứ không phải tên vai trò) quyết định ai thắng cùng ai.",
+						Value:  "🏡 **Phe Dân thắng** khi toàn bộ phe Sói đã chết.\n🐺 **Phe Sói thắng** khi số người phe Sói ≥ số người còn lại — không cần giết hết, chỉ cần không còn bị áp đảo.\nPhe (chứ không phải tên vai trò) quyết định ai thắng cùng ai. Thông báo kết thúc ván liệt kê rõ từng người thắng kèm vai trò của họ, không chỉ nói phe nào thắng.",
 						Inline: false,
 					},
 					{
@@ -579,17 +579,17 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				Fields: []*discordgo.MessageEmbedField{
 					{
 						Name:   "Vai trò phe Sói",
-						Value:  "🐺 **Sói thường** — bỏ phiếu cùng bầy mỗi đêm để chọn mục tiêu cắn.\n🐺👶 **Sói Con** — bỏ phiếu như Sói thường; nếu chết (bất kỳ lý do gì), đêm *kế tiếp* bầy Sói được cắn thêm 1 mục tiêu (tổng 2).\n🐺✨ **Sói Nguyền** — ban đầu là Dân thường bình thường (Tiên Tri soi ra \"không phải Sói\"). Nếu bị bầy Sói cắn mà không ai cứu, không chết — biến thành Sói và từ đó bỏ phiếu cùng bầy.\n🎭 **Kẻ Phản Bội** — biết ai là Sói (được nhắn riêng danh sách lúc bắt đầu ván, và lại mỗi đêm) nhưng không có hành động ban đêm, không bỏ phiếu cùng bầy Sói.",
+						Value:  "*(Thắng cùng phe Sói: Sói thường, Sói Con, Kẻ Phản Bội luôn vậy; Sói Nguyền chỉ sau khi biến hình — trước đó thắng cùng phe Dân.)*\n🐺 **Sói thường** — bỏ phiếu cùng bầy mỗi đêm để chọn mục tiêu cắn.\n🐺👶 **Sói Con** — bỏ phiếu như Sói thường; nếu chết (bất kỳ lý do gì), đêm *kế tiếp* bầy Sói được cắn thêm 1 mục tiêu (tổng 2).\n🐺✨ **Sói Nguyền** — ban đầu là Dân thường bình thường (Tiên Tri soi ra \"không phải Sói\"). Bị cắn mà không ai cứu thì không chết — biến thành Sói, bỏ phiếu cùng bầy từ đó.\n🎭 **Kẻ Phản Bội** — biết ai là Sói nhưng không bỏ phiếu cắn, không có hành động ban đêm; Tiên Tri soi ra \"không phải Sói\" — y hệt Dân thường. Nếu mọi Sói khác chết mà nó còn sống, tự động thành Sói thường và bỏ phiếu cắn cùng phe Sói từ đêm đó.",
 						Inline: false,
 					},
 					{
 						Name:   "Vai trò đặc biệt phe Dân",
-						Value:  "🔮 **Tiên Tri** — DM mỗi đêm: soi một người, biết có phải Sói không.\n💉 **Bảo Vệ** — DM mỗi đêm: bảo vệ một người khỏi bị Sói cắn (không bảo vệ cùng một người 2 đêm liên tiếp).\n🧙 **Phù Thủy** — DM mỗi đêm sau khi biết ai bị cắn: cứu người bị cắn (1 lần/ván) và/hoặc đầu độc ai đó khác (1 lần/ván, bỏ qua được sự bảo vệ của Bảo Vệ).\n🏹 **Thợ Săn** — DM chọn mục tiêu bất cứ lúc nào; nếu chết (bất kỳ lý do gì), mục tiêu đó chết theo. Có thể đổi lựa chọn qua các đêm.\n🤫 **Kẻ Phá Hoại** — DM mỗi đêm: chọn người sẽ bị làm câm lặng trong thread thảo luận *hôm sau*.\n💘 **Thần Tình Yêu** — DM chỉ đêm đầu tiên: chọn đúng 2 người ghép đôi (có thể chọn cả chính mình). Một người chết thì người kia chết theo ngay.",
+						Value:  "*(Cả 6 vai trò dưới đây thắng cùng phe Dân — trừ Thần Tình Yêu khi ghép đôi khác phe.)*\n🔮 **Tiên Tri** — DM mỗi đêm: soi một người, biết có phải Sói không.\n💉 **Bảo Vệ** — DM mỗi đêm: bảo vệ một người khỏi bị Sói cắn (không bảo vệ cùng người 2 đêm liên tiếp).\n🧙 **Phù Thủy** — DM mỗi đêm sau khi biết ai bị cắn: cứu người bị cắn (1 lần/ván) và/hoặc đầu độc ai khác (1 lần/ván, vượt qua Bảo Vệ).\n🏹 **Thợ Săn** — DM chọn mục tiêu bất cứ lúc nào; nếu chết (bất kỳ lý do gì), mục tiêu đó chết theo. Đổi được qua các đêm.\n🤫 **Kẻ Phá Hoại** — DM mỗi đêm: chọn người bị làm câm lặng ở thread thảo luận *hôm sau*.\n💘 **Thần Tình Yêu** — DM chỉ đêm đầu: chọn đúng 2 người ghép đôi (có thể chọn cả chính mình). Một người chết thì người kia chết theo ngay.",
 						Inline: false,
 					},
 					{
 						Name:   "Dân thường",
-						Value:  "👤 Không có khả năng đặc biệt — sống sót, thảo luận, và bỏ phiếu.",
+						Value:  "👤 *(thắng cùng phe Dân)* Không có khả năng đặc biệt — sống sót, thảo luận, và bỏ phiếu.",
 						Inline: false,
 					},
 					{
@@ -635,7 +635,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Winning rule",
-					Value:  "🏡 **Villagers win** the moment every wolf-faction player is dead.\n🐺 **Wolves win** the moment wolf-faction players are at least as many as everyone else still alive — they don't need to eliminate everyone, just stop being outnumbered.\nFaction (not role name) decides who wins with whom.",
+					Value:  "🏡 **Villagers win** the moment every wolf-faction player is dead.\n🐺 **Wolves win** the moment wolf-faction players are at least as many as everyone else still alive — they don't need to eliminate everyone, just stop being outnumbered.\nFaction (not role name) decides who wins with whom. The end-game announcement names every winner individually with their role, not just which side won.",
 					Inline: false,
 				},
 				{
@@ -656,17 +656,17 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 			Fields: []*discordgo.MessageEmbedField{
 				{
 					Name:   "Wolf-side roles",
-					Value:  "🐺 **Werewolf** — votes with the pack each night to pick a kill target.\n🐺👶 **Wolf Cub** — votes like a Werewolf; if it dies (any cause), the pack gets a bonus 2-target bite the *following* night.\n🐺✨ **Cursed Wolf** — starts as a normal villager (the Seer reads it as \"not a wolf\"). If the pack bites it and nobody saves it, it doesn't die — it converts into a wolf and joins the pack's vote from then on.\n🎭 **Traitor** — knows who the wolves are (DMed the roster at game start, and again every night after) but has no night action and doesn't vote with the pack.",
+					Value:  "🐺 **Werewolf** *(wins with the wolves)* — votes with the pack each night to pick a kill target.\n🐺👶 **Wolf Cub** *(wins with the wolves)* — votes like a Werewolf; if it dies (any cause), the pack gets a bonus 2-target bite the *following* night.\n🐺✨ **Cursed Wolf** *(wins with the villagers until it converts, then wins with the wolves)* — starts as a normal villager (the Seer reads it as \"not a wolf\"). If the pack bites it and nobody saves it, it doesn't die — it converts into a wolf and joins the pack's vote from then on.\n🎭 **Traitor** *(always wins with the wolves, even while disguised as a villager)* — knows who the wolves are, but has no night action and doesn't vote with the pack. The Seer reads the Traitor as \"not a wolf\" too — indistinguishable from a real villager. If every other wolf dies while the Traitor is still alive, it automatically becomes a full Werewolf and starts voting with whichever wolves are left.",
 					Inline: false,
 				},
 				{
 					Name:   "Villager-side special roles",
-					Value:  "🔮 **Seer** — DM each night: check one player, learn if they're wolf-faction or not.\n💉 **Guard** — DM each night: protect one player from the wolves' bite (can't protect the same person two nights in a row).\n🧙 **Witch** — DM each night, after the bite is known: heal the bitten player (once per game) and/or poison anyone else (once per game, bypasses the Guard's protection).\n🏹 **Hunter** — DM: pick a target any time; if the Hunter dies (any cause), that target dies too. The pick persists and can be changed on a later night.\n🤫 **Disruptor** — DM each night: pick someone to be muted in the day-discuss thread the *following* day.\n💘 **Cupid** — DM on the first night only: pick exactly 2 players to fall in love — Cupid may pick themself as one of the two. If either dies, the other dies too, immediately.",
+					Value:  "*(All 6 roles below win with the villagers — Cupid is the one exception when it pairs a mixed-faction couple, see \"Winning rule — by role\".)*\n🔮 **Seer** — DM each night: check one player, learn if they're wolf-faction or not.\n💉 **Guard** — DM each night: protect one player from the wolves' bite (can't protect the same person two nights in a row).\n🧙 **Witch** — DM each night, after the bite is known: heal the bitten player (once per game) and/or poison anyone else (once per game, bypasses the Guard's protection).\n🏹 **Hunter** — DM: pick a target any time; if the Hunter dies (any cause), that target dies too. The pick persists and can be changed on a later night.\n🤫 **Disruptor** — DM each night: pick someone to be muted in the day-discuss thread the *following* day.\n💘 **Cupid** — DM on the first night only: pick exactly 2 players to fall in love — Cupid may pick themself as one of the two. If either dies, the other dies too, immediately.",
 					Inline: false,
 				},
 				{
 					Name:   "Villager",
-					Value:  "👤 No special ability — survive, discuss, and vote.",
+					Value:  "👤 *(wins with the villagers)* No special ability — survive, discuss, and vote.",
 					Inline: false,
 				},
 				{

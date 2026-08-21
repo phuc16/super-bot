@@ -1243,6 +1243,138 @@ func TestTraitorRosterDM(t *testing.T) {
 	}
 }
 
+func TestInvestigatesAsWolfTraitorReadsInnocent(t *testing.T) {
+	traitor := &player{UserID: "t1", Role: roleTraitor, Faction: factionWolf, Alive: true}
+	if traitor.investigatesAsWolf() {
+		t.Error("Traitor.investigatesAsWolf() = true, want false — Traitor must read as an innocent villager to the Seer")
+	}
+	if !traitor.isWolf() {
+		t.Error("Traitor.isWolf() = false, want true — Traitor still counts as wolf-faction for the win condition")
+	}
+}
+
+func TestInvestigatesAsWolfRealWolfReadsAsWolf(t *testing.T) {
+	wolf := &player{UserID: "w1", Role: roleWerewolf, Faction: factionWolf, Alive: true}
+	if !wolf.investigatesAsWolf() {
+		t.Error("Werewolf.investigatesAsWolf() = false, want true")
+	}
+}
+
+func TestPromoteTraitorIfWolvesWipedPromotesLastTraitor(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"w1", "traitor1", "v1"},
+		Players: map[string]*player{
+			"w1":       {UserID: "w1", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: false},
+			"traitor1": {UserID: "traitor1", Label: "Trai", Role: roleTraitor, Faction: factionWolf, Alive: true},
+			"v1":       {UserID: "v1", Label: "Vil", Role: roleVillager, Faction: factionVillager, Alive: true},
+		},
+	}
+	promoted := promoteTraitorIfWolvesWiped(game)
+	if len(promoted) != 1 || promoted[0].UserID != "traitor1" {
+		t.Fatalf("promoteTraitorIfWolvesWiped() = %+v, want a snapshot naming traitor1", promoted)
+	}
+	if game.Players["traitor1"].Role != roleWerewolf {
+		t.Errorf("traitor1.Role = %v after promotion, want roleWerewolf", game.Players["traitor1"].Role)
+	}
+	if !game.Players["traitor1"].wolfVoteParticipant() {
+		t.Error("promoted traitor1 should now participate in the wolf pack's kill vote")
+	}
+}
+
+func TestPromoteTraitorIfWolvesWipedNoOpWhileOtherWolfAlive(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"w1", "traitor1"},
+		Players: map[string]*player{
+			"w1":       {UserID: "w1", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"traitor1": {UserID: "traitor1", Label: "Trai", Role: roleTraitor, Faction: factionWolf, Alive: true},
+		},
+	}
+	if promoted := promoteTraitorIfWolvesWiped(game); promoted != nil {
+		t.Errorf("promoteTraitorIfWolvesWiped() = %+v, want nil while a non-Traitor wolf is still alive", promoted)
+	}
+	if game.Players["traitor1"].Role != roleTraitor {
+		t.Error("traitor1.Role changed even though a real wolf is still alive")
+	}
+}
+
+func TestPromoteTraitorIfWolvesWipedNoOpWithoutLiveTraitor(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"w1", "traitor1"},
+		Players: map[string]*player{
+			"w1":       {UserID: "w1", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: false},
+			"traitor1": {UserID: "traitor1", Label: "Trai", Role: roleTraitor, Faction: factionWolf, Alive: false},
+		},
+	}
+	if promoted := promoteTraitorIfWolvesWiped(game); promoted != nil {
+		t.Errorf("promoteTraitorIfWolvesWiped() = %+v, want nil with no live Traitor", promoted)
+	}
+}
+
+func TestWinnerNamesWithRolesWerewolvesWin(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"w1", "traitor1", "v1"},
+		Players: map[string]*player{
+			"w1":       {UserID: "w1", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"traitor1": {UserID: "traitor1", Label: "Trai", Role: roleTraitor, Faction: factionWolf, Alive: false},
+			"v1":       {UserID: "v1", Label: "Vil", Role: roleVillager, Faction: factionVillager, Alive: false},
+		},
+	}
+	got := winnerNamesWithRoles(game, resultWerewolvesWin)
+	want := "Wolf (Ma Sói), Trai (Kẻ Phản Bội)"
+	if got != want {
+		t.Errorf("winnerNamesWithRoles() = %q, want %q — every wolf-faction player shares the win, dead or alive, and villagers are excluded", got, want)
+	}
+}
+
+func TestWinnerNamesWithRolesVillagersWin(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"w1", "v1", "seer1"},
+		Players: map[string]*player{
+			"w1":    {UserID: "w1", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: false},
+			"v1":    {UserID: "v1", Label: "Vil", Role: roleVillager, Faction: factionVillager, Alive: true},
+			"seer1": {UserID: "seer1", Label: "See", Role: roleSeer, Faction: factionVillager, Alive: false},
+		},
+	}
+	got := winnerNamesWithRoles(game, resultVillagersWin)
+	want := "Vil (Dân Làng), See (Tiên Tri)"
+	if got != want {
+		t.Errorf("winnerNamesWithRoles() = %q, want %q", got, want)
+	}
+}
+
+func TestWinnerNamesWithRolesLoversWinIncludesCupid(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"wolf", "villager", "cupid1"},
+		LoverIDs:  [2]string{"wolf", "villager"},
+		Players: map[string]*player{
+			"wolf":     {UserID: "wolf", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"villager": {UserID: "villager", Label: "Vil", Role: roleVillager, Faction: factionVillager, Alive: true},
+			"cupid1":   {UserID: "cupid1", Label: "Cup", Role: roleCupid, Faction: factionVillager, Alive: false},
+		},
+	}
+	got := winnerNamesWithRoles(game, resultLoversWin)
+	want := "Wolf (Ma Sói), Vil (Dân Làng), Cup (Thần Tình Yêu)"
+	if got != want {
+		t.Errorf("winnerNamesWithRoles() = %q, want %q — the couple plus Cupid, in that order", got, want)
+	}
+}
+
+func TestWinnerNamesWithRolesLoversWinCupidIsOneOfThePair(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"wolf", "cupid1"},
+		LoverIDs:  [2]string{"wolf", "cupid1"},
+		Players: map[string]*player{
+			"wolf":   {UserID: "wolf", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"cupid1": {UserID: "cupid1", Label: "Cup", Role: roleCupid, Faction: factionVillager, Alive: true},
+		},
+	}
+	got := winnerNamesWithRoles(game, resultLoversWin)
+	want := "Wolf (Ma Sói), Cup (Thần Tình Yêu)"
+	if got != want {
+		t.Errorf("winnerNamesWithRoles() = %q, want %q — Cupid must not be listed twice when they're one of the pair", got, want)
+	}
+}
+
 func TestWerewolfDefinitionHasCustomRolesOption(t *testing.T) {
 	cmd := NewWerewolfCommand()
 	def := cmd.Definition()

@@ -872,6 +872,21 @@ func dmCursedWolfConverted(s *discordgo.Session, p *player) {
 	}
 }
 
+// dmTraitorPromoted tells a Traitor that every other wolf has died and
+// they've just become a full Werewolf. Nothing else in the game announces
+// this — it's a private endgame twist, not a public reveal. Called with a
+// copyPlayer snapshot, after cmd.mu is released.
+func dmTraitorPromoted(s *discordgo.Session, p *player) {
+	dm, err := s.UserChannelCreate(p.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to open DM for promoted traitor")
+		return
+	}
+	if _, err := s.ChannelMessageSend(dm.ID, "🐺✨ Mọi Ma Sói khác đã chết — bạn giờ chính thức là **Ma Sói**! Từ đêm sau bạn sẽ vào thread riêng của bầy Sói và bỏ phiếu cắn."); err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to DM traitor promotion notice")
+	}
+}
+
 func (cmd *WerewolfCommand) dmDisruptorPrompt(s *discordgo.Session, channelID string, disruptor *player, targets []*player) {
 	dm, err := s.UserChannelCreate(disruptor.UserID)
 	if err != nil {
@@ -1575,7 +1590,7 @@ func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.I
 	game.SeerActed = true
 	game.SeerTarget = targetID
 	game.SeerResult = target.Role
-	isWolf := target.isWolf()
+	isWolf := target.investigatesAsWolf()
 	cmd.mu.Unlock()
 
 	verdict := "KHÔNG PHẢI Ma Sói"
