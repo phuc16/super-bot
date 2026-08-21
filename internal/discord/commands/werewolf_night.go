@@ -218,9 +218,15 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 		}
 	}
 
+	wolfIDs := make([]string, len(wolves))
+	for idx, w := range wolves {
+		wolfIDs[idx] = w.UserID
+	}
+	pingText, allowedMentions := pingOnce(wolfIDs)
 	if _, err := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content:    "🐺 Chọn mục tiêu để tấn công đêm nay. Lượt chọn đầu tiên sẽ được tính.",
-		Components: targetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets),
+		Content:         fmt.Sprintf("🐺 %s Chọn mục tiêu để tấn công đêm nay. Lượt chọn đầu tiên sẽ được tính.", pingText),
+		Components:      targetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets),
+		AllowedMentions: allowedMentions,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post wolf target select")
 	}
