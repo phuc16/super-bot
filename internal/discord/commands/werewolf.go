@@ -424,7 +424,7 @@ type werewolfGame struct {
 	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
 	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
 	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
-	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round
+	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2-target case, chosen via the select menu in handleWitchHeal)
 	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
 	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
 	WolfBonusBiteNextNight        bool                           // armed when a Wolf Cub dies (any cause); consumed at the start of the next night's wolf-vote resolution to select 2 targets instead of 1

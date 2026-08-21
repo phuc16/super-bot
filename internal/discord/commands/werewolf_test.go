@@ -677,11 +677,15 @@ func TestFormatRoundBlockWolfBonusBite(t *testing.T) {
 	r := roundLog{
 		Round:                3,
 		WolfBonusBite:        true,
+		WolfTargetLabel:      "An, Binh",
 		WolfBiteOutcomeLines: []string{"An: chết", "Binh: được Bác Sĩ cứu"},
 	}
 	got := formatRoundBlock(r)
 	if !strings.Contains(got, "An: chết") || !strings.Contains(got, "Binh: được Bác Sĩ cứu") {
 		t.Errorf("formatRoundBlock() = %q, want both outcome lines present", got)
+	}
+	if strings.Contains(got, "🐺 Sói cắn:") {
+		t.Errorf("formatRoundBlock() = %q, want legacy single-target branch not to render", got)
 	}
 }
 

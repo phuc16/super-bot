@@ -1020,7 +1020,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 				entry.HunterRevengeLabel = hunterRevenged[0].Label
 			}
 			if bonusBite {
-				entry.WolfBiteOutcomeLines = biteOutcomeLines
+				entry.WolfBiteOutcomeLines = append([]string(nil), biteOutcomeLines...)
 			}
 		}
 	}()
@@ -1040,11 +1040,19 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 
 	var resultMsg string
 	switch {
-	case bonusBite:
+	case bonusBite && len(biteOutcomeLines) > 0:
 		// Two-target round: the single-target cascade below can't represent
 		// "one target died, the other was saved" — list each target's own
 		// outcome instead. Only reachable once a Wolf Cub has died.
 		resultMsg = "🌙 **Kết quả đêm qua:**\n" + strings.Join(biteOutcomeLines, "\n")
+	case bonusBite && poisonedPlayer == nil:
+		// Both bite targets already died some other way (e.g. left mid-round)
+		// before finalize could record an outcome for either — nothing to
+		// list. Must not fall into the single-target cascade below: its
+		// doctorSaved/witchHealed booleans are stale/unrelated to this round.
+		resultMsg = "😴 Không ai chết trong đêm qua."
+	case bonusBite:
+		resultMsg = "😴 Không ai chết vì Sói cắn đêm qua."
 	case len(killedPlayers) == 1 && revealOnDeath:
 		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", killedPlayers[0].Label, killedPlayers[0].Role.label())
 	case len(killedPlayers) == 1:

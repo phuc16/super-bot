@@ -479,10 +479,12 @@ func formatRoundBlock(r roundLog) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n\n**Đêm/Ngày %d:**", r.Round)
 	poisoned := r.WitchPoisonedLabel != ""
-	if r.WolfBonusBite && len(r.WolfBiteOutcomeLines) > 0 {
-		b.WriteString("\n🐺🐺 Sói cắn 2 mục tiêu (Sói Con đã ngã xuống đêm trước):")
-		for _, line := range r.WolfBiteOutcomeLines {
-			fmt.Fprintf(&b, "\n%s", line)
+	if r.WolfBonusBite {
+		if len(r.WolfBiteOutcomeLines) > 0 {
+			b.WriteString("\n🐺🐺 Sói cắn 2 mục tiêu (Sói Con đã ngã xuống đêm trước):")
+			for _, line := range r.WolfBiteOutcomeLines {
+				fmt.Fprintf(&b, "\n%s", line)
+			}
 		}
 	} else if r.WolfTargetLabel != "" {
 		switch {
