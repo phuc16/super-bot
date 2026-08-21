@@ -587,3 +587,19 @@ func TestFormatRoundBlockOmitsHunterRevengeWhenEmpty(t *testing.T) {
 		t.Errorf("expected no hunter-revenge line when it didn't trigger, got:\n%s", got)
 	}
 }
+
+func TestFormatRoundBlockWitchSaved(t *testing.T) {
+	r := roundLog{Round: 2, WolfTargetLabel: "Alice", WitchSavedLabel: "Alice"}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "Sói cắn: Alice (được phù thủy cứu)") {
+		t.Errorf("expected witch-saved wording, got:\n%s", got)
+	}
+}
+
+func TestFormatRoundBlockWitchPoisoned(t *testing.T) {
+	r := roundLog{Round: 2, WitchPoisonedLabel: "Bob"}
+	got := formatRoundBlock(r)
+	if !strings.Contains(got, "☠️ Phù thủy đầu độc: Bob") {
+		t.Errorf("expected witch-poisoned line, got:\n%s", got)
+	}
+}

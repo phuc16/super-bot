@@ -466,13 +466,19 @@ func formatRoundBlock(r roundLog) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n\n**Đêm/Ngày %d:**", r.Round)
 	if r.WolfTargetLabel != "" {
-		if r.WolfTargetSaved {
+		switch {
+		case r.WolfTargetSaved:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được bác sĩ cứu)", r.WolfTargetLabel)
-		} else {
+		case r.WitchSavedLabel != "":
+			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được phù thủy cứu)", r.WolfTargetLabel)
+		default:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s", r.WolfTargetLabel)
 		}
 	} else if r.WolfVoteTied {
 		b.WriteString("\n🐺 Sói không thống nhất được mục tiêu.")
+	}
+	if r.WitchPoisonedLabel != "" {
+		fmt.Fprintf(&b, "\n☠️ Phù thủy đầu độc: %s", r.WitchPoisonedLabel)
 	}
 	if r.DoctorTargetLabel != "" {
 		fmt.Fprintf(&b, "\n💉 Bác sĩ bảo vệ: %s", r.DoctorTargetLabel)

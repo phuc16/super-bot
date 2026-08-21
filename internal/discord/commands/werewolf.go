@@ -289,6 +289,8 @@ type roundLog struct {
 	VoteBreakdown      map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
 	LynchedLabel       string
 	HunterRevengeLabel string // who died from Hunter's revenge this round, "" if it didn't trigger
+	WitchSavedLabel    string // who the Witch healed this round, "" if she didn't heal
+	WitchPoisonedLabel string // who the Witch poisoned this round, "" if she didn't poison
 }
 
 // werewolfGame tracks one in-progress Werewolf game for a single channel,
@@ -312,6 +314,11 @@ type werewolfGame struct {
 	DoctorProtect                 string                         // doctor's pick this round
 	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
 	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
+	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
+	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
+	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round
+	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
+	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
 	Votes                         map[string]string              // voterID -> targetID, reset each day
 	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
 	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
@@ -1248,6 +1255,12 @@ func (cmd *WerewolfCommand) HandleComponent(s *discordgo.Session, i *discordgo.I
 		cmd.handleDoctorProtect(s, i, strings.TrimPrefix(customID, werewolfDoctorProtectID))
 	case strings.HasPrefix(customID, werewolfHunterTargetID):
 		cmd.handleHunterTarget(s, i, strings.TrimPrefix(customID, werewolfHunterTargetID))
+	case strings.HasPrefix(customID, werewolfWitchHealID):
+		cmd.handleWitchHeal(s, i, strings.TrimPrefix(customID, werewolfWitchHealID))
+	case strings.HasPrefix(customID, werewolfWitchPoisonID):
+		cmd.handleWitchPoison(s, i, strings.TrimPrefix(customID, werewolfWitchPoisonID))
+	case strings.HasPrefix(customID, werewolfWitchSkipID):
+		cmd.handleWitchSkip(s, i, strings.TrimPrefix(customID, werewolfWitchSkipID))
 	case strings.HasPrefix(customID, werewolfVoteID):
 		cmd.handleVote(s, i, strings.TrimPrefix(customID, werewolfVoteID))
 	}
