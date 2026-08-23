@@ -214,7 +214,7 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 	duelHistoryCmd := commands.NewDuelHistoryCommand(duelStatsSvc)
 	duelResetCmd := commands.NewDuelResetCommand(duelStatsSvc)
 	duelChallengeAllCmd := commands.NewDuelChallengeAllCommand(duelStatsSvc, cfg.Timezone)
-	werewolfCmd := commands.NewWerewolfCommand()
+	werewolfCmd := commands.WerewolfCmd
 
 	for _, def := range []*discordgo.ApplicationCommand{
 		exportCmd.Definition(),
@@ -274,17 +274,38 @@ func registerCommands(discordClient *discord.Client, exportSvc *export.Service, 
 		return commands.WithUserRateLimit("werewolf", commands.GlobalRateLimiters.Werewolf, h)
 	})
 
+	// Every branch below runs through commands.WithRecovery just like the
+	// slash-command handlers above: discordgo dispatches each AddHandler
+	// callback on its own goroutine (SyncEvents defaults to false), so an
+	// unrecovered panic here — a nil map access from a stale/malformed
+	// custom_id, say — would crash the whole bot process for every guild,
+	// not just fail the one interaction.
+	duelComponentHandler := commands.WithRecovery("duel:component", duelCmd.HandleComponent)
+	// DuelResetCommand and DuelChallengeAllCommand's HandleComponent return a
+	// bool the original call sites already discarded — adapt to
+	// commands.CommandHandler's signature with a closure so WithRecovery can
+	// wrap them too.
+	duelResetComponentHandler := commands.WithRecovery("duel-reset:component", func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		duelResetCmd.HandleComponent(s, i)
+	})
+	duelChallengeAllComponentHandler := commands.WithRecovery("duel-challenge-all:component", func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		duelChallengeAllCmd.HandleComponent(s, i)
+	})
+	werewolfComponentHandler := commands.WithRecovery("werewolf:component", werewolfCmd.HandleComponent)
+	duelModalHandler := commands.WithRecovery("duel:modal", duelCmd.HandleModalSubmit)
+	duelChallengeAllModalHandler := commands.WithRecovery("duel-challenge-all:modal", duelChallengeAllCmd.HandleModalSubmit)
+
 	discordClient.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if i.Type == discordgo.InteractionMessageComponent {
-			duelCmd.HandleComponent(s, i)
-			duelResetCmd.HandleComponent(s, i)
-			duelChallengeAllCmd.HandleComponent(s, i)
-			werewolfCmd.HandleComponent(s, i)
+			duelComponentHandler(s, i)
+			duelResetComponentHandler(s, i)
+			duelChallengeAllComponentHandler(s, i)
+			werewolfComponentHandler(s, i)
 			return
 		}
 		if i.Type == discordgo.InteractionModalSubmit {
-			duelCmd.HandleModalSubmit(s, i)
-			duelChallengeAllCmd.HandleModalSubmit(s, i)
+			duelModalHandler(s, i)
+			duelChallengeAllModalHandler(s, i)
 			return
 		}
 		if i.Type != discordgo.InteractionApplicationCommand {

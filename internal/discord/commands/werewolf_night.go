@@ -1104,6 +1104,15 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			}
 		}
 
+		// Wolves/Seer/Doctor/Disruptor strike here since their action window
+		// closes at this point in the flow. The Witch acts in a later,
+		// separate stage (after the wolf thread is torn down) and strikes
+		// there instead — see the AFKStrikes update right after
+		// waitForWitchAction below. Hunter and Cupid are deliberately NOT
+		// struck anywhere: Hunter's pick persists across rounds and not
+		// re-picking is a valid no-op (see HunterTarget's doc comment), and
+		// Cupid's round-1-only window explicitly must not penalize a miss
+		// (see the comment in nightActionsComplete).
 		for _, w := range aliveWolves {
 			if _, voted := game.WolfVotes[w.UserID]; voted {
 				game.AFKStrikes[w.UserID] = 0
@@ -1198,6 +1207,26 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			cmd.dmWitchPrompt(s, channelID, witch, biteTargetPlayers, healUsed, poisonUsed, witchPoisonTargets)
 			deadline := time.Now().Add(witchActionWindow)
 			cmd.waitForWitchAction(channelID, deadline, seq)
+			// AFK bookkeeping for the Witch was missing entirely: Seer/Doctor/
+			// Disruptor/wolves all strike on a missed action in resolveNight's
+			// locked block above, but the Witch's action lives in this
+			// separate, unlocked-then-relocked stage and was never covered.
+			// Only strike when she genuinely had a choice this round (mirrors
+			// hasChoice/WitchPromptedThisRound) — if she had nothing clickable
+			// but skip, staying silent isn't negligence.
+			func() {
+				cmd.mu.Lock()
+				defer cmd.mu.Unlock()
+				g := cmd.gameIfCurrent(channelID, seq)
+				if g == nil {
+					return
+				}
+				if g.WitchActedThisRound {
+					g.AFKStrikes[witch.UserID] = 0
+				} else {
+					g.AFKStrikes[witch.UserID]++
+				}
+			}()
 		}
 	}
 
@@ -1654,7 +1683,7 @@ func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordg
 
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if !ok || game.Phase != phaseNight {
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
 		return

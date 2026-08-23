@@ -514,10 +514,10 @@ type WerewolfCommand struct {
 	games map[string]*werewolfGame // keyed by channel ID — one game per channel
 }
 
-// NewWerewolfCommand creates a new WerewolfCommand
-func NewWerewolfCommand() *WerewolfCommand {
-	return &WerewolfCommand{games: make(map[string]*werewolfGame)}
-}
+// WerewolfCmd is the package's single WerewolfCommand instance — a plain
+// var instead of a zero-arg NewWerewolfCommand() factory, since it takes no
+// configuration (per CLAUDE.md's "no zero-arg factory functions" rule).
+var WerewolfCmd = &WerewolfCommand{games: make(map[string]*werewolfGame)}
 
 // gameIfCurrent returns the game at channelID only if it still exists AND
 // matches seq. Callers use this after waking from a sleep to make sure the
@@ -536,17 +536,7 @@ func (cmd *WerewolfCommand) gameIfCurrent(channelID string, seq uint64) *werewol
 // mention: it explicitly sets an empty AllowedMentions allow-list so the
 // ephemeral response can never trigger a real ping.
 func respondComponentEphemeralMentioned(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content:         message,
-			Flags:           discordgo.MessageFlagsEphemeral,
-			AllowedMentions: &discordgo.MessageAllowedMentions{},
-		},
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("werewolf: failed to send ephemeral component response")
-	}
+	respondComponentEphemeralWithMentions(s, i, message, &discordgo.MessageAllowedMentions{}, "werewolf: failed to send ephemeral component response")
 }
 
 // interactionUserID returns the acting user's ID whether the interaction
@@ -1105,7 +1095,12 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Bàn này đã đóng đăng ký hoặc kết thúc.")
 		return
 	}
-	clickerID := i.Member.User.ID
+	clickerID := interactionUserID(i)
+	if clickerID == "" || i.Member == nil || i.Member.User == nil {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Không xác định được người dùng, thử lại nhé.")
+		return
+	}
 	if joining {
 		if _, already := game.Players[clickerID]; !already {
 			if len(game.JoinOrder) >= werewolfMaxPlayers {

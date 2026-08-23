@@ -273,6 +273,20 @@ func (cmd *WerewolfCommand) sendRoleCountEditor(s *discordgo.Session, interactio
 // handleRoleCountConfirm performs, atomically, so only one of the two
 // ever actually starts startPreflight.
 func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channelID string, seq uint64) {
+	// This runs as its own goroutine (started with a bare `go`, not through
+	// startPreflight, which is the only other place in the game's phase
+	// chain that has its own recover). A panic anywhere in this polling
+	// loop — before it ever reaches startPreflight's guarded tail-call —
+	// would otherwise be unrecovered and crash the whole bot process.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().
+				Interface("panic", r).
+				Str("channel_id", channelID).
+				Msg("werewolf: recovered from panic in role-count-confirm goroutine")
+		}
+	}()
+
 	deadline := time.Now().Add(roleEditTimeout)
 	for {
 		var stillEditing bool

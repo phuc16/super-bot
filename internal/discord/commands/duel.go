@@ -799,15 +799,25 @@ func betButtons(challengeID, challengerID, challengerLabel, opponentID, opponent
 }
 
 func respondComponentEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
+	respondComponentEphemeralWithMentions(s, i, message, nil, "duel: failed to send ephemeral component response")
+}
+
+// respondComponentEphemeralWithMentions is the shared implementation behind
+// respondComponentEphemeral and werewolf's respondComponentEphemeralMentioned
+// — extracted so the two callers (which only ever differed in their
+// AllowedMentions and log message) don't duplicate the whole
+// InteractionRespond call between them.
+func respondComponentEphemeralWithMentions(s *discordgo.Session, i *discordgo.InteractionCreate, message string, mentions *discordgo.MessageAllowedMentions, logMsg string) {
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: message,
-			Flags:   discordgo.MessageFlagsEphemeral,
+			Content:         message,
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: mentions,
 		},
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("duel: failed to send ephemeral component response")
+		log.Error().Err(err).Msg(logMsg)
 	}
 }
 

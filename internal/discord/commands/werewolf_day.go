@@ -226,6 +226,25 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 	}
 }
 
+// validDayVotes filters votes down to voters who are still alive at
+// resolution time — mirrors validWolfVotes' rationale for the night wolf
+// vote: a player who cast a day-vote and then left (or died some other
+// way) before the window closed can no longer decide the lynch, so their
+// vote must not still count toward it. Does NOT affect the AFK-strike
+// check above (which reads the raw votes map over the currently-alive
+// roster) or the VoteBreakdown recap (which intentionally shows every
+// vote actually cast, for a transparent public record) — only the tally
+// that decides who gets lynched.
+func validDayVotes(votes map[string]string, players map[string]*player) map[string]string {
+	valid := make(map[string]string, len(votes))
+	for voterID, targetID := range votes {
+		if voter, exists := players[voterID]; exists && voter.Alive {
+			valid[voterID] = targetID
+		}
+	}
+	return valid
+}
+
 func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, seq uint64) {
 	var (
 		gameFound      bool
@@ -260,7 +279,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 			}
 		}
 
-		top, tie := tallyVotes(game.Votes)
+		top, tie := tallyVotes(validDayVotes(game.Votes, game.Players))
 		if !tie && len(top) == 1 {
 			if target, exists := game.Players[top[0]]; exists && target.Alive {
 				target.Alive = false

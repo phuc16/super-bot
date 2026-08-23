@@ -356,6 +356,59 @@ func TestAlivePlayersIncludesEveryoneEvenSelf(t *testing.T) {
 	}
 }
 
+func TestValidDayVotesDropsVotesFromDeadOrGoneVoters(t *testing.T) {
+	players := map[string]*player{
+		"a": {UserID: "a", Alive: true},
+		"b": {UserID: "b", Alive: false}, // left/died after voting
+		"c": {UserID: "c", Alive: true},
+	}
+	votes := map[string]string{
+		"a": "c",
+		"b": "c", // stale — b is no longer alive, must not count
+	}
+	got := validDayVotes(votes, players)
+	want := map[string]string{"a": "c"}
+	if len(got) != len(want) || got["a"] != want["a"] {
+		t.Errorf("validDayVotes() = %v, want %v — b's vote must be dropped since b is no longer alive", got, want)
+	}
+}
+
+func TestValidDayVotesDropsVoteFromUnknownVoter(t *testing.T) {
+	players := map[string]*player{
+		"a": {UserID: "a", Alive: true},
+	}
+	votes := map[string]string{"a": "a", "ghost": "a"}
+	got := validDayVotes(votes, players)
+	if len(got) != 1 || got["a"] != "a" {
+		t.Errorf("validDayVotes() = %v, want only a's vote to survive", got)
+	}
+}
+
+func TestValidDayVotesStaleVoteCannotFlipLynchOutcome(t *testing.T) {
+	// Regression for the exact scenario from the code-review finding: A
+	// votes for B, then A leaves before resolution. Without filtering, A's
+	// vote could still tip a tie-break; with it, only C's vote remains and
+	// nobody has a plurality large enough to change the outcome
+	// unexpectedly.
+	players := map[string]*player{
+		"a": {UserID: "a", Alive: false}, // left after voting
+		"b": {UserID: "b", Alive: true},
+		"c": {UserID: "c", Alive: true},
+	}
+	votes := map[string]string{"a": "b", "c": "b"}
+	top, tie := tallyVotes(validDayVotes(votes, players))
+	if tie || len(top) != 1 || top[0] != "b" {
+		t.Errorf("tallyVotes(validDayVotes(...)) = %v, %v — want b alone with 1 valid vote", top, tie)
+	}
+
+	// Sanity check: without the filter, the stale vote would double b's
+	// count but the result target is the same here — the important
+	// assertion is that only 1 valid vote reaches the tally, not 2.
+	if got := len(validDayVotes(votes, players)); got != 1 {
+		t.Errorf("validDayVotes(...) returned %d votes, want exactly 1 (a's stale vote must be dropped)", got)
+	}
+}
+
 func TestTallyVotesSingleWinner(t *testing.T) {
 	votes := map[string]string{"a": "x", "b": "x", "c": "y"}
 	top, tie := tallyVotes(votes)
@@ -1431,7 +1484,7 @@ func TestDMRoleRevealContentIncludesWinCondition(t *testing.T) {
 }
 
 func TestWerewolfDefinitionHasCustomRolesOption(t *testing.T) {
-	cmd := NewWerewolfCommand()
+	cmd := WerewolfCmd
 	def := cmd.Definition()
 	var startOpt *discordgo.ApplicationCommandOption
 	for _, opt := range def.Options {
