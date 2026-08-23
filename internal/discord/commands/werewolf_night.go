@@ -886,7 +886,7 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 		existingThreadID = g.WolfThreadID
 		maxPicks = 1 + g.WolfBonusBiteNextNight
 		for _, p := range g.Players {
-			if !p.Alive && p.Faction == factionWolf {
+			if !p.Alive && p.Faction == factionWolf && !g.WolfThreadRemovedIDs[p.UserID] {
 				deadWolfIDs = append(deadWolfIDs, p.UserID)
 			}
 		}
@@ -906,19 +906,51 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 			return
 		}
 		threadID = thread.ID
+		stillCurrent := false
 		func() {
 			cmd.mu.Lock()
 			defer cmd.mu.Unlock()
 			if g := cmd.gameIfCurrent(channelID, seq); g != nil {
 				g.WolfThreadID = threadID
+				stillCurrent = true
 			}
 		}()
+		if !stillCurrent {
+			// The game was force-stopped/cancelled/ended in the window
+			// between creating this thread and re-acquiring the lock to
+			// record it — nothing else holds this ID (it was never written
+			// to game state), so it would otherwise leak as an orphaned
+			// thread in the guild forever. Delete it here instead.
+			if _, err := s.ChannelDelete(threadID); err != nil {
+				log.Error().Err(err).Str("thread_id", threadID).Msg("werewolf: failed to delete orphaned wolf thread after game ended mid-creation")
+			}
+			return
+		}
 	} else {
 		setWolfThreadLocked(s, threadID, false)
+		var removedIDs []string
 		for _, id := range deadWolfIDs {
 			if err := s.ThreadMemberRemove(threadID, id); err != nil {
 				log.Error().Err(err).Str("user_id", id).Msg("werewolf: failed to remove dead wolf from thread")
+				continue
 			}
+			removedIDs = append(removedIDs, id)
+		}
+		if len(removedIDs) > 0 {
+			// Recorded only on success (not attempted-and-failed) so a
+			// transient API error still gets retried next night — this is
+			// purely to stop re-attempting (and re-logging an error for) a
+			// removal that already succeeded, which would otherwise repeat
+			// every remaining night of the game for every wolf who ever died.
+			func() {
+				cmd.mu.Lock()
+				defer cmd.mu.Unlock()
+				if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+					for _, id := range removedIDs {
+						g.WolfThreadRemovedIDs[id] = true
+					}
+				}
+			}()
 		}
 	}
 

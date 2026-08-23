@@ -506,6 +506,7 @@ type werewolfGame struct {
 	PriorOverwrite                *discordgo.PermissionOverwrite // @everyone's channel overwrite before this game locked it; nil if there was none
 	AliveThreadID                 string                         // private thread all players use for day-discussion chat; "" before it's created
 	ChannelUnlocked               bool                           // true once unlockChannel has already run for this game (e.g. the alive-thread-creation fallback below) — terminal cleanup paths must check this before calling unlockChannel again
+	WolfThreadRemovedIDs          map[string]bool                // wolf-faction user IDs already ThreadMemberRemove'd from the persistent wolf thread — startWolfThread's per-night dead-wolf sweep checks this so it doesn't retry (and re-log an error for) a removal that already succeeded on an earlier night
 }
 
 // WerewolfCommand handles /werewolf and all its button/select interactions.
@@ -863,17 +864,18 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 
 	starterID := i.Member.User.ID
 	game := &werewolfGame{
-		GuildID:       i.GuildID,
-		ChannelID:     i.ChannelID,
-		StarterID:     starterID,
-		Seq:           atomic.AddUint64(&werewolfSeqCounter, 1),
-		RevealOnDeath: revealOnDeath,
-		CustomRoles:   customRoles,
-		Phase:         phaseLobby,
-		Players:       make(map[string]*player),
-		JoinOrder:     []string{},
-		Votes:         make(map[string]string),
-		AFKStrikes:    make(map[string]int),
+		GuildID:              i.GuildID,
+		ChannelID:            i.ChannelID,
+		StarterID:            starterID,
+		Seq:                  atomic.AddUint64(&werewolfSeqCounter, 1),
+		RevealOnDeath:        revealOnDeath,
+		CustomRoles:          customRoles,
+		Phase:                phaseLobby,
+		Players:              make(map[string]*player),
+		JoinOrder:            []string{},
+		Votes:                make(map[string]string),
+		AFKStrikes:           make(map[string]int),
+		WolfThreadRemovedIDs: make(map[string]bool),
 	}
 
 	// Claim the channel's map slot atomically with the existence check —
