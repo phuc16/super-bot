@@ -460,7 +460,7 @@ type roundLog struct {
 	CursedWolfConverted string // label, if a not-saved Cursed Wolf converted to wolf-faction this round instead of dying
 	DisruptorMutedLabel string // who was muted for the following day-discuss, "" if the Disruptor didn't act (or doesn't exist) this round
 
-	WolfBonusBite        bool     // this round used the Wolf-Cub 2-target bite
+	WolfBonusBite        bool     // this round used the Wolf-Cub bonus bite (2+ targets)
 	WolfBiteOutcomeLines []string // one pre-formatted line per resolved target this round, used only when WolfBonusBite is true — see formatRoundBlock
 }
 
@@ -478,28 +478,28 @@ type werewolfGame struct {
 	Round                         int
 	Players                       map[string]*player             // userID -> player
 	JoinOrder                     []string                       // frozen once the game leaves phaseLobby
-	WolfThreadID                  string                         // this round's wolf-coordination thread, "" between nights
+	WolfThreadID                  string                         // the wolf-coordination thread, persists across the whole game once created (see startWolfThread) — "" only before the first night or after the game truly ends
 	WolfTargetMessageID           string                         // the target-select message in the wolf thread, live-edited as votes come in
-	WolfVotes                     map[string]string              // wolfUserID -> targetUserID this round, locked once cast — no re-voting
+	WolfVotes                     map[string][]string            // wolfUserID -> target(s) this round, locked once cast — no re-voting. Normally 1 target; during a Wolf-Cub bonus-bite round each wolf may pick up to 1+WolfBonusBiteNextNight (captured at picker-build time) targets in one select, each counting as a separate vote toward that target in tallyWolfVotes
 	SeerActed                     bool                           // whether the seer has acted this round
 	SeerTarget                    string                         // who the seer checked this round, "" if SeerActed is false
 	SeerResult                    role                           // that check's result — meaningless if SeerTarget == ""
 	DoctorProtect                 string                         // doctor's pick this round
 	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
-	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it
+	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it — deliberate deviation from canonical Ultimate Werewolf, where the Hunter instead picks reactively, only at the moment they die, with full information at that instant; this project intentionally uses a standing pre-committed pick instead (an earlier design decision, not an oversight — see dmHunterPrompt)
 	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
 	DisruptorTarget               string                         // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss/day-vote phase transition to apply/remove the per-member mute
 	DisruptorActedThisRound       bool                           // reset each round; true once the Disruptor has made at least one pick this round — gates the progress announcement to the first pick only, mirroring Hunter's pre-AFK-exemption shape
 	LoverIDs                      [2]string                      // set once by Cupid on round 1; ["", ""] means no pairing was made
 	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
 	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
-	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2-target case, chosen via the select menu in handleWitchHeal)
+	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2+-target case, chosen via the select menu in handleWitchHeal)
 	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
 	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
-	WolfBonusBiteNextNight        bool                           // armed when a Wolf Cub dies (any cause); consumed at the start of the next night's wolf-vote resolution to select 2 targets instead of 1
-	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2 if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a 2-target select-menu pick, reset each round in runNightPhase
+	WolfBonusBiteNextNight        int                            // extra kill target(s) armed for the next night's wolf vote, beyond the base 1 — incremented once per Wolf Cub death (any cause) so 2+ Wolf Cubs dying the same round compound correctly; consumed (reset to 0) at the start of the next night's wolf-vote resolution
+	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2+ if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a bonus-bite select-menu pick, reset each round in runNightPhase
 	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
-	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor handlers against a late click landing during the Witch's stage-2 window. Does NOT gate Witch or Hunter handlers.
+	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor/disruptor/hunter handlers against a late click landing during the Witch's stage-2 window. Does NOT gate the Witch's own handlers, which have their own WitchActedThisRound/WitchPromptedThisRound gating for that same window.
 	Votes                         map[string]string              // voterID -> targetID, reset each day
 	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
 	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
@@ -820,6 +820,11 @@ func (cmd *WerewolfCommand) Definition() *discordgo.ApplicationCommand {
 				Name:        "leave",
 				Description: "Rời bàn hoặc rời ván Ma Sói đang chạy trong kênh này",
 			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "force-stop",
+				Description: "[Quản trị viên] Buộc dừng ván Ma Sói trong kênh này, ở bất kỳ giai đoạn nào",
+			},
 		},
 	}
 }
@@ -838,6 +843,8 @@ func (cmd *WerewolfCommand) Handle(s *discordgo.Session, i *discordgo.Interactio
 		cmd.handleStatus(s, i)
 	case "leave":
 		cmd.handleLeave(s, i)
+	case "force-stop":
+		cmd.handleForceStop(s, i)
 	default:
 		respondError(s, i, "Subcommand không hợp lệ.")
 	}
@@ -1188,6 +1195,65 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 			Components: []discordgo.MessageComponent{},
 		},
 	})
+}
+
+// handleForceStop lets an admin (Administrator or Manage Server permission)
+// tear down whatever game is running in this channel, in ANY phase — unlike
+// handleCancelLobby, which deliberately only works during
+// phaseLobby/phaseRoleEdit and leaves a genuinely-running game to
+// /werewolf leave and the normal end paths. This is the escape hatch for
+// when a game needs to be aborted outright (stuck player, wrong setup,
+// channel needs freeing) regardless of how far it's progressed.
+//
+// Deleting the game from cmd.games is sufficient on its own to stop every
+// in-flight goroutine: the whole night/day phase chain already checks
+// cmd.gameIfCurrent(channelID, seq) before acting and quietly returns once
+// that lookup fails, exactly as it does when a game ends normally.
+func (cmd *WerewolfCommand) handleForceStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !hasAdminPermission(i.Member) {
+		respondError(s, i, "❌ Chỉ quản trị viên (Administrator hoặc Manage Server) mới được dùng lệnh này.")
+		return
+	}
+
+	channelID := i.ChannelID
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok {
+		cmd.mu.Unlock()
+		respondError(s, i, "Không có ván Ma Sói nào đang chạy trong kênh này.")
+		return
+	}
+	threadID := game.WolfThreadID
+	aliveThreadID := game.AliveThreadID
+	guildID := game.GuildID
+	priorOverwrite := game.PriorOverwrite
+	channelUnlocked := game.ChannelUnlocked
+	delete(cmd.games, channelID)
+	cmd.mu.Unlock()
+
+	if threadID != "" {
+		if _, err := s.ChannelDelete(threadID); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread on force-stop")
+		}
+	}
+	if aliveThreadID != "" {
+		if _, err := s.ChannelDelete(aliveThreadID); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread on force-stop")
+		}
+	}
+	if !channelUnlocked {
+		unlockChannel(s, guildID, channelID, priorOverwrite)
+	}
+
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content:         fmt.Sprintf("🛑 Quản trị viên <@%s> đã buộc dừng ván Ma Sói trong kênh này.", interactionUserID(i)),
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to respond to force-stop")
+	}
 }
 
 const preflightGracePeriod = 60 * time.Second

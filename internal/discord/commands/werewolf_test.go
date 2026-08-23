@@ -742,7 +742,7 @@ func TestRolePointsCoversEveryRole(t *testing.T) {
 }
 
 func TestTallyWolfVotesSingleWinner(t *testing.T) {
-	votes := map[string]string{"wolf1": "x", "wolf2": "x", "wolf3": "y"}
+	votes := map[string][]string{"wolf1": {"x"}, "wolf2": {"x"}, "wolf3": {"y"}}
 	targets, ok := tallyWolfVotes(votes, 1)
 	if !ok {
 		t.Fatal("expected ok=true (no tie)")
@@ -753,7 +753,7 @@ func TestTallyWolfVotesSingleWinner(t *testing.T) {
 }
 
 func TestTallyWolfVotesTieProducesNoKill(t *testing.T) {
-	votes := map[string]string{"wolf1": "x", "wolf2": "y"}
+	votes := map[string][]string{"wolf1": {"x"}, "wolf2": {"y"}}
 	_, ok := tallyWolfVotes(votes, 1)
 	if ok {
 		t.Fatal("expected ok=false on a genuine tie for the only kill slot")
@@ -761,7 +761,7 @@ func TestTallyWolfVotesTieProducesNoKill(t *testing.T) {
 }
 
 func TestTallyWolfVotesEmpty(t *testing.T) {
-	targets, ok := tallyWolfVotes(map[string]string{}, 1)
+	targets, ok := tallyWolfVotes(map[string][]string{}, 1)
 	if ok || len(targets) != 0 {
 		t.Errorf("expected ok=false and no targets for empty votes, got targets=%v ok=%v", targets, ok)
 	}
@@ -769,10 +769,10 @@ func TestTallyWolfVotesEmpty(t *testing.T) {
 
 func TestTallyWolfVotesTopTwo(t *testing.T) {
 	// x:3, y:2, z:1 -- top 2 by count are x and y, no tie for either slot.
-	votes := map[string]string{
-		"wolf1": "x", "wolf2": "x", "wolf3": "x",
-		"wolf4": "y", "wolf5": "y",
-		"wolf6": "z",
+	votes := map[string][]string{
+		"wolf1": {"x"}, "wolf2": {"x"}, "wolf3": {"x"},
+		"wolf4": {"y"}, "wolf5": {"y"},
+		"wolf6": {"z"},
 	}
 	targets, ok := tallyWolfVotes(votes, 2)
 	if !ok {
@@ -790,10 +790,10 @@ func TestTallyWolfVotesTopTwo(t *testing.T) {
 func TestTallyWolfVotesTopTwoWithTieForSecondSlot(t *testing.T) {
 	// x:2 (clear first), y:1, z:1 (tied for the second slot) -- x is a kill,
 	// the second slot ties and produces no second kill.
-	votes := map[string]string{
-		"wolf1": "x", "wolf2": "x",
-		"wolf3": "y",
-		"wolf4": "z",
+	votes := map[string][]string{
+		"wolf1": {"x"}, "wolf2": {"x"},
+		"wolf3": {"y"},
+		"wolf4": {"z"},
 	}
 	targets, ok := tallyWolfVotes(votes, 2)
 	if !ok {
@@ -801,6 +801,23 @@ func TestTallyWolfVotesTopTwoWithTieForSecondSlot(t *testing.T) {
 	}
 	if len(targets) != 1 || targets[0] != "x" {
 		t.Errorf("expected only [x] (second slot tied, dropped), got %v", targets)
+	}
+}
+
+func TestTallyWolfVotesSingleWolfPicksTwoInOneVote(t *testing.T) {
+	// A lone wolf during a bonus-bite round can name 2 targets in one
+	// select instead of relying on separate wolves to split their votes.
+	votes := map[string][]string{"wolf1": {"x", "y"}}
+	targets, ok := tallyWolfVotes(votes, 2)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	got := map[string]bool{}
+	for _, tgt := range targets {
+		got[tgt] = true
+	}
+	if len(targets) != 2 || !got["x"] || !got["y"] {
+		t.Errorf("expected both x and y from a single wolf's 2-pick vote, got %v", targets)
 	}
 }
 
@@ -813,11 +830,10 @@ func TestValidWolfVotesDropsDeadVoter(t *testing.T) {
 		"wolf2": {UserID: "wolf2", Alive: false}, // departed mid-round
 		"v1":    {UserID: "v1", Alive: true},
 	}
-	votes := map[string]string{"wolf1": "v1", "wolf2": "v1"}
+	votes := map[string][]string{"wolf1": {"v1"}, "wolf2": {"v1"}}
 	got := validWolfVotes(votes, aliveWolves, allPlayers)
-	want := map[string]string{"wolf1": "v1"}
-	if len(got) != len(want) || got["wolf1"] != "v1" {
-		t.Errorf("got %v, want %v (wolf2's vote should be dropped, they're dead)", got, want)
+	if len(got) != 1 || len(got["wolf1"]) != 1 || got["wolf1"][0] != "v1" {
+		t.Errorf("got %v, want only wolf1's vote (wolf2's should be dropped, they're dead)", got)
 	}
 }
 
@@ -829,7 +845,7 @@ func TestValidWolfVotesDropsDeadTarget(t *testing.T) {
 		"wolf1": {UserID: "wolf1", Alive: true},
 		"v1":    {UserID: "v1", Alive: false}, // died some other way before resolution
 	}
-	votes := map[string]string{"wolf1": "v1"}
+	votes := map[string][]string{"wolf1": {"v1"}}
 	got := validWolfVotes(votes, aliveWolves, allPlayers)
 	if len(got) != 0 {
 		t.Errorf("expected vote for a dead target to be dropped, got %v", got)
@@ -846,10 +862,26 @@ func TestValidWolfVotesKeepsLegitimateVotes(t *testing.T) {
 		"wolf2": {UserID: "wolf2", Alive: true},
 		"v1":    {UserID: "v1", Alive: true},
 	}
-	votes := map[string]string{"wolf1": "v1", "wolf2": "v1"}
+	votes := map[string][]string{"wolf1": {"v1"}, "wolf2": {"v1"}}
 	got := validWolfVotes(votes, aliveWolves, allPlayers)
-	if len(got) != 2 || got["wolf1"] != "v1" || got["wolf2"] != "v1" {
+	if len(got) != 2 || got["wolf1"][0] != "v1" || got["wolf2"][0] != "v1" {
 		t.Errorf("expected both votes kept, got %v", got)
+	}
+}
+
+func TestValidWolfVotesDropsOnlyDeadTargetFromMultiPick(t *testing.T) {
+	// A wolf's 2-pick vote where one pick died before resolution: the dead
+	// pick is dropped but the still-alive pick must survive filtering.
+	aliveWolves := []*player{{UserID: "wolf1", Alive: true}}
+	allPlayers := map[string]*player{
+		"wolf1": {UserID: "wolf1", Alive: true},
+		"v1":    {UserID: "v1", Alive: true},
+		"v2":    {UserID: "v2", Alive: false},
+	}
+	votes := map[string][]string{"wolf1": {"v1", "v2"}}
+	got := validWolfVotes(votes, aliveWolves, allPlayers)
+	if len(got) != 1 || len(got["wolf1"]) != 1 || got["wolf1"][0] != "v1" {
+		t.Errorf("got %v, want only v1 surviving wolf1's pick list", got)
 	}
 }
 
@@ -885,16 +917,34 @@ func TestApplyWolfCubBonusBiteFlag(t *testing.T) {
 		},
 	}
 	applyWolfCubBonusBiteFlag(game, []string{"wolf"})
-	if game.WolfBonusBiteNextNight {
+	if game.WolfBonusBiteNextNight != 0 {
 		t.Error("a plain Werewolf's death must not arm the bonus bite")
 	}
 	applyWolfCubBonusBiteFlag(game, []string{"wolf", "cub"})
-	if !game.WolfBonusBiteNextNight {
-		t.Error("a Wolf Cub's death must arm the bonus bite")
+	if game.WolfBonusBiteNextNight != 1 {
+		t.Errorf("a Wolf Cub's death must arm 1 bonus target, got %d", game.WolfBonusBiteNextNight)
 	}
 	applyWolfCubBonusBiteFlag(game, []string{"wolf"})
-	if !game.WolfBonusBiteNextNight {
-		t.Error("the flag must be additive — a later non-Cub death must not clear it")
+	if game.WolfBonusBiteNextNight != 1 {
+		t.Error("the counter must be additive — a later non-Cub death must not clear it")
+	}
+}
+
+func TestApplyWolfCubBonusBiteFlagCompoundsForMultipleWolfCubs(t *testing.T) {
+	// Regression for the code-review finding: a custom-roles game can deal
+	// more than one Wolf Cub (it has no 1-per-game cap, unlike Seer/Doctor/
+	// etc). If two die in the same round, the pack must get a 3-target bite
+	// next night (1 base + 2 bonus), not cap at 2 like a single-bool flag
+	// would.
+	game := &werewolfGame{
+		Players: map[string]*player{
+			"cub1": {UserID: "cub1", Role: roleWolfCub},
+			"cub2": {UserID: "cub2", Role: roleWolfCub},
+		},
+	}
+	applyWolfCubBonusBiteFlag(game, []string{"cub1", "cub2"})
+	if game.WolfBonusBiteNextNight != 2 {
+		t.Errorf("two Wolf Cubs dying the same round must arm 2 bonus targets, got %d", game.WolfBonusBiteNextNight)
 	}
 }
 
@@ -936,7 +986,7 @@ func TestFormatRoundBlockWolfBonusBiteEmptyOutcomeLines(t *testing.T) {
 func TestTallyWolfVotesTopTwoUnanimousYieldsOne(t *testing.T) {
 	// Bonus bite armed but the pack agrees: only one distinct target, so the
 	// round must fall back to the ordinary single-target path.
-	targets, ok := tallyWolfVotes(map[string]string{"w1": "a", "w2": "a"}, 2)
+	targets, ok := tallyWolfVotes(map[string][]string{"w1": {"a"}, "w2": {"a"}}, 2)
 	if !ok || len(targets) != 1 || targets[0] != "a" {
 		t.Fatalf("unanimous tallyWolfVotes(topN=2) = %v, %v; want [a], true", targets, ok)
 	}
@@ -1725,7 +1775,7 @@ func nightActionsCompleteGame(round int, cupidAlive bool, lovers [2]string) *wer
 			"w1": {UserID: "w1", Label: "W1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
 			"c1": {UserID: "c1", Label: "C1", Role: roleCupid, Alive: cupidAlive},
 		},
-		WolfVotes: map[string]string{"w1": "c1"},
+		WolfVotes: map[string][]string{"w1": {"c1"}},
 		LoverIDs:  lovers,
 	}
 	return game
@@ -1764,7 +1814,7 @@ func TestNightActionsCompleteRoundOneWithNoCupidAtAll(t *testing.T) {
 			"w1": {UserID: "w1", Label: "W1", Role: roleWerewolf, Faction: factionWolf, Alive: true},
 			"v1": {UserID: "v1", Label: "V1", Role: roleVillager, Alive: true},
 		},
-		WolfVotes: map[string]string{"w1": "v1"},
+		WolfVotes: map[string][]string{"w1": {"v1"}},
 	}
 	if !cmd.nightActionsComplete(game) {
 		t.Error("nightActionsComplete() = false with no Cupid in the game, want true")

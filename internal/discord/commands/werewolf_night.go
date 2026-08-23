@@ -50,10 +50,29 @@ func wolfDiscussWindowFor(wolfCount int) time.Duration {
 // targets rather than selecting both tied players — deliberate, so a split
 // pack never gets a free double kill out of its own indecision. ok is false
 // only when there were no votes at all, or the very first slot ties.
-func tallyWolfVotes(votes map[string]string, topN int) (targets []string, ok bool) {
+//
+// Special case: a single voter's own multiple picks (from the wolf-vote
+// multi-select, when a bonus bite lets one wolf name more than one target)
+// never tie against each other — there's exactly one voter, so there's no
+// disagreement to arbitrate, and their full pick list (capped to topN) is
+// used directly. This does NOT relax the tie rule above for 2+ voters: two
+// different wolves each independently naming a different single target
+// still ties and yields zero kills, unchanged.
+func tallyWolfVotes(votes map[string][]string, topN int) (targets []string, ok bool) {
+	if len(votes) == 1 {
+		for _, picks := range votes {
+			if len(picks) > topN {
+				picks = picks[:topN]
+			}
+			return append([]string(nil), picks...), len(picks) > 0
+		}
+	}
+
 	counts := make(map[string]int)
-	for _, target := range votes {
-		counts[target]++
+	for _, picks := range votes {
+		for _, target := range picks {
+			counts[target]++
+		}
 	}
 	if len(counts) == 0 {
 		return nil, false
@@ -99,18 +118,24 @@ func tallyWolfVotes(votes map[string]string, topN int) (targets []string, ok boo
 // NOT affect the AFK-strike check in resolveNight, which intentionally
 // still reads the raw, unfiltered votes map — a wolf who voted for a
 // since-dead target still acted and should not be struck.
-func validWolfVotes(votes map[string]string, aliveWolves []*player, allPlayers map[string]*player) map[string]string {
+func validWolfVotes(votes map[string][]string, aliveWolves []*player, allPlayers map[string]*player) map[string][]string {
 	aliveWolfIDs := make(map[string]bool, len(aliveWolves))
 	for _, w := range aliveWolves {
 		aliveWolfIDs[w.UserID] = true
 	}
-	valid := make(map[string]string, len(votes))
-	for voterID, targetID := range votes {
+	valid := make(map[string][]string, len(votes))
+	for voterID, picks := range votes {
 		if !aliveWolfIDs[voterID] {
 			continue
 		}
-		if target, exists := allPlayers[targetID]; exists && target.Alive {
-			valid[voterID] = targetID
+		var validPicks []string
+		for _, targetID := range picks {
+			if target, exists := allPlayers[targetID]; exists && target.Alive {
+				validPicks = append(validPicks, targetID)
+			}
+		}
+		if len(validPicks) > 0 {
+			valid[voterID] = validPicks
 		}
 	}
 	return valid
@@ -120,15 +145,17 @@ func validWolfVotes(votes map[string]string, aliveWolves []*player, allPlayers m
 // current pick, shown (and re-edited on every vote) inside the private wolf
 // thread so the pack can coordinate openly with each other — nothing here
 // is ever posted outside that thread.
-func wolfVoteSummary(votes map[string]string, wolves, targets []*player) string {
+func wolfVoteSummary(votes map[string][]string, wolves, targets []*player) string {
 	labelByID := make(map[string]string, len(targets))
 	for _, t := range targets {
 		labelByID[t.UserID] = t.Label
 	}
 
 	counts := make(map[string]int)
-	for _, targetID := range votes {
-		counts[targetID]++
+	for _, picks := range votes {
+		for _, targetID := range picks {
+			counts[targetID]++
+		}
 	}
 
 	var b strings.Builder
@@ -146,12 +173,16 @@ func wolfVoteSummary(votes map[string]string, wolves, targets []*player) string 
 	b.WriteString("\n\n**Lượt chọn:**")
 	for _, w := range wolves {
 		pick := "Chưa chọn"
-		if targetID, voted := votes[w.UserID]; voted {
-			if label, ok := labelByID[targetID]; ok {
-				pick = label
-			} else {
-				pick = "(mục tiêu đã chết)"
+		if picks, voted := votes[w.UserID]; voted && len(picks) > 0 {
+			labels := make([]string, 0, len(picks))
+			for _, targetID := range picks {
+				if label, ok := labelByID[targetID]; ok {
+					labels = append(labels, label)
+				} else {
+					labels = append(labels, "(mục tiêu đã chết)")
+				}
 			}
+			pick = strings.Join(labels, ", ")
 		}
 		fmt.Fprintf(&b, "\n%s: %s", w.Label, pick)
 	}
@@ -161,12 +192,20 @@ func wolfVoteSummary(votes map[string]string, wolves, targets []*player) string 
 
 // wolfVoteMessageContent renders the wolf-thread target-select message
 // body shared by startWolfThread (initial post) and handleWolfTarget
-// (live-edited on every new vote).
-func wolfVoteMessageContent(pingText, summary string) string {
-	return fmt.Sprintf(
-		"🐺 %s Chọn mục tiêu để tấn công đêm nay. Mỗi Sói chỉ được bỏ phiếu 1 lần, hãy bàn bạc trong thread trước khi chọn.\n\n%s",
-		pingText, summary,
-	)
+// (live-edited on every new vote). maxPicks is how many targets each wolf
+// may select in one go this round — 1 normally, or 1+WolfBonusBiteNextNight
+// when a Wolf Cub died — and drives which instructional line is shown, so
+// the pack always knows whether tonight is a bonus round without having to
+// infer it from anything else.
+func wolfVoteMessageContent(pingText, summary string, maxPicks int) string {
+	instruction := "Chọn mục tiêu để tấn công đêm nay. Mỗi Sói chỉ được bỏ phiếu 1 lần, hãy bàn bạc trong thread trước khi chọn."
+	if maxPicks > 1 {
+		instruction = fmt.Sprintf(
+			"🐺🐺 Sói Con đã ngã xuống — đêm nay bầy Sói được cắn tối đa %d mục tiêu! Mỗi Sói chọn tối đa %d người trong một lượt (chọn 1 vẫn hợp lệ), hãy bàn bạc trong thread trước khi chọn.",
+			maxPicks, maxPicks,
+		)
+	}
+	return fmt.Sprintf("🐺 %s %s\n\n%s", pingText, instruction, summary)
 }
 
 func alivePlayersOfRole(game *werewolfGame, r role) []*player {
@@ -425,17 +464,19 @@ func loverDeathLine(p *player) string {
 	return fmt.Sprintf("💔 **%s** cũng chết theo vì mất người yêu.", p.Label)
 }
 
-// applyWolfCubBonusBiteFlag arms game.WolfBonusBiteNextNight if any of the
-// given just-died player IDs was a Wolf Cub. Additive — never clears an
-// already-armed flag — so every death-application site (night kill/
-// poison/Hunter-revenge, day lynch, AFK removal, voluntary leave) can call
-// it independently after applying its own deaths, in any order, without
-// needing to coordinate with the others. Must be called with cmd.mu held.
+// applyWolfCubBonusBiteFlag arms one extra game.WolfBonusBiteNextNight
+// target per Wolf Cub found among the given just-died player IDs. Additive
+// — never resets the counter, only increments it — so every
+// death-application site (night kill/poison/Hunter-revenge, day lynch, AFK
+// removal, voluntary leave) can call it independently after applying its
+// own deaths, in any order, without needing to coordinate with the others,
+// and so 2+ Wolf Cubs dying in the same round (possible in a custom-roles
+// game — Wolf Cub has no 1-per-game cap) compound into a 3+-target bite
+// instead of silently capping at 2. Must be called with cmd.mu held.
 func applyWolfCubBonusBiteFlag(game *werewolfGame, deadIDs []string) {
 	for _, id := range deadIDs {
 		if p, ok := game.Players[id]; ok && p.Role == roleWolfCub {
-			game.WolfBonusBiteNextNight = true
-			return
+			game.WolfBonusBiteNextNight++
 		}
 	}
 }
@@ -474,6 +515,45 @@ func targetSelectMenu(customID, placeholder string, targets []*player) []discord
 					Options:     options,
 					MinValues:   &minValues,
 					MaxValues:   1,
+				},
+			},
+		},
+	}
+}
+
+// wolfTargetSelectMenu is targetSelectMenu's multi-pick variant, used only
+// for the wolf-vote menu: MinValues stays 1 (a wolf may still just name one
+// target), but MaxValues follows maxPicks so a Wolf-Cub bonus-bite round
+// lets each wolf name multiple targets in the same select instead of
+// voting once each and relying purely on tally math to surface a second
+// kill. Clamped to len(targets) since Discord rejects a MaxValues above
+// the option count.
+func wolfTargetSelectMenu(customID, placeholder string, targets []*player, maxPicks int) []discordgo.MessageComponent {
+	options := make([]discordgo.SelectMenuOption, 0, len(targets))
+	for _, p := range targets {
+		options = append(options, discordgo.SelectMenuOption{
+			Label: truncateLabel(p.Label),
+			Value: p.UserID,
+		})
+	}
+	minValues := 1
+	maxValues := maxPicks
+	if maxValues < minValues {
+		maxValues = minValues
+	}
+	if maxValues > len(targets) {
+		maxValues = len(targets)
+	}
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					MenuType:    discordgo.StringSelectMenu,
+					CustomID:    customID,
+					Placeholder: placeholder,
+					Options:     options,
+					MinValues:   &minValues,
+					MaxValues:   maxValues,
 				},
 			},
 		},
@@ -557,22 +637,32 @@ func (cmd *WerewolfCommand) handleCupidPair(s *discordgo.Session, i *discordgo.I
 	}
 	game.LoverIDs = [2]string{values[0], values[1]}
 	label1, label2 := target1.Label, target2.Label
+	role1, role2 := target1.Role, target2.Role
 	id1, id2 := values[0], values[1]
 	cmd.mu.Unlock()
 
 	respondComponentEphemeral(s, i, fmt.Sprintf("💘 Đã ghép: %s ❤️ %s.", label1, label2))
 	announceRoleDecided(s, channelID, "💘 Thần Tình Yêu")
 
-	for _, pair := range []struct{ toID, partnerLabel string }{
-		{id1, label2},
-		{id2, label1},
+	// Lovers learn each other's full identity, including role — the
+	// standard Cupid rule bonds them as allies who need to coordinate, not
+	// just two names who happen to be linked; they still don't know who
+	// Cupid is (this DM never says who paired them). No in-bot messaging
+	// channel is provided between the two — nothing here creates one, they
+	// already have ordinary Discord DMs to each other if they want to talk.
+	for _, pair := range []struct {
+		toID, partnerLabel string
+		partnerRole        role
+	}{
+		{id1, label2, role2},
+		{id2, label1, role1},
 	} {
 		dm, err := s.UserChannelCreate(pair.toID)
 		if err != nil {
 			log.Error().Err(err).Str("user_id", pair.toID).Msg("werewolf: failed to open DM for lover reveal")
 			continue
 		}
-		if _, err := s.ChannelMessageSend(dm.ID, fmt.Sprintf("💘 Thần Tình Yêu đã ghép bạn với **%s**. Nếu một trong hai người chết, người còn lại cũng chết theo.", pair.partnerLabel)); err != nil {
+		if _, err := s.ChannelMessageSend(dm.ID, fmt.Sprintf("💘 Thần Tình Yêu đã ghép bạn với **%s** (%s). Hai bạn không thể trò chuyện trực tiếp với nhau qua bot. Nếu một trong hai người chết, người còn lại cũng chết theo.", pair.partnerLabel, pair.partnerRole.label())); err != nil {
 			log.Error().Err(err).Str("user_id", pair.toID).Msg("werewolf: failed to DM lover reveal")
 		}
 	}
@@ -635,7 +725,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		gameFound = true
 		game.Phase = phaseNight
 		game.Round++
-		game.WolfVotes = make(map[string]string)
+		game.WolfVotes = make(map[string][]string)
 		game.SeerActed = false
 		game.SeerTarget = ""
 		game.SeerResult = roleVillager
@@ -671,9 +761,14 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		if doctors := alivePlayersOfRole(game, roleDoctor); len(doctors) > 0 {
 			doctor = copyPlayer(doctors[0])
 			lastPick := game.DoctorLastPick
+			// Excludes the Doctor's own ID, not just lastPick: the standard
+			// Doctor cannot self-protect at all (unlike Cupid's explicitly
+			// documented self-pick exception) — without this, only the
+			// "can't repeat last night's pick" rule applied, letting the
+			// Doctor self-protect every other night indefinitely.
 			for _, id := range game.JoinOrder {
 				p := game.Players[id]
-				if p.Alive && p.UserID != lastPick {
+				if p.Alive && p.UserID != lastPick && p.UserID != doctor.UserID {
 					doctorTargets = append(doctorTargets, copyPlayer(p))
 				}
 			}
@@ -738,46 +833,106 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	cmd.resolveNight(s, channelID, seq)
 }
 
+// setWolfThreadLocked locks or unlocks the persistent wolf thread — locked
+// during the day/vote (via runDayDiscuss) so the pack can't keep
+// coordinating there once night ends, unlocked (and unarchived, in case a
+// long day window let Discord auto-archive it) each time startWolfThread
+// reopens it for a new night. Locking only blocks members without
+// MANAGE_THREADS from posting; it does not hide the thread or its history,
+// so wolves can still read back over past nights, they just can't add to it
+// until night returns. No-op if threadID is empty (no wolf thread exists
+// yet, or the game has none — e.g. an all-Traitor edge case is not
+// currently reachable, but this stays defensive regardless).
+func setWolfThreadLocked(s *discordgo.Session, threadID string, locked bool) {
+	if threadID == "" {
+		return
+	}
+	archived := false
+	if _, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{Locked: &locked, Archived: &archived}); err != nil {
+		log.Error().Err(err).Str("thread_id", threadID).Bool("locked", locked).Msg("werewolf: failed to set wolf thread lock state")
+	}
+}
+
 // startWolfThread and the DM prompts below all take pre-snapshotted player
 // data (copyPlayer'd under cmd.mu by the caller) rather than the live
 // *werewolfGame — handleLeave can mutate live player/game state concurrently
 // at any time during the night, so these must not read it unguarded.
+//
+// The wolf thread is created once and reused for every night of the game
+// (resolveNight no longer deletes it) so the pack keeps its chat history
+// round to round instead of starting from a blank thread every night — only
+// game-end/cancel/force-stop paths delete it now, same lifecycle as the
+// alive-discussion thread. Reusing means each night's setup here also has
+// to (1) defensively unarchive, in case a long day-discuss window let
+// Discord auto-archive it, and (2) sweep out anyone who died since the
+// thread was last opened — Discord doesn't auto-remove thread members on
+// death, so without this a dead wolf would keep read/post access to the
+// pack's ongoing chat.
 func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID string, round int, wolves, targets []*player, seq uint64) {
 	if len(wolves) == 0 {
 		return
 	}
 
-	thread, err := s.ThreadStartComplex(channelID, &discordgo.ThreadStart{
-		Name:                fmt.Sprintf("🐺 Sói bàn đêm %d", round),
-		Type:                discordgo.ChannelTypeGuildPrivateThread,
-		AutoArchiveDuration: 60,
-		Invitable:           false,
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("werewolf: failed to create wolf thread, falling back to independent DMs")
-		cmd.dmWolvesIndependently(s, channelID, wolves, targets)
-		return
-	}
-
+	var existingThreadID string
+	var deadWolfIDs []string
+	maxPicks := 1
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
-		if g := cmd.gameIfCurrent(channelID, seq); g != nil {
-			g.WolfThreadID = thread.ID
+		g := cmd.gameIfCurrent(channelID, seq)
+		if g == nil {
+			return
+		}
+		existingThreadID = g.WolfThreadID
+		maxPicks = 1 + g.WolfBonusBiteNextNight
+		for _, p := range g.Players {
+			if !p.Alive && p.Faction == factionWolf {
+				deadWolfIDs = append(deadWolfIDs, p.UserID)
+			}
 		}
 	}()
 
+	threadID := existingThreadID
+	if threadID == "" {
+		thread, err := s.ThreadStartComplex(channelID, &discordgo.ThreadStart{
+			Name:                "🐺 Bàn Sói",
+			Type:                discordgo.ChannelTypeGuildPrivateThread,
+			AutoArchiveDuration: 60,
+			Invitable:           false,
+		})
+		if err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to create wolf thread, falling back to independent DMs")
+			cmd.dmWolvesIndependently(s, channelID, wolves, targets, maxPicks)
+			return
+		}
+		threadID = thread.ID
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+				g.WolfThreadID = threadID
+			}
+		}()
+	} else {
+		setWolfThreadLocked(s, threadID, false)
+		for _, id := range deadWolfIDs {
+			if err := s.ThreadMemberRemove(threadID, id); err != nil {
+				log.Error().Err(err).Str("user_id", id).Msg("werewolf: failed to remove dead wolf from thread")
+			}
+		}
+	}
+
 	for _, w := range wolves {
-		if err := s.ThreadMemberAdd(thread.ID, w.UserID); err != nil {
+		if err := s.ThreadMemberAdd(threadID, w.UserID); err != nil {
 			log.Error().Err(err).Str("user_id", w.UserID).Msg("werewolf: failed to add wolf to thread")
 		}
 	}
 
 	pingText, allowedMentions := pingOnce(idsOf(wolves))
-	content := wolfVoteMessageContent(pingText, wolfVoteSummary(nil, wolves, targets))
-	msg, err := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content:         content,
-		Components:      targetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets),
+	content := wolfVoteMessageContent(pingText, wolfVoteSummary(nil, wolves, targets), maxPicks)
+	msg, err := s.ChannelMessageSendComplex(threadID, &discordgo.MessageSend{
+		Content:         fmt.Sprintf("**Đêm %d**\n%s", round, content),
+		Components:      wolfTargetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets, maxPicks),
 		AllowedMentions: allowedMentions,
 	})
 	if err != nil {
@@ -798,7 +953,11 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 // created: each wolf gets the same target-picker in their own DM instead.
 // Votes are locked once cast — handleWolfTarget rejects any further pick
 // from a wolf who has already voted this round.
-func (cmd *WerewolfCommand) dmWolvesIndependently(s *discordgo.Session, channelID string, wolves, targets []*player) {
+func (cmd *WerewolfCommand) dmWolvesIndependently(s *discordgo.Session, channelID string, wolves, targets []*player, maxPicks int) {
+	promptText := "🐺 Chọn mục tiêu để tấn công đêm nay."
+	if maxPicks > 1 {
+		promptText = fmt.Sprintf("🐺🐺 Sói Con đã ngã xuống — đêm nay bạn được chọn tối đa %d mục tiêu (chọn 1 vẫn hợp lệ).", maxPicks)
+	}
 	for _, w := range wolves {
 		dm, err := s.UserChannelCreate(w.UserID)
 		if err != nil {
@@ -806,8 +965,8 @@ func (cmd *WerewolfCommand) dmWolvesIndependently(s *discordgo.Session, channelI
 			continue
 		}
 		if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
-			Content:    "🐺 Chọn mục tiêu để tấn công đêm nay.",
-			Components: targetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets),
+			Content:    promptText,
+			Components: wolfTargetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets, maxPicks),
 		}); err != nil {
 			log.Error().Err(err).Str("user_id", w.UserID).Msg("werewolf: failed to DM wolf fallback prompt")
 		}
@@ -842,6 +1001,13 @@ func (cmd *WerewolfCommand) dmDoctorPrompt(s *discordgo.Session, channelID strin
 	}
 }
 
+// dmHunterPrompt lets the Hunter pick (or repick) their revenge target at
+// any time while alive, ahead of actually dying. NOTE: canonical Ultimate
+// Werewolf instead has the Hunter choose only at the moment they die, with
+// full information about who's alive right then — this project deliberately
+// uses a standing, pre-committed pick instead (see HunterTarget's doc
+// comment). Not an oversight; a design decision from an earlier planning
+// pass, kept as-is on a later code-review pass rather than reworked.
 func (cmd *WerewolfCommand) dmHunterPrompt(s *discordgo.Session, channelID string, hunter *player, targets []*player) {
 	dm, err := s.UserChannelCreate(hunter.UserID)
 	if err != nil {
@@ -914,7 +1080,11 @@ func witchActionComponents(channelID string, biteTargets []*player, healUsed, po
 		rows = append(rows, targetSelectMenu(werewolfWitchPoisonID+channelID, "☠️ Đầu độc ai đó (bỏ qua nếu không muốn)", poisonTargets)[0])
 	}
 	if len(biteTargets) > 1 && !healUsed {
-		rows = append(rows, targetSelectMenu(werewolfWitchHealID+channelID, "💊 Cứu một trong hai người bị cắn", biteTargets)[0])
+		// "một trong hai" ("one of the two") only ever matched when a lone
+		// Wolf Cub death armed a 2-target bite — with the bonus now
+		// compounding per Wolf Cub death, biteTargets can run to 3+, so the
+		// label must not assume exactly two.
+		rows = append(rows, targetSelectMenu(werewolfWitchHealID+channelID, "💊 Cứu một trong những người bị cắn", biteTargets)[0])
 	}
 	buttons := []discordgo.MessageComponent{}
 	if len(biteTargets) == 1 && !healUsed {
@@ -1057,7 +1227,6 @@ func (cmd *WerewolfCommand) waitForWitchAction(channelID string, deadline time.T
 func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string, seq uint64) {
 	var (
 		gameFound          bool
-		threadID           string
 		resolvedTargets    []string
 		wolfTargetLabels   []string
 		bonusBite          bool
@@ -1079,11 +1248,8 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 
 		aliveWolves := aliveWolfVoters(game)
 		validVotes := validWolfVotes(game.WolfVotes, aliveWolves, game.Players)
-		topN := 1
-		if game.WolfBonusBiteNextNight {
-			topN = 2
-		}
-		game.WolfBonusBiteNextNight = false // consumed regardless of outcome — a tie still spends the bonus
+		topN := 1 + game.WolfBonusBiteNextNight
+		game.WolfBonusBiteNextNight = 0 // consumed regardless of outcome — a tie still spends the bonus
 		wolfTargets, tallyOK := tallyWolfVotes(validVotes, topN)
 		// The bonus only actually *fires* when the tally really produced two
 		// distinct targets. A unanimous pack with the bonus armed still bites
@@ -1143,8 +1309,11 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		}
 
 		game.DoctorLastPick = game.DoctorProtect
-		threadID = game.WolfThreadID
-		game.WolfThreadID = ""
+		// game.WolfThreadID deliberately NOT cleared/deleted here — the wolf
+		// thread now persists across nights (see startWolfThread's doc
+		// comment) so the pack keeps its chat history instead of starting
+		// fresh every round. WolfTargetMessageID still resets: that's the
+		// specific vote-select message, which IS new each night.
 		game.WolfTargetMessageID = ""
 
 		if witches := alivePlayersOfRole(game, roleWitch); len(witches) > 0 {
@@ -1173,12 +1342,6 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 	}()
 	if !gameFound {
 		return
-	}
-
-	if threadID != "" {
-		if _, err := s.ChannelDelete(threadID); err != nil {
-			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread")
-		}
 	}
 
 	if witch != nil {
@@ -1499,7 +1662,6 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	if len(values) == 0 {
 		return
 	}
-	targetID := values[0]
 	clickerID := interactionUserID(i)
 
 	cmd.mu.Lock()
@@ -1520,12 +1682,33 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 		respondComponentEphemeral(s, i, "Bạn đã bỏ phiếu rồi, không thể đổi.")
 		return
 	}
-	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+	// maxPicks mirrors the value startWolfThread used to build this exact
+	// menu's MaxValues — re-derived here rather than trusted from the
+	// client payload, same defense-in-depth as every other validated field
+	// below. It can't have changed mid-round: WolfBonusBiteNextNight is
+	// only armed by deaths (applied well before this round's thread ever
+	// opens) and only consumed at the start of the next resolveNight.
+	maxPicks := 1 + game.WolfBonusBiteNextNight
+	if len(values) > maxPicks {
 		cmd.mu.Unlock()
-		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		respondComponentEphemeral(s, i, "Bạn chọn nhiều mục tiêu hơn cho phép.")
 		return
 	}
-	game.WolfVotes[clickerID] = targetID
+	seen := make(map[string]bool, len(values))
+	for _, targetID := range values {
+		if seen[targetID] {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Không thể chọn trùng một người 2 lần.")
+			return
+		}
+		seen[targetID] = true
+		if target, exists := game.Players[targetID]; !exists || !target.Alive {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+			return
+		}
+	}
+	game.WolfVotes[clickerID] = append([]string(nil), values...)
 	allVoted := true
 	for _, w := range aliveWolfVoters(game) {
 		if _, voted := game.WolfVotes[w.UserID]; !voted {
@@ -1536,7 +1719,11 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	seq := game.Seq
 	cmd.mu.Unlock()
 
-	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Bạn đã chọn: <@%s>. Phiếu đã khóa, không thể đổi.", targetID))
+	mentions := make([]string, len(values))
+	for idx, targetID := range values {
+		mentions[idx] = fmt.Sprintf("<@%s>", targetID)
+	}
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Bạn đã chọn: %s. Phiếu đã khóa, không thể đổi.", strings.Join(mentions, ", ")))
 	if allVoted {
 		announceRoleDecided(s, channelID, "🐺 Bầy Sói")
 	}
@@ -1562,9 +1749,10 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	messageID = game.WolfTargetMessageID
 	wolves = copyPlayers(aliveWolfVoters(game))
 	targets = copyPlayers(aliveNonWolves(game))
-	votesCopy := make(map[string]string, len(game.WolfVotes))
+	maxPicks = 1 + game.WolfBonusBiteNextNight
+	votesCopy := make(map[string][]string, len(game.WolfVotes))
 	for k, v := range game.WolfVotes {
-		votesCopy[k] = v
+		votesCopy[k] = append([]string(nil), v...)
 	}
 	cmd.mu.Unlock()
 
@@ -1573,7 +1761,7 @@ func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.
 	}
 	summary := wolfVoteSummary(votesCopy, wolves, targets)
 	pingText, allowedMentions := pingOnce(idsOf(wolves))
-	content := wolfVoteMessageContent(pingText, summary)
+	content := wolfVoteMessageContent(pingText, summary, maxPicks)
 	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		Channel:         threadID,
 		ID:              messageID,

@@ -71,6 +71,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	var summary string
 	var guildID string
 	var aliveThreadID string
+	var wolfThreadID string
 	var mutedUserID string
 	func() {
 		cmd.mu.Lock()
@@ -90,6 +91,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 		summary = aliveDeadSummary(game)
 		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
+		wolfThreadID = game.WolfThreadID
 		mutedUserID = game.DisruptorTarget
 
 		if target, exists := game.Players[mutedUserID]; mutedUserID != "" && exists && target.Alive {
@@ -103,6 +105,13 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	if !gameFound {
 		return
 	}
+	// The wolf thread now persists for the whole game (see startWolfThread's
+	// doc comment) instead of being deleted every night, so it must be
+	// explicitly locked here at the moment day begins — otherwise the pack
+	// could keep silently coordinating in it all day/vote, undetectable
+	// from the public alive-thread discussion. startWolfThread unlocks it
+	// again (alongside unarchiving) the next time night opens.
+	setWolfThreadLocked(s, wolfThreadID, true)
 	unmuteAliveThread(s, guildID, aliveThreadID)
 	if mutedUserID != "" && aliveThreadID != "" {
 		if err := s.ChannelPermissionSet(aliveThreadID, mutedUserID, discordgo.PermissionOverwriteTypeMember, 0, discordgo.PermissionSendMessagesInThreads); err != nil {
@@ -631,7 +640,7 @@ func formatRoundBlock(r roundLog) string {
 	poisoned := r.WitchPoisonedLabel != ""
 	if r.WolfBonusBite {
 		if len(r.WolfBiteOutcomeLines) > 0 {
-			b.WriteString("\n🐺🐺 Sói cắn 2 mục tiêu (Sói Con đã ngã xuống đêm trước):")
+			fmt.Fprintf(&b, "\n🐺🐺 Sói cắn %d mục tiêu (Sói Con đã ngã xuống đêm trước):", len(r.WolfBiteOutcomeLines))
 			for _, line := range r.WolfBiteOutcomeLines {
 				fmt.Fprintf(&b, "\n%s", line)
 			}
