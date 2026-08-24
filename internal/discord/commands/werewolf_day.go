@@ -875,22 +875,29 @@ func chunkRecapMessages(history []roundLog, limit int) []string {
 		// line by line. formatRoundBlock builds every line with a leading
 		// "\n", so splitting on "\n" and re-adding it preserves the text
 		// exactly.
+		//
+		// maxPiece is what can ever fit in a fresh chunk: the limit minus
+		// the continuation header that chunk will carry. A single line
+		// longer than that is clamped to it BEFORE deciding whether to
+		// start a new chunk — clamping afterwards (or to the full limit)
+		// would let header+piece exceed the limit, which is exactly the
+		// overflow this whole path exists to prevent.
+		maxPiece := limit - len([]rune(continued))
 		for _, line := range strings.Split(block, "\n") {
 			if line == "" {
 				continue // leading empty piece from the block's own "\n\n"
 			}
 			piece := "\n" + line
 			pieceLen := len([]rune(piece))
+			if maxPiece > 0 && pieceLen > maxPiece {
+				// Only reachable with a display name far past Discord's
+				// 32-character cap; trim rather than emit a message
+				// Discord will reject outright.
+				piece = string([]rune(piece)[:maxPiece])
+				pieceLen = maxPiece
+			}
 			if currentLen+pieceLen > limit {
 				startFresh()
-			}
-			// A single line longer than the whole limit would still
-			// overflow; that needs a display name far beyond Discord's
-			// 32-char cap, so accept it rather than splitting mid-word,
-			// but never silently — the guard below trims as a last resort.
-			if pieceLen > limit {
-				piece = string([]rune(piece)[:limit])
-				pieceLen = limit
 			}
 			current += piece
 			currentLen += pieceLen

@@ -1159,6 +1159,7 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
+	stillCurrent = false
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -1169,8 +1170,92 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		// just skip writing into a game struct nobody will read again.
 		if cur, ok := cmd.games[i.ChannelID]; ok && cur == game {
 			game.MessageID = msg.ID
+			stillCurrent = true
 		}
 	}()
+	if stillCurrent {
+		go cmd.waitForLobbyExpiry(s, i.ChannelID, game.Seq)
+	}
+}
+
+// lobbyTimeout is how long a lobby may sit in phaseLobby before the bot
+// closes it on its own. /werewolf start denies @everyone SEND_MESSAGES for
+// the duration, so an abandoned lobby holds the channel read-only — and
+// the starter is not auto-added to the roster, so "everyone left" cleanup
+// alone doesn't cover a starter who opens a lobby, never joins, and goes
+// offline. This is the backstop for every abandonment shape.
+const lobbyTimeout = 15 * time.Minute
+
+// waitForLobbyExpiry closes a lobby that nobody ever started, restoring the
+// channel's permissions. Mirrors waitForRoleCountConfirm's watchdog shape:
+// its own goroutine, its own recover, and every wake re-checks
+// gameIfCurrent(channelID, seq) so it can never act on a game that has
+// since ended and been replaced by a different one in the same channel.
+func (cmd *WerewolfCommand) waitForLobbyExpiry(s *discordgo.Session, channelID string, seq uint64) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().
+				Interface("panic", r).
+				Str("channel_id", channelID).
+				Msg("werewolf: recovered from panic in lobby-expiry goroutine")
+		}
+	}()
+
+	deadline := time.Now().Add(lobbyTimeout)
+	for {
+		var stillWaiting bool
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			g := cmd.gameIfCurrent(channelID, seq)
+			stillWaiting = g != nil && g.Phase == phaseLobby
+		}()
+		// Left phaseLobby (started), or the game is gone (cancelled,
+		// force-stopped, emptied) — either way this watchdog is done.
+		if !stillWaiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(15 * time.Second)
+	}
+
+	var info gameTeardownInfo
+	var messageID string
+	var expired bool
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		g := cmd.gameIfCurrent(channelID, seq)
+		// Re-check the phase under the lock: the starter may have pressed
+		// "Bắt đầu" in the gap between the last poll and now.
+		if g == nil || g.Phase != phaseLobby {
+			return
+		}
+		info = gameTeardownInfoFor(channelID, g)
+		messageID = g.MessageID
+		delete(cmd.games, channelID)
+		expired = true
+	}()
+	if !expired {
+		return
+	}
+
+	teardownGame(s, info)
+	if messageID != "" {
+		content := fmt.Sprintf("⌛ Bàn Ma Sói đã tự đóng vì không bắt đầu trong %s. Kênh đã được mở khoá.", formatRemaining(lobbyTimeout))
+		components := []discordgo.MessageComponent{}
+		if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			Channel:         channelID,
+			ID:              messageID,
+			Content:         &content,
+			Components:      &components,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to close expired lobby message")
+		}
+	}
 }
 
 func (cmd *WerewolfCommand) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -1389,6 +1474,14 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Không xác định được người dùng, thử lại nhé.")
 		return
 	}
+	// actuallyLeft gates the teardown and host-handover below. It must be
+	// "this click removed a player who was really in the lobby", NOT just
+	// "this was a leave click": the starter is NOT auto-added to the
+	// roster by /werewolf start, so a brand-new lobby sits at zero
+	// players — and treating any leave click as a departure would let ANY
+	// passer-by close a fresh lobby (or hand its host role away) without
+	// ever having joined it.
+	actuallyLeft := false
 	if joining {
 		if _, already := game.Players[clickerID]; !already {
 			if len(game.JoinOrder) >= werewolfMaxPlayers {
@@ -1408,6 +1501,7 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 					break
 				}
 			}
+			actuallyLeft = true
 		}
 	}
 
@@ -1415,7 +1509,7 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 	// button-driven way to leave the same lobby, and the consequences of
 	// getting it wrong (a locked channel nobody can free, or a departed
 	// starter still holding lobby authority) are identical.
-	if len(game.JoinOrder) == 0 {
+	if actuallyLeft && len(game.JoinOrder) == 0 {
 		info := gameTeardownInfoFor(channelID, game)
 		delete(cmd.games, channelID)
 		cmd.mu.Unlock()
@@ -1431,7 +1525,7 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 		})
 		return
 	}
-	starterLeft := !joining && clickerID == game.StarterID
+	starterLeft := actuallyLeft && clickerID == game.StarterID
 	if starterLeft {
 		game.StarterID = game.JoinOrder[0]
 	}

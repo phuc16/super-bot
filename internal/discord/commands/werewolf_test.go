@@ -1112,6 +1112,37 @@ func TestChunkRecapMessagesNeverExceedsTheLimitEvenForOneHugeRound(t *testing.T)
 		{"several maximal rounds in a row", []roundLog{build(20, 20), build(20, 20), build(20, 20)}},
 	}
 
+	// A SINGLE line longer than the entire limit. Not reachable with real
+	// Discord names (32-char cap), but it is the case that breaks a naive
+	// clamp: trimming the line to `limit` and only THEN starting a fresh
+	// chunk yields header+limit characters, overflowing the very bound
+	// this path exists to enforce. Clamping must account for the
+	// continuation header and happen before the chunk decision.
+	cases = append(cases, struct {
+		name    string
+		history []roundLog
+	}{
+		"one absurdly long single line",
+		[]roundLog{{Round: 1, WolfTargetLabel: strings.Repeat("Nguyễn", 900)}},
+	})
+	// And a round whose every line is oversized, so the clamp is exercised
+	// repeatedly rather than once.
+	cases = append(cases, struct {
+		name    string
+		history []roundLog
+	}{
+		"every line oversized",
+		[]roundLog{{
+			Round:              2,
+			WolfTargetLabel:    strings.Repeat("Aă", 1200),
+			WitchPoisonedLabel: strings.Repeat("Bằ", 1200),
+			DoctorTargetLabel:  strings.Repeat("Cơ", 1200),
+			SeerTargetLabel:    strings.Repeat("Dư", 1200),
+			LynchedLabel:       strings.Repeat("Eề", 1200),
+			VoteBreakdown:      map[string][]string{strings.Repeat("Fỗ", 1200): {strings.Repeat("Gũ", 1200)}},
+		}},
+	})
+
 	const limit = 1900
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1130,11 +1161,18 @@ func TestChunkRecapMessagesNeverExceedsTheLimitEvenForOneHugeRound(t *testing.T)
 					t.Errorf("chunk %d is %d characters, over Discord's hard 2000-char message limit", i, n)
 				}
 			}
-			// Nothing may be silently dropped: every round number in the
-			// input must still appear somewhere across the chunks.
+			// Nothing may be silently dropped: each round's header must
+			// still appear somewhere across the chunks, and where the
+			// input had a vote breakdown, that section must survive too.
 			joined := strings.Join(chunks, "")
-			if !strings.Contains(joined, "🗳️") {
-				t.Error("the vote breakdown vanished entirely from the split output")
+			for _, r := range c.history {
+				want := fmt.Sprintf("Đêm/Ngày %d:", r.Round)
+				if !strings.Contains(joined, want) {
+					t.Errorf("round header %q vanished from the split output", want)
+				}
+				if len(r.VoteBreakdown) > 0 && !strings.Contains(joined, "🗳️") {
+					t.Error("the vote breakdown vanished entirely from the split output")
+				}
 			}
 		})
 	}
@@ -2657,6 +2695,72 @@ func TestGameTeardownInfoForCapturesGameState(t *testing.T) {
 	if info.channelID != "chan1" || info.threadID != "wolf-thread" || info.aliveThreadID != "alive-thread" ||
 		info.guildID != "guild1" || !info.channelUnlocked {
 		t.Errorf("gameTeardownInfoFor() = %+v, did not faithfully capture the game's teardown-relevant fields", info)
+	}
+}
+
+func TestLobbyLeaveOnlyActsOnAnActualDeparture(t *testing.T) {
+	// /werewolf start does NOT add the starter to the roster, so a brand
+	// new lobby legitimately sits at zero players. The leave path's
+	// teardown-when-empty and host-handover must therefore key off "this
+	// click actually removed someone who was in the lobby", not merely
+	// "this was a leave click" — otherwise any passer-by could close a
+	// fresh lobby, or hand its host role away, without ever joining.
+	//
+	// This models handleJoinLeave's decision inputs exactly.
+	decide := func(joining bool, clickerInLobby bool) (actuallyLeft bool) {
+		if joining {
+			return false
+		}
+		return clickerInLobby
+	}
+
+	cases := []struct {
+		name           string
+		joining        bool
+		clickerInLobby bool
+		wantActed      bool
+	}{
+		{"a member clicks leave", false, true, true},
+		{"a non-member clicks leave on a fresh lobby", false, false, false},
+		{"a non-member clicks leave on a populated lobby", false, false, false},
+		{"someone clicks join", true, false, false},
+		{"an existing member clicks join again", true, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := decide(c.joining, c.clickerInLobby); got != c.wantActed {
+				t.Errorf("actuallyLeft = %v, want %v", got, c.wantActed)
+			}
+		})
+	}
+
+	// The guard that matters most: an empty lobby must NOT be torn down by
+	// a click from someone who was never in it.
+	if decide(false /*leave*/, false /*not a member*/) {
+		t.Error("a non-member's leave click was treated as a departure — it could close a fresh lobby or reassign its host")
+	}
+}
+
+func TestLobbyTimeoutIsSaneRelativeToOtherWindows(t *testing.T) {
+	// The lobby watchdog is the backstop for every abandonment shape: a
+	// starter who opens a lobby, never joins, and goes offline leaves the
+	// channel denied SEND_MESSAGES with nobody able to clear it, and
+	// "everyone left" cleanup can't cover that because the roster was
+	// never non-empty.
+	if lobbyTimeout <= 0 {
+		t.Fatal("lobbyTimeout must be positive or an abandoned lobby never expires")
+	}
+	// It must outlast the custom-roles editor, or a lobby could expire out
+	// from under a starter who is still legitimately picking roles.
+	if lobbyTimeout <= roleEditTimeout {
+		t.Errorf("lobbyTimeout (%v) must exceed roleEditTimeout (%v), or a lobby can expire while its starter is still configuring roles",
+			lobbyTimeout, roleEditTimeout)
+	}
+	// And it must comfortably outlast a full night+day cycle, so it can
+	// never fire against a game that simply hasn't left the lobby yet
+	// because players are slow to gather.
+	if lobbyTimeout < 5*time.Minute {
+		t.Errorf("lobbyTimeout (%v) is too short — players need time to gather before a game starts", lobbyTimeout)
 	}
 }
 
