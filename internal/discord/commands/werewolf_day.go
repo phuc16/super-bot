@@ -619,7 +619,11 @@ func winnerNamesWithRoles(game *werewolfGame, result gameResult) string {
 	}
 	names := make([]string, 0, len(winners))
 	for _, p := range winners {
-		names = append(names, fmt.Sprintf("%s (%s)", p.Label, displayRoleLabel(p)))
+		// finalRoleLabel: this runs only after the game has ended, and the
+		// winner list partitions on Faction — so a converted Cursed Wolf
+		// must be annotated here or it reads as a villager-side role
+		// credited with the wolves' win. See finalRoleLabel's doc comment.
+		names = append(names, fmt.Sprintf("%s (%s)", p.Label, finalRoleLabel(p)))
 	}
 	return strings.Join(names, ", ")
 }
@@ -659,7 +663,11 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 		if !p.Alive {
 			status = "đã chết"
 		}
-		fmt.Fprintf(&roles, "• %s — %s (%s)\n", p.Label, displayRoleLabel(p), status)
+		// finalRoleLabel, not displayRoleLabel: the end-of-game roster is
+		// the one place a Cursed Wolf's conversion may be revealed, and it
+		// must be, so this list doesn't contradict the Faction-partitioned
+		// winner line printed just above it.
+		fmt.Fprintf(&roles, "• %s — %s (%s)\n", p.Label, finalRoleLabel(p), status)
 	}
 
 	afkNote := ""

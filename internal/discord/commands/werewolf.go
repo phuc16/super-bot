@@ -179,6 +179,30 @@ func displayRoleLabel(p *player) string {
 	return p.Role.label()
 }
 
+// finalRoleLabel is displayRoleLabel plus the one annotation that is safe
+// ONLY after the game has ended: a Cursed Wolf whose Faction flipped
+// mid-game.
+//
+// The distinction matters. A Cursed Wolf's Role never changes — only its
+// Faction does — so displayRoleLabel cannot detect a conversion, and every
+// MID-GAME reveal must keep it hidden: the whole point of the merged
+// "Bầy Sói không thống nhất được mục tiêu" night wording (see
+// finalizeNightResolution) is to give a conversion a permanent cover
+// story, and annotating a mid-game death would blow it.
+//
+// At end of game the opposite is true. Every role is public, and
+// winnerNamesWithRoles partitions winners by FACTION — so a converted
+// Cursed Wolf gets listed among the wolf winners while the roster prints
+// a bare, villager-flavoured "Sói Nguyền", leaving the two halves of the
+// same message contradicting each other with nothing to reconcile them.
+// Use this at end-of-game reveal sites, displayRoleLabel everywhere else.
+func finalRoleLabel(p *player) string {
+	if p.DealtRole == roleCursedWolf && p.Faction == factionWolf {
+		return displayRoleLabel(p) + " (đã biến thành Sói)"
+	}
+	return displayRoleLabel(p)
+}
+
 // isWolf reports whether p currently counts as wolf-faction for win
 // condition and role-check purposes. Prefer this over comparing Role
 // directly, since Wolf Cub/Traitor (wolf-faction, non-Werewolf roles) and

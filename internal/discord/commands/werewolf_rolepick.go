@@ -244,19 +244,24 @@ func roleRatioFromCounts(counts map[role]int) roleRatio {
 }
 
 // roleCountEditorContent renders one side of the editor: that side's
-// per-role counts, the combined running total against playerCount, and
-// the combined balance score (computed across BOTH sides, since the score
-// reflects the whole game's shape, not just this message's side).
+// per-role counts and that side's own subtotal.
 //
-// Deliberate simplification: only the message that was just clicked gets
-// re-rendered (see werewolf_rolepick.go's handleRoleCountButton) — the
-// OTHER side's message can show a stale total/score until it's next
-// interacted with. This is a display-freshness nit, not a correctness
-// issue: confirm-time validation (roleCountConfirmValid) always reads the
-// true shared counts, never anything from a message's displayed content.
-// Keeping the two messages in perfect sync would require tracking the
-// original slash-command interaction's token to edit the other message via
-// FollowupMessageEdit — real complexity this feature doesn't need.
+// It deliberately renders NO cross-side data. The editor is two separate
+// ephemeral messages, and only the one just clicked gets re-rendered
+// (handleRoleCountButton uses InteractionResponseUpdateMessage), so any
+// figure computed across BOTH sides — a combined total, a whole-game
+// balance score — goes stale on the message that wasn't clicked and can
+// sit visibly wrong for the entire roleEditTimeout. That's worse than not
+// showing it: a starter reading "Tổng: 17/20" on the wolf message after
+// having already filled the villager side to 20 will "fix" a total that
+// was never wrong.
+//
+// Keeping both messages in sync would need the original interaction token
+// stored on the game so the other message could be edited via
+// FollowupMessageEdit — real complexity for a running total. Instead the
+// authoritative combined figures are surfaced where they can only ever be
+// computed fresh: roleCountConfirmError reports the exact live total when
+// it doesn't match, and handleRoleCountConfirm reports it on success.
 func roleCountEditorContent(side string, counts map[role]int, playerCount int) string {
 	var roles []role
 	var title string
@@ -269,12 +274,11 @@ func roleCountEditorContent(side string, counts map[role]int, playerCount int) s
 		title = "🏡 Phe Dân"
 	}
 
-	total := 0
-	for _, r := range roleCountWolfSideRoles {
-		total += counts[r]
-	}
-	for _, r := range roleCountVillagerSideRoles {
-		total += counts[r]
+	// This side only — by construction it can only be changed by this same
+	// message's own buttons, so it can never be stale.
+	sideTotal := 0
+	for _, r := range roles {
+		sideTotal += counts[r]
 	}
 
 	var b strings.Builder
@@ -282,18 +286,34 @@ func roleCountEditorContent(side string, counts map[role]int, playerCount int) s
 	for _, r := range roles {
 		fmt.Fprintf(&b, "%s: %d\n", r.label(), counts[r])
 	}
-	fmt.Fprintf(&b, "\nTổng: %d/%d người · Điểm cân bằng: %d", total, playerCount, balanceScore(counts))
+	fmt.Fprintf(&b, "\nPhe này: %d vai · Cần tổng cộng %d người (bấm ✅ Xác nhận để kiểm tra tổng)", sideTotal, playerCount)
 	return b.String()
 }
 
 // roleCountButtonRows builds one editor message's component rows: the
 // given roles' -/+ buttons, two roles per row, plus a trailing confirm
-// row. customID encodes the sign ("inc"/"dec"), the role's int value, and
-// the channel ID, colon-separated after the werewolfRoleCountID prefix —
-// this is this codebase's first customID needing more than one encoded
-// field, so it's parsed with strings.SplitN rather than the simple
-// TrimPrefix-only pattern every other werewolf customID uses.
-func roleCountButtonRows(channelID string, roles []role, counts map[role]int, playerCount int) []discordgo.MessageComponent {
+// row. customID encodes the sign ("inc"/"dec"), the role's int value, the
+// channel ID, and the game's Seq, colon-separated after the
+// werewolfRoleCountID prefix — this is this codebase's first customID
+// needing more than one encoded field, so it's parsed with
+// strings.SplitN rather than the simple TrimPrefix-only pattern every
+// other werewolf customID uses.
+//
+// The Seq field is load-bearing, not decoration. These editors are
+// EPHEMERAL followups that stay interactive for the interaction token's
+// full ~15-minute life, and cancelling during phaseRoleEdit is explicitly
+// allowed. So a starter can cancel game A and immediately start game B in
+// the same channel while A's editor buttons are still clickable — at
+// which point channelID, phase (phaseRoleEdit) and StarterID are all
+// byte-identical between the two games, and every cheap guard passes.
+// Seq is the only thing that distinguishes them, so the handlers resolve
+// via gameIfCurrent(channelID, seq) rather than a bare map lookup.
+// Without it, a click on A's stale confirm button deals game B with
+// whatever counts were left in A.
+//
+// Length budget: prefix 13 + sign 3 + role ≤2 + snowflake 19 + seq + 3
+// colons ≈ 45 chars, far under Discord's 100-char customID cap.
+func roleCountButtonRows(channelID string, seq uint64, roles []role, counts map[role]int, playerCount int) []discordgo.MessageComponent {
 	var rows []discordgo.MessageComponent
 	for start := 0; start < len(roles); start += 2 {
 		end := min(start+2, len(roles))
@@ -304,13 +324,13 @@ func roleCountButtonRows(channelID string, roles []role, counts map[role]int, pl
 				discordgo.Button{
 					Label:    "➖ " + r.label(),
 					Style:    discordgo.SecondaryButton,
-					CustomID: fmt.Sprintf("%sdec:%d:%s", werewolfRoleCountID, int(r), channelID),
+					CustomID: fmt.Sprintf("%sdec:%d:%s:%d", werewolfRoleCountID, int(r), channelID, seq),
 					Disabled: current <= 0,
 				},
 				discordgo.Button{
 					Label:    "➕ " + r.label(),
 					Style:    discordgo.SecondaryButton,
-					CustomID: fmt.Sprintf("%sinc:%d:%s", werewolfRoleCountID, int(r), channelID),
+					CustomID: fmt.Sprintf("%sinc:%d:%s:%d", werewolfRoleCountID, int(r), channelID, seq),
 					Disabled: current >= roleCountMax(r, playerCount),
 				},
 			)
@@ -322,7 +342,7 @@ func roleCountButtonRows(channelID string, roles []role, counts map[role]int, pl
 			discordgo.Button{
 				Label:    "✅ Xác nhận",
 				Style:    discordgo.SuccessButton,
-				CustomID: werewolfRoleCountConfirmID + channelID,
+				CustomID: fmt.Sprintf("%s%s:%d", werewolfRoleCountConfirmID, channelID, seq),
 			},
 		},
 	})
@@ -336,14 +356,14 @@ func (cmd *WerewolfCommand) sendRoleCountEditor(s *discordgo.Session, interactio
 	counts := map[role]int{}
 	if _, err := s.FollowupMessageCreate(interaction, true, &discordgo.WebhookParams{
 		Content:    roleCountEditorContent("wolf", counts, playerCount),
-		Components: roleCountButtonRows(channelID, roleCountWolfSideRoles, counts, playerCount),
+		Components: roleCountButtonRows(channelID, seq, roleCountWolfSideRoles, counts, playerCount),
 		Flags:      discordgo.MessageFlagsEphemeral,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to send wolf-side role-count editor")
 	}
 	if _, err := s.FollowupMessageCreate(interaction, true, &discordgo.WebhookParams{
 		Content:    roleCountEditorContent("villager", counts, playerCount),
-		Components: roleCountButtonRows(channelID, roleCountVillagerSideRoles, counts, playerCount),
+		Components: roleCountButtonRows(channelID, seq, roleCountVillagerSideRoles, counts, playerCount),
 		Flags:      discordgo.MessageFlagsEphemeral,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to send villager-side role-count editor")
@@ -419,20 +439,28 @@ func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channe
 }
 
 func (cmd *WerewolfCommand) handleRoleCountButton(s *discordgo.Session, i *discordgo.InteractionCreate, remainder string) {
-	parts := strings.SplitN(remainder, ":", 3)
-	if len(parts) != 3 {
+	parts := strings.SplitN(remainder, ":", 4)
+	if len(parts) != 4 {
 		return
 	}
-	sign, roleStr, channelID := parts[0], parts[1], parts[2]
+	sign, roleStr, channelID, seqStr := parts[0], parts[1], parts[2], parts[3]
 	roleInt, err := strconv.Atoi(roleStr)
+	if err != nil {
+		return
+	}
+	seq, err := strconv.ParseUint(seqStr, 10, 64)
 	if err != nil {
 		return
 	}
 	r := role(roleInt)
 
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok || game.Phase != phaseRoleEdit {
+	// gameIfCurrent, not a bare map lookup: an ephemeral editor from a
+	// cancelled game stays clickable, and channelID/phase/StarterID are
+	// all identical if the same starter immediately opens a new game in
+	// the same channel — Seq is the only thing that tells them apart.
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil || game.Phase != phaseRoleEdit {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Đã hết thời gian hoặc ván đã bắt đầu.")
 		return
@@ -472,17 +500,31 @@ func (cmd *WerewolfCommand) handleRoleCountButton(s *discordgo.Session, i *disco
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
 			Content:    roleCountEditorContent(side, counts, playerCount),
-			Components: roleCountButtonRows(channelID, roles, counts, playerCount),
+			Components: roleCountButtonRows(channelID, seq, roles, counts, playerCount),
 		},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to update role-count editor")
 	}
 }
 
-func (cmd *WerewolfCommand) handleRoleCountConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+func (cmd *WerewolfCommand) handleRoleCountConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, remainder string) {
+	channelID, seqStr, ok := strings.Cut(remainder, ":")
+	if !ok {
+		return
+	}
+	seq, err := strconv.ParseUint(seqStr, 10, 64)
+	if err != nil {
+		return
+	}
+
 	cmd.mu.Lock()
-	game, ok := cmd.games[channelID]
-	if !ok || game.Phase != phaseRoleEdit {
+	// gameIfCurrent, not a bare map lookup — see handleRoleCountButton for
+	// why the Seq in the customID is load-bearing here. Without it, a
+	// confirm click on a CANCELLED game's still-live ephemeral editor
+	// would deal whichever game now occupies this channel, using counts
+	// its own starter never chose.
+	game := cmd.gameIfCurrent(channelID, seq)
+	if game == nil || game.Phase != phaseRoleEdit {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Đã hết thời gian hoặc ván đã bắt đầu.")
 		return
@@ -505,11 +547,17 @@ func (cmd *WerewolfCommand) handleRoleCountConfirm(s *discordgo.Session, i *disc
 	for id, p := range game.Players {
 		labels[id] = p.Label
 	}
-	seq := game.Seq
+	// Snapshot the balance score under the lock, for the confirmation
+	// message below: the per-side editor messages deliberately no longer
+	// render whole-game figures (they'd go stale — see
+	// roleCountEditorContent), so this is where the starter gets the
+	// authoritative combined readout, computed fresh from live counts.
+	score := balanceScore(game.PendingRoleCounts)
 	game.Phase = phasePreflight
 	cmd.mu.Unlock()
 
-	respondComponentEphemeral(s, i, "✅ Đã xác nhận vai trò tuỳ chỉnh!")
+	respondComponentEphemeral(s, i, fmt.Sprintf(
+		"✅ Đã xác nhận vai trò tuỳ chỉnh! Tổng %d người · Điểm cân bằng: %d", playerCount, score))
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         "🐺 Đang chia vai trò và gửi tin nhắn riêng, chờ chút...",
 		AllowedMentions: &discordgo.MessageAllowedMentions{},

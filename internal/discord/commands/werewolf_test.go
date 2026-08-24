@@ -1789,6 +1789,58 @@ func TestDisplayRoleLabelAnnotatesPromotedTraitor(t *testing.T) {
 	}
 }
 
+func TestConvertedCursedWolfAnnotatedOnlyAtEndOfGame(t *testing.T) {
+	// A Cursed Wolf's Role never changes — only Faction flips — so the
+	// two labellers must disagree about it, deliberately:
+	//
+	//   displayRoleLabel (MID-GAME): must NOT reveal the conversion. The
+	//   merged "wolves couldn't agree" night wording exists precisely to
+	//   give a conversion a cover story; annotating a mid-game death
+	//   would blow it and out a brand-new wolf.
+	//
+	//   finalRoleLabel (END-OF-GAME): must reveal it. winnerNamesWithRoles
+	//   partitions on Faction, so an un-annotated converted Cursed Wolf
+	//   shows up among the wolf winners while the roster prints a
+	//   villager-flavoured "Sói Nguyền" — the same message contradicting
+	//   itself.
+	converted := &player{
+		Label: "Chi", Role: roleCursedWolf, DealtRole: roleCursedWolf, Faction: factionWolf,
+	}
+	if got := displayRoleLabel(converted); got != roleCursedWolf.label() {
+		t.Errorf("displayRoleLabel(converted Cursed Wolf) = %q, want a bare %q — mid-game reveals must not leak the conversion",
+			got, roleCursedWolf.label())
+	}
+	final := finalRoleLabel(converted)
+	if final == roleCursedWolf.label() {
+		t.Errorf("finalRoleLabel(converted Cursed Wolf) = %q, want it annotated — otherwise the end-game roster contradicts the Faction-based winner list", final)
+	}
+	if !strings.Contains(final, roleCursedWolf.label()) {
+		t.Errorf("finalRoleLabel = %q, want it to still contain the base role name", final)
+	}
+
+	// An UNCONVERTED Cursed Wolf is a plain villager-faction player and
+	// must read identically from both labellers, at every point in the game.
+	unconverted := &player{
+		Label: "Ann", Role: roleCursedWolf, DealtRole: roleCursedWolf, Faction: factionVillager,
+	}
+	if got := finalRoleLabel(unconverted); got != roleCursedWolf.label() {
+		t.Errorf("finalRoleLabel(unconverted Cursed Wolf) = %q, want a bare %q", got, roleCursedWolf.label())
+	}
+	if displayRoleLabel(unconverted) != finalRoleLabel(unconverted) {
+		t.Error("the two labellers must agree for an unconverted Cursed Wolf")
+	}
+}
+
+func TestFinalRoleLabelStillAnnotatesPromotedTraitor(t *testing.T) {
+	// finalRoleLabel delegates to displayRoleLabel, so it must not lose
+	// the promoted-Traitor annotation that the end-game reveal also needs.
+	promoted := &player{Label: "Bob", Role: roleWerewolf, DealtRole: roleTraitor, Faction: factionWolf}
+	got := finalRoleLabel(promoted)
+	if !strings.Contains(got, roleTraitor.label()) {
+		t.Errorf("finalRoleLabel(promoted Traitor) = %q, want it to still mention %q", got, roleTraitor.label())
+	}
+}
+
 func TestDisplayRoleLabelUnchangedForEveryoneElse(t *testing.T) {
 	cases := []struct {
 		name string
@@ -2311,13 +2363,47 @@ func TestRoleCountEditorContentShowsCountsAndBalance(t *testing.T) {
 	}
 }
 
+func TestRoleCountEditorContentRendersNoCrossSideFigures(t *testing.T) {
+	// Only the clicked message is re-rendered, so ANY figure computed
+	// across both sides goes stale on the other message and can sit
+	// visibly wrong for the whole 5-minute edit window. Each side must
+	// therefore render only data its own buttons can change.
+	//
+	// Detect this behaviorally rather than by string-matching the copy:
+	// mutate ONLY the villager side and assert the wolf-side render is
+	// byte-identical. If any cross-side figure creeps back in, this fails.
+	base := map[role]int{roleWerewolf: 2, roleVillager: 3}
+	mutated := map[role]int{roleWerewolf: 2, roleVillager: 9}
+
+	wolfBefore := roleCountEditorContent("wolf", base, 12)
+	wolfAfter := roleCountEditorContent("wolf", mutated, 12)
+	if wolfBefore != wolfAfter {
+		t.Errorf("changing the VILLAGER side altered the WOLF message:\n before: %q\n  after: %q\nthe wolf message would be stale until its own next click", wolfBefore, wolfAfter)
+	}
+
+	// Symmetric check in the other direction.
+	base2 := map[role]int{roleWerewolf: 2, roleVillager: 3}
+	mutated2 := map[role]int{roleWerewolf: 5, roleVillager: 3}
+	villagerBefore := roleCountEditorContent("villager", base2, 12)
+	villagerAfter := roleCountEditorContent("villager", mutated2, 12)
+	if villagerBefore != villagerAfter {
+		t.Errorf("changing the WOLF side altered the VILLAGER message:\n before: %q\n  after: %q", villagerBefore, villagerAfter)
+	}
+
+	// Sanity: a side's OWN change must still be reflected, or the render
+	// is simply broken rather than correctly side-scoped.
+	if roleCountEditorContent("wolf", base, 12) == roleCountEditorContent("wolf", mutated2, 12) {
+		t.Error("changing the wolf side did NOT alter the wolf message — the render isn't showing its own counts")
+	}
+}
+
 func TestRoleCountButtonRowsShape(t *testing.T) {
 	counts := map[role]int{roleWerewolf: 1}
-	rows := roleCountButtonRows("chan1", roleCountWolfSideRoles, counts, 8)
+	rows := roleCountButtonRows("chan1", 42, roleCountWolfSideRoles, counts, 8)
 	if len(rows) != 3 {
 		t.Fatalf("wolf-side rows = %d, want 3 (2 button rows + confirm)", len(rows))
 	}
-	rows = roleCountButtonRows("chan1", roleCountVillagerSideRoles, counts, 8)
+	rows = roleCountButtonRows("chan1", 42, roleCountVillagerSideRoles, counts, 8)
 	if len(rows) > 5 {
 		t.Fatalf("too many rows: %d, Discord's limit is 5", len(rows))
 	}
@@ -2345,7 +2431,7 @@ func TestRoleCountButtonRowsShape(t *testing.T) {
 }
 
 func TestRoleCountButtonRowsDisablesAtBounds(t *testing.T) {
-	rows := roleCountButtonRows("c", []role{roleSeer}, map[role]int{roleSeer: 1}, 8)
+	rows := roleCountButtonRows("c", 42, []role{roleSeer}, map[role]int{roleSeer: 1}, 8)
 	buttons := rows[0].(discordgo.ActionsRow).Components
 	dec := buttons[0].(discordgo.Button)
 	inc := buttons[1].(discordgo.Button)
@@ -2356,7 +2442,7 @@ func TestRoleCountButtonRowsDisablesAtBounds(t *testing.T) {
 		t.Error("inc button enabled at Seer's max of 1, want disabled")
 	}
 
-	rows = roleCountButtonRows("c", []role{roleSeer}, map[role]int{}, 8)
+	rows = roleCountButtonRows("c", 42, []role{roleSeer}, map[role]int{}, 8)
 	buttons = rows[0].(discordgo.ActionsRow).Components
 	if !buttons[0].(discordgo.Button).Disabled {
 		t.Error("dec button enabled at count 0, want disabled")
@@ -2368,15 +2454,127 @@ func TestRoleCountCustomIDPrefixesDoNotCollide(t *testing.T) {
 	if strings.HasPrefix(confirmID, werewolfRoleCountID) {
 		t.Errorf("%q must not match the %q prefix", confirmID, werewolfRoleCountID)
 	}
-	rows := roleCountButtonRows("999", []role{roleWerewolf}, map[role]int{}, 8)
+	const seq = 42
+	rows := roleCountButtonRows("999", seq, []role{roleWerewolf}, map[role]int{}, 8)
 	inc := rows[0].(discordgo.ActionsRow).Components[1].(discordgo.Button)
 	remainder := strings.TrimPrefix(inc.CustomID, werewolfRoleCountID)
-	parts := strings.SplitN(remainder, ":", 3)
-	if len(parts) != 3 || parts[0] != "inc" || parts[2] != "999" {
-		t.Fatalf("customID %q parsed to %v, want [inc <role> 999]", inc.CustomID, parts)
+	// 4 fields since the Seq was added: sign, role, channel, seq. Parsed
+	// with the same SplitN bound handleRoleCountButton uses.
+	parts := strings.SplitN(remainder, ":", 4)
+	if len(parts) != 4 || parts[0] != "inc" || parts[2] != "999" {
+		t.Fatalf("customID %q parsed to %v, want [inc <role> 999 <seq>]", inc.CustomID, parts)
 	}
 	if parts[1] != strconv.Itoa(int(roleWerewolf)) {
 		t.Errorf("encoded role = %q, want %d", parts[1], int(roleWerewolf))
+	}
+	if parts[3] != strconv.FormatUint(seq, 10) {
+		t.Errorf("encoded seq = %q, want %d", parts[3], seq)
+	}
+}
+
+func TestRoleCountCustomIDsCarrySeqAndStayUnderDiscordLimit(t *testing.T) {
+	// The Seq field is what stops a cancelled game's still-live ephemeral
+	// editor from driving whichever game now occupies the same channel
+	// (channel/phase/starter are all identical between the two). Assert
+	// both buttons and the confirm carry it, and that a realistic
+	// worst-case ID stays under Discord's 100-char customID cap.
+	const (
+		bigChannelID = "1234567890123456789" // 19-digit snowflake
+		bigSeq       = uint64(18446744073709551615)
+	)
+	rows := roleCountButtonRows(bigChannelID, bigSeq, roleCountVillagerSideRoles,
+		map[role]int{}, werewolfMaxPlayers)
+
+	seqSuffix := strconv.FormatUint(bigSeq, 10)
+	checked := 0
+	for _, row := range rows {
+		for _, c := range row.(discordgo.ActionsRow).Components {
+			btn := c.(discordgo.Button)
+			if !strings.HasSuffix(btn.CustomID, ":"+seqSuffix) {
+				t.Errorf("customID %q does not end with the game Seq — a stale editor from a cancelled game could drive the current one", btn.CustomID)
+			}
+			if n := len(btn.CustomID); n > 100 {
+				t.Errorf("customID %q is %d chars, over Discord's 100-char limit", btn.CustomID, n)
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no buttons were checked — test is not exercising anything")
+	}
+}
+
+func TestStaleRoleEditorCannotDriveARestartedGame(t *testing.T) {
+	// The scenario the Seq in the customID exists to stop:
+	//
+	//   1. Starter opens custom-roles game A, reaches phaseRoleEdit.
+	//   2. Starter clicks Cancel (explicitly allowed during phaseRoleEdit).
+	//   3. Starter immediately opens game B in the SAME channel.
+	//
+	// A's ephemeral editor messages stay interactive for the interaction
+	// token's full life. channelID, Phase (phaseRoleEdit) and StarterID
+	// are byte-identical between A and B, so every guard except the Seq
+	// passes. Before the Seq existed, a click on A's confirm dealt game B
+	// with whatever counts were left in A.
+	//
+	// gameIfCurrent is the mechanism, so assert directly that it rejects
+	// the old Seq and accepts the new one.
+	const channelID = "chan1"
+	cmd := &WerewolfCommand{games: make(map[string]*werewolfGame)}
+
+	gameA := &werewolfGame{
+		ChannelID: channelID, Seq: 1, StarterID: "starter", Phase: phaseRoleEdit,
+		PendingRoleCounts: map[role]int{roleWerewolf: 9},
+	}
+	cmd.games[channelID] = gameA
+
+	// Starter cancels A, then starts B in the same channel.
+	delete(cmd.games, channelID)
+	gameB := &werewolfGame{
+		ChannelID: channelID, Seq: 2, StarterID: "starter", Phase: phaseRoleEdit,
+		PendingRoleCounts: map[role]int{},
+	}
+	cmd.games[channelID] = gameB
+
+	// A click carrying game A's Seq must resolve to nothing...
+	if got := cmd.gameIfCurrent(channelID, gameA.Seq); got != nil {
+		t.Error("a click from the CANCELLED game's stale editor resolved to a live game — it could mutate or confirm the restarted game")
+	}
+	// ...while game B's own editor still works.
+	if got := cmd.gameIfCurrent(channelID, gameB.Seq); got != gameB {
+		t.Error("the current game's own editor Seq failed to resolve — the guard is too strict")
+	}
+	// And B's counts are untouched by A's abandoned setup.
+	if gameB.PendingRoleCounts[roleWerewolf] != 0 {
+		t.Errorf("game B's counts = %v, want empty — A's stale state must not leak in", gameB.PendingRoleCounts)
+	}
+}
+
+func TestRoleCountConfirmCustomIDRoundTrips(t *testing.T) {
+	// The confirm button's channel:seq encoding must parse back to
+	// exactly what was encoded, using the same strings.Cut the handler
+	// uses — a mismatch here silently makes every confirm click a no-op.
+	const (
+		channelID = "1234567890123456789"
+		seq       = uint64(7)
+	)
+	rows := roleCountButtonRows(channelID, seq, []role{roleWerewolf}, map[role]int{}, 8)
+	confirm := rows[len(rows)-1].(discordgo.ActionsRow).Components[0].(discordgo.Button)
+
+	remainder := strings.TrimPrefix(confirm.CustomID, werewolfRoleCountConfirmID)
+	gotChannel, gotSeqStr, ok := strings.Cut(remainder, ":")
+	if !ok {
+		t.Fatalf("confirm customID %q has no channel:seq separator", confirm.CustomID)
+	}
+	if gotChannel != channelID {
+		t.Errorf("decoded channel = %q, want %q", gotChannel, channelID)
+	}
+	gotSeq, err := strconv.ParseUint(gotSeqStr, 10, 64)
+	if err != nil {
+		t.Fatalf("decoded seq %q does not parse: %v", gotSeqStr, err)
+	}
+	if gotSeq != seq {
+		t.Errorf("decoded seq = %d, want %d", gotSeq, seq)
 	}
 }
 
