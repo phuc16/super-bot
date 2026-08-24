@@ -553,7 +553,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Trình tự ván chơi",
-						Value:  fmt.Sprintf("1️⃣ **Mở bàn** — ai cũng Tham gia/Rời đi được; người mở bàn bấm Bắt đầu khi đủ %d-%d người.\n2️⃣ **(Tuỳ chọn) Vai trò tuỳ chỉnh** — nếu `custom-roles:true`, người mở bàn tự chọn số lượng từng vai trò qua màn hình riêng trước khi chia bài.\n3️⃣ **Nhận vai trò** — mỗi người được nhắn tin riêng vai trò của mình, kèm ghi chú ngắn cách vai trò đó hoạt động.\n4️⃣ **Ban đêm** — bầy Sói cùng bỏ phiếu chọn mục tiêu cắn trong thread riêng; Tiên Tri/Bảo Vệ/Phù Thủy/Thợ Săn/Kẻ Phá Hoại hành động qua tin nhắn riêng; Thần Tình Yêu hành động qua tin nhắn riêng chỉ đêm đầu tiên.\n5️⃣ **Ban ngày** — thảo luận trong thread riêng của người còn sống, rồi bỏ phiếu treo cổ (hoặc bỏ qua).\n6️⃣ Lặp lại đêm/ngày đến khi một phe thắng, sau đó đăng toàn bộ lịch sử ván đấu theo từng vòng.", werewolfMinPlayers, werewolfMaxPlayers),
+						Value:  fmt.Sprintf("1️⃣ **Mở bàn** — ai cũng Tham gia/Rời đi được; người mở bàn bấm Bắt đầu khi đủ %d-%d người.\n2️⃣ **(Tuỳ chọn) Vai trò tuỳ chỉnh** — nếu `custom-roles:true`, người mở bàn tự chọn số lượng từng vai trò qua màn hình riêng trước khi chia bài.\n3️⃣ **Nhận vai trò** — mỗi người được nhắn tin riêng vai trò của mình, kèm ghi chú ngắn cách vai trò đó hoạt động.\n4️⃣ **Ban đêm** — bầy Sói cùng bỏ phiếu chọn mục tiêu cắn trong thread riêng; Tiên Tri/Bác Sĩ/Phù Thủy/Thợ Săn/Kẻ Phá Hoại hành động qua tin nhắn riêng; Thần Tình Yêu hành động qua tin nhắn riêng chỉ đêm đầu tiên.\n5️⃣ **Ban ngày** — thảo luận trong thread riêng của người còn sống, rồi bỏ phiếu treo cổ (hoặc bỏ qua).\n6️⃣ Lặp lại đêm/ngày đến khi một phe thắng, sau đó đăng toàn bộ lịch sử ván đấu theo từng vòng.", werewolfMinPlayers, werewolfMaxPlayers),
 						Inline: false,
 					},
 					{
@@ -563,7 +563,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Luật thắng thua — theo từng vai trò",
-						Value:  "**Phe Sói (thắng cùng nhau):** 🐺 Sói thường, 🐺👶 Sói Con, 🎭 Kẻ Phản Bội — thuộc phe Sói ngay từ đầu.\n🐺✨ Sói Nguyền — bắt đầu thuộc phe **Dân** (thắng cùng Dân nếu ván kết thúc trước khi biến hình); nếu bị cắn mà sống sót, chuyển sang phe **Sói** và từ đó thắng cùng Sói.\n**Phe Dân (thắng cùng nhau):** 👤 Dân Làng, 🔮 Tiên Tri, 💉 Bảo Vệ, 🧙 Phù Thủy, 🏹 Thợ Săn, 🤫 Kẻ Phá Hoại, 💘 Thần Tình Yêu — luôn thuộc phe Dân, luôn thắng khi phe Dân thắng dù bản thân còn sống hay đã chết vào cuối ván.\n💘 **Cặp đôi khác phe**: nếu Thần Tình Yêu ghép 2 người khác phe (1 Sói + 1 Dân), họ tách thành phe thứ ba — chỉ thắng nếu cả hai sống đến khi là 2 người cuối cùng. Thần Tình Yêu luôn thắng theo họ (dù còn sống hay đã chết, kể cả khi không nằm trong cặp đôi đó).",
+						Value:  "**Phe Sói (thắng cùng nhau):** 🐺 Sói thường, 🐺👶 Sói Con, 🎭 Kẻ Phản Bội — thuộc phe Sói ngay từ đầu.\n🐺✨ Sói Nguyền — bắt đầu thuộc phe **Dân** (thắng cùng Dân nếu ván kết thúc trước khi biến hình); nếu bị cắn mà sống sót, chuyển sang phe **Sói** và từ đó thắng cùng Sói.\n**Phe Dân (thắng cùng nhau):** 👤 Dân Làng, 🔮 Tiên Tri, 💉 Bác Sĩ, 🧙 Phù Thủy, 🏹 Thợ Săn, 🤫 Kẻ Phá Hoại, 💘 Thần Tình Yêu — luôn thuộc phe Dân, luôn thắng khi phe Dân thắng dù bản thân còn sống hay đã chết vào cuối ván.\n💘 **Cặp đôi khác phe**: nếu Thần Tình Yêu ghép 2 người khác phe (1 Sói + 1 Dân), họ tách thành phe thứ ba — chỉ thắng nếu cả hai sống đến khi là 2 người cuối cùng. Thần Tình Yêu luôn thắng theo họ (dù còn sống hay đã chết, kể cả khi không nằm trong cặp đôi đó).",
 						Inline: false,
 					},
 					{
@@ -584,7 +584,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Vai trò đặc biệt phe Dân",
-						Value:  "*(6 vai trò dưới đây thắng cùng phe Dân — trừ Thần Tình Yêu khi ghép đôi khác phe.)*\n🔮 **Tiên Tri** — DM mỗi đêm: soi một người, biết có phải Sói không.\n💉 **Bảo Vệ** — DM mỗi đêm: bảo vệ một người khỏi Sói cắn (không trùng người 2 đêm liền).\n🧙 **Phù Thủy** — DM mỗi đêm sau khi biết ai bị cắn: cứu người bị cắn (1 lần/ván) và/hoặc đầu độc ai khác (1 lần/ván, vượt qua Bảo Vệ).\n🏹 **Thợ Săn** — DM mỗi đêm: chọn sẵn mục tiêu; nếu chết (bất kỳ lúc nào, kể cả ban ngày), mục tiêu đó chết theo. Chỉ đổi được trong đêm, không đổi được giữa ban ngày.\n🤫 **Kẻ Phá Hoại** — DM mỗi đêm: chọn người bị câm lặng ở thread thảo luận *hôm sau*.\n💘 **Thần Tình Yêu** — DM chỉ đêm đầu: chọn 2 người ghép đôi (được chọn cả mình), biết vai trò nhau, không trò chuyện trực tiếp qua bot. Một người chết thì người kia chết theo.",
+						Value:  "*(6 vai trò dưới đây thắng cùng phe Dân — trừ Thần Tình Yêu khi ghép đôi khác phe.)*\n🔮 **Tiên Tri** — DM mỗi đêm: soi một người, biết có phải Sói không.\n💉 **Bác Sĩ** — DM mỗi đêm: bảo vệ một người khỏi Sói cắn (không trùng người 2 đêm liền).\n🧙 **Phù Thủy** — DM mỗi đêm sau khi biết ai bị cắn: cứu người bị cắn (1 lần/ván) và/hoặc đầu độc ai khác (1 lần/ván, vượt qua Bác Sĩ).\n🏹 **Thợ Săn** — DM mỗi đêm: chọn sẵn mục tiêu; nếu chết (bất kỳ lúc nào, kể cả ban ngày), mục tiêu đó chết theo. Chỉ đổi được trong đêm, không đổi được giữa ban ngày.\n🤫 **Kẻ Phá Hoại** — DM mỗi đêm: chọn người bị câm lặng ở thread thảo luận *hôm sau*.\n💘 **Thần Tình Yêu** — DM chỉ đêm đầu: chọn 2 người ghép đôi (được chọn cả mình), biết vai trò nhau, không trò chuyện trực tiếp qua bot. Một người chết thì người kia chết theo.",
 						Inline: false,
 					},
 					{
@@ -594,7 +594,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Vai trò tương tác với bot ra sao",
-						Value:  "🐺 Sói thường / Sói Con / Sói Nguyền (sau khi lộ diện): hành động cùng nhau mỗi đêm trong thread riêng của bầy Sói.\n🔮 Tiên Tri / 💉 Bảo Vệ / 🧙 Phù Thủy / 🏹 Thợ Săn / 🤫 Kẻ Phá Hoại: được nhắn tin riêng mỗi đêm để chọn hành động.\n💘 Thần Tình Yêu: chỉ được nhắn tin riêng vào đêm đầu tiên.\n🎭 Kẻ Phản Bội: được nhắn tin riêng biết ai là Sói khi bắt đầu ván, và lại mỗi đêm — không có hành động ban đêm.\n👤 Dân thường: không có hành động riêng — chỉ thảo luận và bỏ phiếu cùng mọi người ban ngày.\nMọi người thảo luận công khai trong thread của người còn sống vào ban ngày; kênh chính chỉ hiện thông báo giai đoạn/kết quả bỏ phiếu.",
+						Value:  "🐺 Sói thường / Sói Con / Sói Nguyền (sau khi lộ diện): hành động cùng nhau mỗi đêm trong thread riêng của bầy Sói.\n🔮 Tiên Tri / 💉 Bác Sĩ / 🧙 Phù Thủy / 🏹 Thợ Săn / 🤫 Kẻ Phá Hoại: được nhắn tin riêng mỗi đêm để chọn hành động.\n💘 Thần Tình Yêu: chỉ được nhắn tin riêng vào đêm đầu tiên.\n🎭 Kẻ Phản Bội: được nhắn tin riêng biết ai là Sói khi bắt đầu ván, và lại mỗi đêm — không có hành động ban đêm.\n👤 Dân thường: không có hành động riêng — chỉ thảo luận và bỏ phiếu cùng mọi người ban ngày.\nMọi người thảo luận công khai trong thread của người còn sống vào ban ngày; kênh chính chỉ hiện thông báo giai đoạn/kết quả bỏ phiếu.",
 						Inline: false,
 					},
 					{
@@ -609,7 +609,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 					},
 					{
 						Name:   "Giới hạn",
-						Value:  "Chỉ lưu trong bộ nhớ — bot khởi động lại giữa ván sẽ mất ván đó, giống `/duel-challenge-all`. Bỏ lỡ hành động/bỏ phiếu 2 lần liên tiếp sẽ tự động bị loại. Mỗi kênh chỉ chạy một ván tại một thời điểm. Tiên Tri, Bảo Vệ, Phù Thủy, Thợ Săn, Kẻ Phá Hoại, Thần Tình Yêu, và Kẻ Phản Bội tối đa 1 người mỗi vai trò mỗi ván, kể cả khi dùng custom-roles — hệ thống chỉ xử lý người đầu tiên của mỗi vai trò đó.",
+						Value:  "Chỉ lưu trong bộ nhớ — bot khởi động lại giữa ván sẽ mất ván đó, giống `/duel-challenge-all`. Bỏ lỡ hành động/bỏ phiếu 2 lần liên tiếp sẽ tự động bị loại. Mỗi kênh chỉ chạy một ván tại một thời điểm. Tiên Tri, Bác Sĩ, Phù Thủy, Thợ Săn, Kẻ Phá Hoại, Thần Tình Yêu, và Kẻ Phản Bội tối đa 1 người mỗi vai trò mỗi ván, kể cả khi dùng custom-roles — hệ thống chỉ xử lý người đầu tiên của mỗi vai trò đó.",
 						Inline: false,
 					},
 				},
@@ -630,7 +630,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Game flow",
-					Value:  fmt.Sprintf("1️⃣ **Lobby** — anyone Join/Leave; the starter clicks Start once %d-%d have joined.\n2️⃣ **(Optional) Custom roles** — with `custom-roles:true`, the starter picks exact role counts via an ephemeral editor before dealing.\n3️⃣ **Role reveal** — everyone is DMed their role privately, with a short note on how that role acts.\n4️⃣ **Night** — the wolf pack votes on a kill target together in a private thread; Seer/Guard/Witch/Hunter/Disruptor act via DM; Cupid acts via DM on the first night only.\n5️⃣ **Day** — discuss in a private alive-players thread, then vote to lynch (or skip).\n6️⃣ Repeat night/day until one side wins, then a full round-by-round recap posts.", werewolfMinPlayers, werewolfMaxPlayers),
+					Value:  fmt.Sprintf("1️⃣ **Lobby** — anyone Join/Leave; the starter clicks Start once %d-%d have joined.\n2️⃣ **(Optional) Custom roles** — with `custom-roles:true`, the starter picks exact role counts via an ephemeral editor before dealing.\n3️⃣ **Role reveal** — everyone is DMed their role privately, with a short note on how that role acts.\n4️⃣ **Night** — the wolf pack votes on a kill target together in a private thread; Seer/Doctor/Witch/Hunter/Disruptor act via DM; Cupid acts via DM on the first night only.\n5️⃣ **Day** — discuss in a private alive-players thread, then vote to lynch (or skip).\n6️⃣ Repeat night/day until one side wins, then a full round-by-round recap posts.", werewolfMinPlayers, werewolfMaxPlayers),
 					Inline: false,
 				},
 				{
@@ -640,7 +640,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Winning rule — by role",
-					Value:  "**Wolf faction (win together):** 🐺 Werewolf, 🐺👶 Wolf Cub, 🎭 Traitor — wolf-faction from the start.\n🐺✨ Cursed Wolf — starts **villager**-faction (wins with villagers if the game ends before it converts); if it's bitten and survives, it flips to **wolf**-faction and from then on wins with the wolves instead.\n**Villager faction (win together):** 👤 Villager, 🔮 Seer, 💉 Guard, 🧙 Witch, 🏹 Hunter, 🤫 Disruptor, 💘 Cupid — always villager-faction, always win when villagers win, regardless of whether they're personally still alive at the end.\n💘 **Mixed-faction couple**: if Cupid pairs two players from opposing factions (1 Wolf + 1 Villager), they split off into their own third party — winning only if both survive down to being the last 2 players left. Cupid always wins alongside them too (alive or dead, even when not part of that couple).",
+					Value:  "**Wolf faction (win together):** 🐺 Werewolf, 🐺👶 Wolf Cub, 🎭 Traitor — wolf-faction from the start.\n🐺✨ Cursed Wolf — starts **villager**-faction (wins with villagers if the game ends before it converts); if it's bitten and survives, it flips to **wolf**-faction and from then on wins with the wolves instead.\n**Villager faction (win together):** 👤 Villager, 🔮 Seer, 💉 Doctor, 🧙 Witch, 🏹 Hunter, 🤫 Disruptor, 💘 Cupid — always villager-faction, always win when villagers win, regardless of whether they're personally still alive at the end.\n💘 **Mixed-faction couple**: if Cupid pairs two players from opposing factions (1 Wolf + 1 Villager), they split off into their own third party — winning only if both survive down to being the last 2 players left. Cupid always wins alongside them too (alive or dead, even when not part of that couple).",
 					Inline: false,
 				},
 				{
@@ -661,7 +661,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Villager-side special roles",
-					Value:  "*(All 6 roles below win with the villagers — Cupid is the one exception when it pairs a mixed-faction couple, see \"Winning rule — by role\".)*\n🔮 **Seer** — DM each night: check one player, learn if they're wolf-faction or not.\n💉 **Guard** — DM each night: protect one player from the wolves' bite (not the same person twice in a row).\n🧙 **Witch** — DM each night, after the bite is known: heal the bitten player (once per game) and/or poison anyone else (once per game, bypasses the Guard).\n🏹 **Hunter** — DM each night: pre-commit a target; if the Hunter dies (any time, including during the day), that target dies too. The pick can only be changed at night, not mid-day.\n🤫 **Disruptor** — DM each night: pick someone to be muted in the day-discuss thread the *following* day.\n💘 **Cupid** — DM on the first night only: pick exactly 2 players to fall in love (may include themself), who learn each other's role but not who Cupid is, and can't chat directly through the bot. If either dies, the other dies too.",
+					Value:  "*(All 6 roles below win with the villagers — Cupid is the one exception when it pairs a mixed-faction couple, see \"Winning rule — by role\".)*\n🔮 **Seer** — DM each night: check one player, learn if they're wolf-faction or not.\n💉 **Doctor** — DM each night: protect one player from the wolves' bite (not the same person twice in a row).\n🧙 **Witch** — DM each night, after the bite is known: heal the bitten player (once per game) and/or poison anyone else (once per game, bypasses the Doctor).\n🏹 **Hunter** — DM each night: pre-commit a target; if the Hunter dies (any time, including during the day), that target dies too. The pick can only be changed at night, not mid-day.\n🤫 **Disruptor** — DM each night: pick someone to be muted in the day-discuss thread the *following* day.\n💘 **Cupid** — DM on the first night only: pick exactly 2 players to fall in love (may include themself), who learn each other's role but not who Cupid is, and can't chat directly through the bot. If either dies, the other dies too.",
 					Inline: false,
 				},
 				{
@@ -671,7 +671,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Roles & interaction guide",
-					Value:  "🐺 Werewolf / Wolf Cub / Cursed Wolf (once revealed): act together each night in a private wolf thread.\n🔮 Seer / 💉 Guard / 🧙 Witch / 🏹 Hunter / 🤫 Disruptor: get a private DM each night to choose their action.\n💘 Cupid: gets a private DM only on the very first night.\n🎭 Traitor: gets a DM naming the current wolves at game start, and again every night after — no night action of their own.\n👤 Villager: no special action — just discuss and vote during the day.\nEveryone chats publicly in the alive-players thread during the day; the main channel only shows phase/vote announcements.",
+					Value:  "🐺 Werewolf / Wolf Cub / Cursed Wolf (once revealed): act together each night in a private wolf thread.\n🔮 Seer / 💉 Doctor / 🧙 Witch / 🏹 Hunter / 🤫 Disruptor: get a private DM each night to choose their action.\n💘 Cupid: gets a private DM only on the very first night.\n🎭 Traitor: gets a DM naming the current wolves at game start, and again every night after — no night action of their own.\n👤 Villager: no special action — just discuss and vote during the day.\nEveryone chats publicly in the alive-players thread during the day; the main channel only shows phase/vote announcements.",
 					Inline: false,
 				},
 				{
@@ -686,7 +686,7 @@ func (cmd *HelpCommand) getWerewolfHelp(lang string) []*discordgo.MessageEmbed {
 				},
 				{
 					Name:   "Limits",
-					Value:  "In-memory only — a bot restart while a game is running loses it, same as `/duel-challenge-all`. Missing 2 actions/votes in a row auto-removes a player. One game per channel at a time. Seer, Guard, Witch, Hunter, Disruptor, Cupid, and Traitor are capped at 1 each per game, even with custom-roles — the engine only acts on the first of each.",
+					Value:  "In-memory only — a bot restart while a game is running loses it, same as `/duel-challenge-all`. Missing 2 actions/votes in a row auto-removes a player. One game per channel at a time. Seer, Doctor, Witch, Hunter, Disruptor, Cupid, and Traitor are capped at 1 each per game, even with custom-roles — the engine only acts on the first of each.",
 					Inline: false,
 				},
 			},

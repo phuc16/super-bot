@@ -69,7 +69,6 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	var round int
 	var aliveCount int
 	var summary string
-	var guildID string
 	var aliveThreadID string
 	var wolfThreadID string
 	var mutedUserID string
@@ -89,7 +88,6 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 			}
 		}
 		summary = aliveDeadSummary(game)
-		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
 		wolfThreadID = game.WolfThreadID
 		mutedUserID = game.DisruptorTarget
@@ -118,9 +116,22 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	// from the public alive-thread discussion. startWolfThread unlocks it
 	// again (alongside unarchiving) the next time night opens.
 	setWolfThreadLocked(s, wolfThreadID, true)
-	unmuteAliveThread(s, guildID, aliveThreadID)
-	if mutedUserID != "" && aliveThreadID != "" {
-		if err := s.ChannelPermissionSet(aliveThreadID, mutedUserID, discordgo.PermissionOverwriteTypeMember, 0, discordgo.PermissionSendMessagesInThreads); err != nil {
+	setAliveThreadLocked(s, aliveThreadID, false)
+	if mutedUserID != "" {
+		// The overwrite goes on the PARENT channel, not on aliveThreadID.
+		// Threads carry no overwrites of their own — a member's effective
+		// SEND_MESSAGES_IN_THREADS inside a thread resolves from the parent
+		// channel — so the previous thread-keyed version was rejected by the
+		// API on every call and the Disruptor silenced nobody, ever.
+		//
+		// Denying both bits covers both discussion venues: IN_THREADS for
+		// the normal alive-thread case, and SEND_MESSAGES for the fallback
+		// where thread creation failed and the main channel was unlocked for
+		// discussion instead. Scoping to the parent also silences the target
+		// in the wolf thread, which is harmless — that thread is locked for
+		// everyone throughout day-discuss anyway (just above).
+		const disruptorDeny = discordgo.PermissionSendMessagesInThreads | discordgo.PermissionSendMessages
+		if err := s.ChannelPermissionSet(channelID, mutedUserID, discordgo.PermissionOverwriteTypeMember, 0, disruptorDeny); err != nil {
 			log.Error().Err(err).Str("user_id", mutedUserID).Msg("werewolf: failed to apply disruptor per-member mute")
 		} else {
 			// Record who actually got muted, so runDayVote removes exactly
@@ -170,7 +181,6 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 	var gameFound bool
 	var alive []*player
 	var summary string
-	var guildID string
 	var aliveThreadID string
 	var mutedUserID string
 	func() {
@@ -190,7 +200,6 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 			}
 		}
 		summary = aliveDeadSummary(game)
-		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
 		// Read exactly who runDayDiscuss actually muted, rather than
 		// re-deriving it from DisruptorTarget + current aliveness. Those
@@ -204,11 +213,9 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 	if !gameFound {
 		return
 	}
-	muteAliveThread(s, guildID, aliveThreadID)
-	if mutedUserID != "" && aliveThreadID != "" {
-		if err := s.ChannelPermissionDelete(aliveThreadID, mutedUserID); err != nil {
-			log.Error().Err(err).Str("user_id", mutedUserID).Msg("werewolf: failed to remove disruptor per-member mute")
-		}
+	setAliveThreadLocked(s, aliveThreadID, true)
+	if mutedUserID != "" {
+		removeDisruptorMute(s, channelID, mutedUserID)
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{

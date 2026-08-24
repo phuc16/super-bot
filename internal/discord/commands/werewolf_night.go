@@ -737,7 +737,6 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		gameFound        bool
 		round            int
 		summary          string
-		guildID          string
 		aliveThreadID    string
 		wolves           []*player
 		nonWolfTargets   []*player
@@ -790,7 +789,6 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 
 		round = game.Round
 		summary = aliveDeadSummary(game)
-		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
 		wolves = copyPlayers(aliveWolfVoters(game))
 		nonWolfTargets = copyPlayers(aliveWolfBiteTargets(game))
@@ -843,7 +841,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	if !gameFound {
 		return
 	}
-	muteAliveThread(s, guildID, aliveThreadID)
+	setAliveThreadLocked(s, aliveThreadID, true)
 	cmd.sendTraitorRosterDM(s, traitorDM)
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{

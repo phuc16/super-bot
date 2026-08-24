@@ -708,6 +708,76 @@ func everyoneOverwrite(s *discordgo.Session, guildID, channelID string) (*discor
 	return nil, nil
 }
 
+// werewolfRequiredPermission pairs a permission bit the game genuinely
+// needs with the human-readable name Discord shows in the role editor, so
+// a refusal can name exactly what to grant.
+type werewolfRequiredPermission struct {
+	Bit  int64
+	Name string
+	Why  string
+}
+
+// werewolfRequiredPermissions is the complete set of channel permissions a
+// game exercises, each derived from a specific call the game makes rather
+// than guessed — a missing one doesn't degrade gracefully, it breaks a
+// mechanic silently mid-game (the bot logs a REST error nobody is reading
+// while players wait on a prompt that never arrives). Checked up front at
+// /werewolf start and re-checked in startPreflight, because the whole point
+// is to never begin a game the bot can't finish.
+var werewolfRequiredPermissions = []werewolfRequiredPermission{
+	{discordgo.PermissionViewChannel, "View Channel", "đọc kênh"},
+	{discordgo.PermissionSendMessages, "Send Messages", "đăng thông báo ngày/đêm"},
+	{discordgo.PermissionManageRoles, "Manage Roles", "khoá chat kênh khi chơi và làm câm lặng mục tiêu của Kẻ Phá Hoại"},
+	{discordgo.PermissionCreatePrivateThreads, "Create Private Threads", "tạo thread riêng cho cả bàn và cho bầy Sói"},
+	{discordgo.PermissionSendMessagesInThreads, "Send Messages in Threads", "gửi phiếu cắn và tóm tắt trong thread"},
+	{discordgo.PermissionManageThreads, "Manage Threads", "khoá thread ban đêm/ban ngày, thêm–bớt thành viên và xoá thread khi hết ván"},
+}
+
+// missingWerewolfPermissions returns the permissions the bot lacks in
+// channelID, in the order werewolfRequiredPermissions declares them. A
+// lookup error is reported as everything missing: the game must not start
+// on an unverified permission set, since the failure mode of guessing wrong
+// is a half-played game that can't be finished or cleaned up.
+func missingWerewolfPermissions(s *discordgo.Session, channelID string) ([]werewolfRequiredPermission, error) {
+	perms, err := s.UserChannelPermissions(s.State.User.ID, channelID)
+	if err != nil {
+		return werewolfRequiredPermissions, err
+	}
+	return missingPermissionsFrom(perms), nil
+}
+
+// missingPermissionsFrom is the pure half of missingWerewolfPermissions,
+// split out so the bitmask logic is testable without a live Session.
+// Administrator short-circuits because Discord treats it as implying every
+// other permission, so checking the individual bits would reject a bot that
+// can in fact do everything.
+func missingPermissionsFrom(perms int64) []werewolfRequiredPermission {
+	if perms&discordgo.PermissionAdministrator != 0 {
+		return nil
+	}
+	var missing []werewolfRequiredPermission
+	for _, req := range werewolfRequiredPermissions {
+		if perms&req.Bit == 0 {
+			missing = append(missing, req)
+		}
+	}
+	return missing
+}
+
+// missingPermissionsMessage renders the refusal players actually see. It
+// lists every missing permission at once rather than the first one, so a
+// server admin can fix the role in a single pass instead of rediscovering
+// the next gap on each retry.
+func missingPermissionsMessage(missing []werewolfRequiredPermission) string {
+	lines := make([]string, 0, len(missing))
+	for _, req := range missing {
+		lines = append(lines, fmt.Sprintf("• **%s** — %s", req.Name, req.Why))
+	}
+	return "Bot thiếu quyền trong kênh này nên không thể mở ván Ma Sói:\n" +
+		strings.Join(lines, "\n") +
+		"\n\nNhờ admin cấp đủ các quyền trên cho bot ở kênh này rồi thử lại."
+}
+
 // lockChannelToBotOnly denies @everyone SEND_MESSAGES on the game channel,
 // preserving whatever else @everyone already allowed/denied there. Returns
 // the prior overwrite (nil if none existed) so unlockChannel can restore it
@@ -746,30 +816,63 @@ func unlockChannel(s *discordgo.Session, guildID, channelID string, prior *disco
 	}
 }
 
-// muteAliveThread denies @everyone SEND_MESSAGES_IN_THREADS on the alive-
-// discussion thread, used during night and vote phases so players can only
-// actually chat there during day-discuss. No-op if threadID is empty (the
-// thread failed to create, or the game already unlocked everything via the
-// createAliveDiscussionThread failure fallback).
-func muteAliveThread(s *discordgo.Session, guildID, threadID string) {
-	if threadID == "" {
+// shouldCloseEmptyLobby decides whether a departure just abandoned the
+// lobby outright. Shared by the button path (handleJoinLeave) and the slash
+// path (handleLeave) so the two can't drift apart on a rule where drifting
+// costs a locked channel.
+//
+// Both conditions matter. An empty roster alone is NOT abandonment:
+// /werewolf start doesn't add the starter to the roster, so a brand-new
+// lobby legitimately sits at zero players with its host present — closing on
+// that alone let one person join-then-leave to kill any lobby whose host
+// hadn't joined, repeatedly. And the host leaving alone isn't abandonment
+// either; the remaining players get the lobby handed to them instead.
+// A host who simply disappears without clicking is lobbyTimeout's job.
+func shouldCloseEmptyLobby(leaverID, starterID string, remaining int) bool {
+	return remaining == 0 && leaverID != "" && leaverID == starterID
+}
+
+// removeDisruptorMute deletes the per-member overwrite runDayDiscuss put on
+// the game channel for the Disruptor's target. Called from runDayVote in the
+// normal flow, and from teardownGame for a game that ended mid-discussion —
+// without that second caller the target stays muted in the channel forever,
+// long after the game that muted them is gone.
+func removeDisruptorMute(s *discordgo.Session, channelID, userID string) {
+	if channelID == "" || userID == "" {
 		return
 	}
-	if err := s.ChannelPermissionSet(threadID, guildID, discordgo.PermissionOverwriteTypeRole, 0, discordgo.PermissionSendMessagesInThreads); err != nil {
-		log.Error().Err(err).Str("channel_id", threadID).Msg("werewolf: failed to mute alive-discussion thread")
+	if err := s.ChannelPermissionDelete(channelID, userID); err != nil {
+		log.Error().Err(err).Str("channel_id", channelID).Str("user_id", userID).Msg("werewolf: failed to remove disruptor per-member mute")
 	}
 }
 
-// unmuteAliveThread removes the mute overwrite muteAliveThread applies,
-// reopening the thread for day-discuss. Deleting the overwrite (rather than
-// setting an explicit allow) restores Discord's default thread permission
-// behavior, which is what the thread had immediately after creation.
-func unmuteAliveThread(s *discordgo.Session, guildID, threadID string) {
+// setAliveThreadLocked silences or reopens the alive-discussion thread —
+// locked through night and vote so players can only actually talk during
+// day-discuss, unlocked (and unarchived, in case a long night let Discord
+// auto-archive it) when day-discuss opens.
+//
+// This deliberately uses the thread's `locked` flag rather than a
+// permission overwrite. Discord does NOT support per-channel overwrites on
+// threads at all: threads inherit permissions from their parent, and
+// PUT/DELETE /channels/{id}/permissions is documented "only usable for
+// guild channels". The earlier implementation set a
+// SEND_MESSAGES_IN_THREADS deny keyed on the thread ID, which the API
+// rejected outright every single time — so night silence was a no-op and
+// players could keep talking through every night of every game, with only
+// a logged REST error to show for it. `locked` is the supported mechanism
+// (identical to setWolfThreadLocked) and, like the wolf thread, it blocks
+// posting without hiding the thread or its history, so the day's discussion
+// stays readable overnight.
+//
+// No-op if threadID is empty (the thread failed to create, and the game
+// fell back to unlocking the main channel for discussion instead).
+func setAliveThreadLocked(s *discordgo.Session, threadID string, locked bool) {
 	if threadID == "" {
 		return
 	}
-	if err := s.ChannelPermissionDelete(threadID, guildID); err != nil {
-		log.Error().Err(err).Str("channel_id", threadID).Msg("werewolf: failed to unmute alive-discussion thread")
+	archived := false
+	if _, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{Locked: &locked, Archived: &archived}); err != nil {
+		log.Error().Err(err).Str("thread_id", threadID).Bool("locked", locked).Msg("werewolf: failed to set alive-discussion thread lock state")
 	}
 }
 
@@ -1099,10 +1202,13 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		}
 	}
 
-	botPerms, err := s.UserChannelPermissions(s.State.User.ID, i.ChannelID)
-	if err != nil || botPerms&discordgo.PermissionManageRoles == 0 {
+	missingPerms, err := missingWerewolfPermissions(s, i.ChannelID)
+	if err != nil {
+		log.Error().Err(err).Str("channel_id", i.ChannelID).Msg("werewolf: failed to resolve bot channel permissions")
+	}
+	if len(missingPerms) > 0 {
 		rollback(false)
-		respondError(s, i, "Bot cần quyền \"Manage Roles\" trong kênh này để khoá chat khi chơi Ma Sói.")
+		respondError(s, i, missingPermissionsMessage(missingPerms))
 		return
 	}
 
@@ -1322,20 +1428,29 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 		channelID := game.ChannelID
 		messageID := game.MessageID
 
-		// An empty lobby must be torn down, not left sitting. The channel
-		// is locked to bot-only from /werewolf start onward, and a lobby
-		// has no expiry timer — so an abandoned one would hold the channel
-		// read-only indefinitely with nobody left who could cancel it.
-		if len(game.JoinOrder) == 0 {
+		// A lobby the HOST has walked out of, with nobody left in it, must
+		// be torn down rather than left sitting: the channel is locked to
+		// bot-only from /werewolf start onward, so an abandoned lobby would
+		// hold it read-only with nobody around to cancel it.
+		//
+		// Gated on the leaver being the host for the same reason as the
+		// button path (see handleJoinLeave): the starter isn't in the roster
+		// unless they joined, so an empty roster alone doesn't mean the
+		// lobby is abandoned. lobbyTimeout covers the case where the host is
+		// simply gone without clicking anything.
+		if shouldCloseEmptyLobby(userID, game.StarterID, len(game.JoinOrder)) {
 			info := gameTeardownInfoFor(channelID, game)
 			delete(cmd.games, channelID)
 			cmd.mu.Unlock()
 
-			teardownGame(s, info)
+			// Respond before teardownGame's REST work, so a slow unlock
+			// can't blow the 3-second interaction deadline (see the same
+			// note in handleJoinLeave).
 			respondSuccess(s, i, "Đã rời bàn. Bàn trống nên đã được đóng lại.")
+			teardownGame(s, info)
 			if messageID != "" {
 				emptyComponents := []discordgo.MessageComponent{}
-				emptyContent := "🚫 Bàn Ma Sói đã đóng vì không còn ai tham gia."
+				emptyContent := "🚫 Bàn Ma Sói đã đóng vì người mở bàn đã rời đi và không còn ai tham gia."
 				if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
 					Channel:         channelID,
 					ID:              messageID,
@@ -1509,20 +1624,35 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 	// button-driven way to leave the same lobby, and the consequences of
 	// getting it wrong (a locked channel nobody can free, or a departed
 	// starter still holding lobby authority) are identical.
-	if actuallyLeft && len(game.JoinOrder) == 0 {
+	//
+	// The teardown additionally requires that the LEAVER was the host.
+	// /werewolf start deliberately doesn't add the starter to the roster, so
+	// a fresh lobby sits at zero players — meaning "roster is now empty"
+	// alone doesn't imply "nobody is here". Without the host check, one
+	// person joining and immediately leaving would close a lobby whose host
+	// is present and waiting, and could do it again to every lobby opened
+	// after it. An empty lobby whose host is still around stays open;
+	// genuine abandonment is what lobbyTimeout is for.
+	if actuallyLeft && shouldCloseEmptyLobby(clickerID, game.StarterID, len(game.JoinOrder)) {
 		info := gameTeardownInfoFor(channelID, game)
 		delete(cmd.games, channelID)
 		cmd.mu.Unlock()
 
-		teardownGame(s, info)
+		// Answer the click BEFORE teardownGame's REST work. Discord drops an
+		// interaction that isn't acknowledged within 3 seconds, and
+		// teardownGame leads with a permission-overwrite round-trip — so a
+		// slow or rate-limited unlock would show the clicker "This
+		// interaction failed" and leave the dead lobby's buttons on screen,
+		// even though the game is already gone from cmd.games.
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content:         "🚫 Bàn Ma Sói đã đóng vì không còn ai tham gia.",
+				Content:         "🚫 Bàn Ma Sói đã đóng vì người mở bàn đã rời đi và không còn ai tham gia.",
 				Components:      []discordgo.MessageComponent{},
 				AllowedMentions: &discordgo.MessageAllowedMentions{},
 			},
 		})
+		teardownGame(s, info)
 		return
 	}
 	starterLeft := actuallyLeft && clickerID == game.StarterID
@@ -1617,22 +1747,24 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 // and Shutdown (every game, process-exit-triggered) so both paths clean up
 // identically instead of duplicating the same three steps.
 type gameTeardownInfo struct {
-	channelID       string
-	threadID        string
-	aliveThreadID   string
-	guildID         string
-	priorOverwrite  *discordgo.PermissionOverwrite
-	channelUnlocked bool
+	channelID            string
+	threadID             string
+	aliveThreadID        string
+	guildID              string
+	priorOverwrite       *discordgo.PermissionOverwrite
+	channelUnlocked      bool
+	disruptorMutedUserID string
 }
 
 func gameTeardownInfoFor(channelID string, game *werewolfGame) gameTeardownInfo {
 	return gameTeardownInfo{
-		channelID:       channelID,
-		threadID:        game.WolfThreadID,
-		aliveThreadID:   game.AliveThreadID,
-		guildID:         game.GuildID,
-		priorOverwrite:  game.PriorOverwrite,
-		channelUnlocked: game.ChannelUnlocked,
+		channelID:            channelID,
+		threadID:             game.WolfThreadID,
+		aliveThreadID:        game.AliveThreadID,
+		guildID:              game.GuildID,
+		priorOverwrite:       game.PriorOverwrite,
+		channelUnlocked:      game.ChannelUnlocked,
+		disruptorMutedUserID: game.DisruptorMutedUserID,
 	}
 }
 
@@ -1647,6 +1779,11 @@ func teardownGame(s *discordgo.Session, info gameTeardownInfo) {
 	if !info.channelUnlocked {
 		unlockChannel(s, info.guildID, info.channelID, info.priorOverwrite)
 	}
+	// Second in priority, and for the same reason: a leaked per-member deny
+	// outlives the game just as the channel lock would. It targets a
+	// different overwrite ID than unlockChannel's @everyone one, so the two
+	// don't interfere.
+	removeDisruptorMute(s, info.channelID, info.disruptorMutedUserID)
 	if info.threadID != "" {
 		if _, err := s.ChannelDelete(info.threadID); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread during teardown")
@@ -1933,6 +2070,21 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 		}); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to post preflight message")
 		}
+	}
+
+	// Re-check permissions here, not just at /werewolf start: minutes can
+	// pass in the lobby and role-count editor, and an admin editing the
+	// channel or the bot's role in that window would otherwise leave the
+	// game to discover the gap mid-night, after roles are already dealt and
+	// there's no clean way back. Aborting here costs the players a restart;
+	// aborting at night costs them the game.
+	if missingPerms, err := missingWerewolfPermissions(s, channelID); len(missingPerms) > 0 {
+		if err != nil {
+			log.Error().Err(err).Str("channel_id", channelID).Msg("werewolf: failed to re-resolve bot channel permissions at preflight")
+		}
+		sendPlain("❌ " + missingPermissionsMessage(missingPerms))
+		cmd.abortGameStillCurrent(s, channelID, seq)
+		return
 	}
 
 	// deal uses the starter's custom ratio when there is one and it fits the
