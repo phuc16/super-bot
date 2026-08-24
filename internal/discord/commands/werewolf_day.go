@@ -93,6 +93,12 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 		aliveThreadID = game.AliveThreadID
 		wolfThreadID = game.WolfThreadID
 		mutedUserID = game.DisruptorTarget
+		// Clear unconditionally before this round's apply. runDayVote also
+		// clears it after removing the overwrite, so in the normal flow
+		// this is already "" — but resetting here too means a round whose
+		// apply FAILS can never inherit the previous round's value and
+		// have runDayVote try to remove an overwrite that isn't there.
+		game.DisruptorMutedUserID = ""
 
 		if target, exists := game.Players[mutedUserID]; mutedUserID != "" && exists && target.Alive {
 			if n := len(game.History); n > 0 {
@@ -416,7 +422,6 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 	var (
 		gameFound       bool
 		ended           bool
-		removedNames    []string
 		removedPlayers  []*player
 		removedIDs      []string
 		hunterRevenged  []*player
@@ -449,7 +454,6 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 			p := game.Players[id]
 			if p.Alive && shouldRemoveForAFK(game.AFKStrikes[id]) {
 				p.Alive = false
-				removedNames = append(removedNames, p.Label)
 				removedPlayers = append(removedPlayers, copyPlayer(p))
 				removedIDs = append(removedIDs, id)
 			}
@@ -530,8 +534,23 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		channelUnlocked: channelUnlocked,
 	})
 
-	cmd.announceGameEnd(s, endedGame, result, removedNames)
+	// Names derived from removedPlayers rather than accumulated in a
+	// parallel slice — one source of truth, so the two can't drift.
+	cmd.announceGameEnd(s, endedGame, result, labelsOf(removedPlayers))
 	return true
+}
+
+// labelsOf extracts display labels from a player slice, for the several
+// announcement helpers that only need names.
+func labelsOf(players []*player) []string {
+	if len(players) == 0 {
+		return nil
+	}
+	labels := make([]string, 0, len(players))
+	for _, p := range players {
+		labels = append(labels, p.Label)
+	}
+	return labels
 }
 
 // announceAFKRemovals reports players auto-eliminated for inactivity. Like

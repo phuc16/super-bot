@@ -439,17 +439,25 @@ func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channe
 }
 
 func (cmd *WerewolfCommand) handleRoleCountButton(s *discordgo.Session, i *discordgo.InteractionCreate, remainder string) {
+	// A customID that doesn't parse is almost always a button rendered by
+	// an OLDER build (the encoding gained a Seq field), still sitting in a
+	// user's client. Answer the interaction instead of returning silently:
+	// a bare return leaves Discord showing "This interaction failed", which
+	// looks like a bot outage rather than a stale button.
 	parts := strings.SplitN(remainder, ":", 4)
 	if len(parts) != 4 {
+		respondComponentEphemeral(s, i, "Nút này thuộc phiên bản cũ, không dùng được nữa. Hãy mở lại ván mới.")
 		return
 	}
 	sign, roleStr, channelID, seqStr := parts[0], parts[1], parts[2], parts[3]
 	roleInt, err := strconv.Atoi(roleStr)
 	if err != nil {
+		respondComponentEphemeral(s, i, "Nút này không hợp lệ, hãy mở lại ván mới.")
 		return
 	}
 	seq, err := strconv.ParseUint(seqStr, 10, 64)
 	if err != nil {
+		respondComponentEphemeral(s, i, "Nút này thuộc phiên bản cũ, không dùng được nữa. Hãy mở lại ván mới.")
 		return
 	}
 	r := role(roleInt)
@@ -508,12 +516,17 @@ func (cmd *WerewolfCommand) handleRoleCountButton(s *discordgo.Session, i *disco
 }
 
 func (cmd *WerewolfCommand) handleRoleCountConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, remainder string) {
+	// See handleRoleCountButton: a confirm button from an older build
+	// carries no Seq, so answer the interaction rather than returning
+	// silently and leaving Discord's "This interaction failed" toast.
 	channelID, seqStr, ok := strings.Cut(remainder, ":")
 	if !ok {
+		respondComponentEphemeral(s, i, "Nút này thuộc phiên bản cũ, không dùng được nữa. Hãy mở lại ván mới.")
 		return
 	}
 	seq, err := strconv.ParseUint(seqStr, 10, 64)
 	if err != nil {
+		respondComponentEphemeral(s, i, "Nút này thuộc phiên bản cũ, không dùng được nữa. Hãy mở lại ván mới.")
 		return
 	}
 

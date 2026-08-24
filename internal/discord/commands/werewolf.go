@@ -574,6 +574,28 @@ type WerewolfCommand struct {
 // configuration (per CLAUDE.md's "no zero-arg factory functions" rule).
 var WerewolfCmd = &WerewolfCommand{games: make(map[string]*werewolfGame)}
 
+// canManageLobby reports whether clickerID may use the lobby's restricted
+// controls — "Bắt đầu" (start) and "Huỷ" (cancel). Discord renders buttons
+// for everyone who can see the message and offers no per-user disabling,
+// so this is enforced server-side on click, with an ephemeral rejection
+// for anyone else.
+//
+// Admins are allowed alongside the starter so a lobby whose starter has
+// gone AFK, left the server, or simply won't press anything can still be
+// started or cleared — otherwise the channel stays locked until a timeout
+// with nobody able to intervene. Both controls take the same rule: it
+// would be strange for an admin to be able to cancel a lobby but not
+// start it.
+//
+// An empty clickerID (unidentifiable interaction) is always refused, so it
+// can never coincidentally match an empty StarterID.
+func canManageLobby(clickerID, starterID string, member *discordgo.Member) bool {
+	if clickerID == "" {
+		return false
+	}
+	return clickerID == starterID || hasAdminPermission(member)
+}
+
 // gameIfCurrent returns the game at channelID only if it still exists AND
 // matches seq. Callers use this after waking from a sleep to make sure the
 // game they were tracking hasn't ended and been replaced by a new one in
@@ -1269,7 +1291,7 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 		respondComponentEphemeral(s, i, "Ván đã bắt đầu, không thể huỷ.")
 		return
 	}
-	if interactionUserID(i) != game.StarterID && !hasAdminPermission(i.Member) {
+	if !canManageLobby(interactionUserID(i), game.StarterID, i.Member) {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ người mở bàn hoặc quản trị viên mới được huỷ.")
 		return
@@ -1443,12 +1465,9 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Bàn này đã đóng đăng ký hoặc kết thúc.")
 		return
 	}
-	// interactionUserID, not i.Member.User.ID: nil-safe, and an empty
-	// result can never equal a real StarterID, so an unidentifiable
-	// clicker is correctly rejected rather than panicking the handler.
-	if interactionUserID(i) != game.StarterID {
+	if !canManageLobby(interactionUserID(i), game.StarterID, i.Member) {
 		cmd.mu.Unlock()
-		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được bắt đầu.")
+		respondComponentEphemeral(s, i, "Chỉ người mở bàn hoặc quản trị viên mới được bắt đầu.")
 		return
 	}
 	if len(game.JoinOrder) < werewolfMinPlayers {

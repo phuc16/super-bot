@@ -803,6 +803,162 @@ func TestWitchTurnClosesAfterPoisoningTheLoneBiteTarget(t *testing.T) {
 	}
 }
 
+// witchSim mirrors the exact state the three Witch handlers read and write,
+// so the full turn state machine can be exercised without Discord I/O. Any
+// divergence from the real handlers is a bug in this harness — keep the
+// field updates below in lockstep with handleWitchHeal / handleWitchPoison /
+// handleWitchSkip.
+type witchSim struct {
+	biteTargets  []string
+	poisonUsed   bool
+	poisonID     string
+	healUsed     bool
+	healedTarget string
+	acted        bool // WitchActedThisRound — "turn is over"
+	didSomething bool // WitchDidSomethingThisRound — "took any action"
+}
+
+func (w *witchSim) recompute() {
+	w.acted = !witchHasChoiceLeft(w.poisonUsed, w.healUsed,
+		healableBiteTargetCount(w.biteTargets, w.poisonID))
+}
+
+// tryHeal mirrors handleWitchHeal's gates in order, returning why it was
+// refused (or "" on success).
+func (w *witchSim) tryHeal(target string) string {
+	if w.acted {
+		return "turn already over"
+	}
+	if w.healUsed {
+		return "heal potion already used"
+	}
+	if w.poisonUsed && w.poisonID == target {
+		return "same-target guard"
+	}
+	w.healUsed = true
+	w.didSomething = true
+	w.recompute()
+	return ""
+}
+
+// tryPoison mirrors handleWitchPoison's gates in order.
+func (w *witchSim) tryPoison(target string) string {
+	if w.acted {
+		return "turn already over"
+	}
+	if w.poisonUsed {
+		return "poison potion already used"
+	}
+	if w.healUsed && resolveWitchHealTarget(healSentinelFor(w, target), w.biteTargets) == target {
+		return "same-target guard"
+	}
+	w.poisonUsed = true
+	w.poisonID = target
+	w.didSomething = true
+	w.recompute()
+	return ""
+}
+
+// healSentinelFor is only used by the sim's same-target check; the real
+// handler reads game.WitchSaveTarget. The sim tracks the heal target
+// implicitly, so this returns a value that makes resolveWitchHealTarget
+// agree with what the real handler would compute.
+func healSentinelFor(w *witchSim, _ string) string {
+	if !w.healUsed {
+		return ""
+	}
+	return w.healedTarget
+}
+
+func TestWitchTurnStateMachineNeverStallsAndNeverBlocksALegalAction(t *testing.T) {
+	// Exhaustive check of the Witch's turn state machine over every
+	// ordering of her two actions, for 1-target and 2-target (bonus bite)
+	// rounds, including the same-target edge cases.
+	//
+	// Two invariants must hold after EVERY action:
+	//   (A) No stall: if she has no legal action left, her turn must be
+	//       marked over — otherwise waitForWitchAction blocks the entire
+	//       night for the full witchActionWindow. (This was a real bug.)
+	//   (B) No premature close: if she DOES still have a legal action, her
+	//       turn must stay open so she can take it.
+	//
+	// "Legal action" is computed independently of witchHasChoiceLeft, from
+	// the handlers' own gates, so the two can disagree and be caught.
+	type step struct {
+		action string // "heal" or "poison"
+		target string
+	}
+	cases := []struct {
+		name        string
+		biteTargets []string
+		steps       []step
+	}{
+		{"1 target: heal only", []string{"A"}, []step{{"heal", "A"}}},
+		{"1 target: poison the bite target", []string{"A"}, []step{{"poison", "A"}}},
+		{"1 target: poison someone else, then heal", []string{"A"}, []step{{"poison", "Z"}, {"heal", "A"}}},
+		{"1 target: heal, then poison someone else", []string{"A"}, []step{{"heal", "A"}, {"poison", "Z"}}},
+		{"1 target: heal, then try to poison the same person", []string{"A"}, []step{{"heal", "A"}, {"poison", "A"}}},
+		{"2 targets: poison A, then heal B", []string{"A", "B"}, []step{{"poison", "A"}, {"heal", "B"}}},
+		{"2 targets: heal B, then poison A", []string{"A", "B"}, []step{{"heal", "B"}, {"poison", "A"}}},
+		{"2 targets: poison A, then try to heal A", []string{"A", "B"}, []step{{"poison", "A"}, {"heal", "A"}}},
+		{"2 targets: poison outsider, then heal A", []string{"A", "B"}, []step{{"poison", "Z"}, {"heal", "A"}}},
+		{"no bite targets: poison only", nil, []step{{"poison", "Z"}}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := &witchSim{biteTargets: c.biteTargets}
+			w.recompute() // prompt-time state
+			for i, st := range c.steps {
+				if st.action == "heal" {
+					w.healedTarget = st.target
+					if refusal := w.tryHeal(st.target); refusal != "" {
+						w.healedTarget = "" // rolled back, heal did not happen
+						t.Logf("step %d heal(%s) refused: %s", i, st.target, refusal)
+					}
+				} else {
+					if refusal := w.tryPoison(st.target); refusal != "" {
+						t.Logf("step %d poison(%s) refused: %s", i, st.target, refusal)
+					}
+				}
+				assertWitchInvariants(t, w, i)
+			}
+		})
+	}
+}
+
+// assertWitchInvariants independently derives whether any legal action
+// remains, and checks the turn-over flag agrees.
+func assertWitchInvariants(t *testing.T, w *witchSim, step int) {
+	t.Helper()
+
+	// Independently: can she still legally heal? Needs an unused potion and
+	// at least one bite target that isn't the one she poisoned.
+	canHeal := false
+	if !w.healUsed {
+		for _, id := range w.biteTargets {
+			if !(w.poisonUsed && w.poisonID == id) {
+				canHeal = true
+				break
+			}
+		}
+	}
+	// Can she still legally poison? Needs an unused potion. (Poison targets
+	// are not limited to bite targets, so there is essentially always
+	// somebody left to poison while the potion is unused.)
+	canPoison := !w.poisonUsed
+	anyLegalActionLeft := canHeal || canPoison
+
+	if anyLegalActionLeft && w.acted {
+		t.Errorf("step %d: turn marked OVER but a legal action remains (canHeal=%v canPoison=%v) — she'd be locked out of an action she's entitled to",
+			step, canHeal, canPoison)
+	}
+	if !anyLegalActionLeft && !w.acted {
+		t.Errorf("step %d: turn marked OPEN but NO legal action remains — waitForWitchAction would stall the whole night for the full window",
+			step)
+	}
+}
+
 func TestWitchTurnStaysOpenAfterPoisoningOneOfTwoBiteTargets(t *testing.T) {
 	// Bonus-bite round: poisoning one bite target must still leave the
 	// OTHER one healable, keeping her turn open for that second action.
@@ -1281,6 +1437,114 @@ func TestTallyWolfVotesTopTwoUnanimousYieldsOne(t *testing.T) {
 	if !ok || len(targets) != 1 || targets[0] != "a" {
 		t.Fatalf("unanimous tallyWolfVotes(topN=2) = %v, %v; want [a], true", targets, ok)
 	}
+}
+
+// selectMenuOf digs the single SelectMenu out of a one-row component slice
+// so the tests below can assert on its Discord-facing invariants.
+func selectMenuOf(t *testing.T, rows []discordgo.MessageComponent) discordgo.SelectMenu {
+	t.Helper()
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly 1 action row, got %d", len(rows))
+	}
+	row, ok := rows[0].(discordgo.ActionsRow)
+	if !ok {
+		t.Fatalf("expected an ActionsRow, got %T", rows[0])
+	}
+	if len(row.Components) != 1 {
+		t.Fatalf("expected exactly 1 component in the row, got %d", len(row.Components))
+	}
+	menu, ok := row.Components[0].(discordgo.SelectMenu)
+	if !ok {
+		t.Fatalf("expected a SelectMenu, got %T", row.Components[0])
+	}
+	return menu
+}
+
+func TestSelectMenusRespectDiscordOptionLimits(t *testing.T) {
+	// Discord rejects a select menu with 0 options or more than 25, and
+	// requires 1 <= MinValues <= MaxValues <= len(Options). A rejected
+	// message means the night/day prompt never appears at all, which in
+	// the wolf case costs the whole pack an AFK strike.
+	//
+	// The binding case is a full 20-player roster (werewolfMaxPlayers),
+	// which is the largest any of these menus can get.
+	roster := make([]*player, 0, werewolfMaxPlayers)
+	for n := 0; n < werewolfMaxPlayers; n++ {
+		roster = append(roster, &player{
+			UserID: fmt.Sprintf("u%d", n),
+			Label:  fmt.Sprintf("Player %d", n),
+			Alive:  true,
+		})
+	}
+
+	check := func(t *testing.T, name string, rows []discordgo.MessageComponent) {
+		t.Helper()
+		menu := selectMenuOf(t, rows)
+		n := len(menu.Options)
+		switch {
+		case n == 0:
+			t.Errorf("%s: built a select menu with ZERO options — Discord rejects the whole message", name)
+		case n > 25:
+			t.Errorf("%s: %d options exceeds Discord's max of 25", name, n)
+		}
+		if menu.MinValues == nil {
+			t.Fatalf("%s: MinValues is nil", name)
+		}
+		if *menu.MinValues < 1 {
+			t.Errorf("%s: MinValues = %d, want >= 1", name, *menu.MinValues)
+		}
+		if menu.MaxValues < *menu.MinValues {
+			t.Errorf("%s: MaxValues (%d) < MinValues (%d) — Discord rejects this", name, menu.MaxValues, *menu.MinValues)
+		}
+		if menu.MaxValues > n {
+			t.Errorf("%s: MaxValues (%d) exceeds the option count (%d) — Discord rejects this", name, menu.MaxValues, n)
+		}
+	}
+
+	t.Run("vote menu at max roster (adds a skip option)", func(t *testing.T) {
+		check(t, "voteSelectMenu", voteSelectMenu("c", "p", roster))
+	})
+	t.Run("single-target night menu at max roster", func(t *testing.T) {
+		check(t, "targetSelectMenu", targetSelectMenu("c", "p", roster))
+	})
+	t.Run("cupid pair menu at max roster", func(t *testing.T) {
+		check(t, "cupidPairSelectMenu", cupidPairSelectMenu("c", "p", roster))
+	})
+	t.Run("wolf menu across every plausible bonus-bite size", func(t *testing.T) {
+		// maxPicks grows with the number of Wolf Cubs that have died, so
+		// sweep well past any realistic value — including deliberately
+		// past the option count, which must be clamped, not passed through.
+		for maxPicks := 1; maxPicks <= werewolfMaxPlayers+5; maxPicks++ {
+			check(t, fmt.Sprintf("wolfTargetSelectMenu(maxPicks=%d)", maxPicks),
+				wolfTargetSelectMenu("c", "p", roster, maxPicks))
+		}
+	})
+	t.Run("wolf menu with a single target still valid", func(t *testing.T) {
+		// A near-endgame night: only one bitable player left. MaxValues
+		// must clamp down to 1 rather than staying at the bonus size.
+		for maxPicks := 1; maxPicks <= 4; maxPicks++ {
+			check(t, fmt.Sprintf("wolfTargetSelectMenu(1 target, maxPicks=%d)", maxPicks),
+				wolfTargetSelectMenu("c", "p", roster[:1], maxPicks))
+		}
+	})
+
+	t.Run("cupid's MinValues=2 is always satisfiable", func(t *testing.T) {
+		// cupidPairSelectMenu hard-codes MinValues=2, so it needs at least
+		// 2 options or Discord rejects the DM outright — which would leave
+		// the round-1 Cupid gate in nightActionsComplete waiting out the
+		// whole night window for a pairing that can never arrive.
+		//
+		// Safe today because Cupid only acts on round 1, and the roster is
+		// never smaller than werewolfMinPlayers by then: startPreflight
+		// aborts the game outright if dropping DM-unreachable players
+		// takes it below that floor. Assert the floor still covers it, so
+		// lowering werewolfMinPlayers can't silently break this.
+		if werewolfMinPlayers < 2 {
+			t.Fatalf("werewolfMinPlayers = %d, but cupidPairSelectMenu requires at least 2 options", werewolfMinPlayers)
+		}
+		check(t, "cupidPairSelectMenu at the minimum roster",
+			cupidPairSelectMenu("c", "p", roster[:werewolfMinPlayers]))
+	})
 }
 
 func TestTruncateLabelCutsOnRuneBoundaries(t *testing.T) {
@@ -2085,6 +2349,51 @@ func TestGameTeardownInfoForCapturesGameState(t *testing.T) {
 	if info.channelID != "chan1" || info.threadID != "wolf-thread" || info.aliveThreadID != "alive-thread" ||
 		info.guildID != "guild1" || !info.channelUnlocked {
 		t.Errorf("gameTeardownInfoFor() = %+v, did not faithfully capture the game's teardown-relevant fields", info)
+	}
+}
+
+func TestCanManageLobbyStarterOrAdminOnly(t *testing.T) {
+	// The lobby's "Bắt đầu" and "Huỷ" buttons are visible to everyone
+	// (Discord has no per-user button disabling), so the restriction is
+	// enforced server-side on click. Only the starter or a server admin
+	// may drive them.
+	const starterID = "starter-1"
+
+	member := func(perms int64) *discordgo.Member {
+		return &discordgo.Member{Permissions: perms, User: &discordgo.User{ID: "x"}}
+	}
+
+	cases := []struct {
+		name      string
+		clickerID string
+		member    *discordgo.Member
+		want      bool
+	}{
+		{"the starter, no special perms", starterID, member(0), true},
+		{"a random player", "someone-else", member(0), false},
+		{"an Administrator who isn't the starter", "admin-1", member(discordgo.PermissionAdministrator), true},
+		{"a Manage Server admin who isn't the starter", "admin-2", member(discordgo.PermissionManageServer), true},
+		{"a player with unrelated perms", "p", member(discordgo.PermissionSendMessages), false},
+		{"the starter, who is also an admin", starterID, member(discordgo.PermissionAdministrator), true},
+		{"nil member (DM-shaped interaction), not the starter", "someone-else", nil, false},
+		{"nil member but IS the starter", starterID, nil, true},
+		{"unidentifiable clicker must never pass", "", member(0), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := canManageLobby(c.clickerID, starterID, c.member); got != c.want {
+				t.Errorf("canManageLobby(%q, %q, %+v) = %v, want %v", c.clickerID, starterID, c.member, got, c.want)
+			}
+		})
+	}
+}
+
+func TestCanManageLobbyEmptyClickerCannotMatchEmptyStarter(t *testing.T) {
+	// Defensive: an unidentifiable interaction yields "" from
+	// interactionUserID. If StarterID were also somehow "", a naive
+	// equality check would let ANY unidentifiable click manage the lobby.
+	if canManageLobby("", "", &discordgo.Member{}) {
+		t.Error("an empty clicker ID matched an empty starter ID — an unidentifiable interaction must never be treated as the starter")
 	}
 }
 
