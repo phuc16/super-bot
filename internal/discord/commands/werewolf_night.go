@@ -946,6 +946,14 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 				cmd.mu.Lock()
 				defer cmd.mu.Unlock()
 				if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+					if g.WolfThreadRemovedIDs == nil {
+						// Defensive: the only production constructor
+						// (handleStart) always initializes this map, but
+						// nothing enforces that for a werewolfGame{} built
+						// elsewhere (e.g. a future test), and this write
+						// would otherwise panic on a nil map.
+						g.WolfThreadRemovedIDs = make(map[string]bool)
+					}
 					for _, id := range removedIDs {
 						g.WolfThreadRemovedIDs[id] = true
 					}

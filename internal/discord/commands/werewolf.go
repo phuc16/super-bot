@@ -1613,13 +1613,26 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 			}
 		}
 	} else {
+		stillCurrent := false
 		func() {
 			cmd.mu.Lock()
 			defer cmd.mu.Unlock()
 			if g := cmd.gameIfCurrent(channelID, seq); g != nil {
 				g.AliveThreadID = aliveThreadID
+				stillCurrent = true
 			}
 		}()
+		if !stillCurrent {
+			// Same race startWolfThread guards against: the game was
+			// force-stopped/cancelled/ended in the window between creating
+			// this thread and re-acquiring the lock to record it, so nothing
+			// else holds this ID — delete it here instead of leaking it in
+			// the guild forever.
+			if _, err := s.ChannelDelete(aliveThreadID); err != nil {
+				log.Error().Err(err).Str("thread_id", aliveThreadID).Msg("werewolf: failed to delete orphaned alive-discussion thread after game ended mid-creation")
+			}
+			return
+		}
 	}
 
 	cmd.runNightPhase(s, channelID, seq)
