@@ -326,11 +326,19 @@ func alivePlayers(game *werewolfGame) []*player {
 // hunterRevengeStep checks whether the player who just died (deadID) was
 // the Hunter with a locked-in target; if so, kills that target too
 // (unless already dead) and returns a copy of them. Returns nil if no
-// revenge-kill happens. Single-hop — applyDeathChains (the actual
-// production consumer of this primitive) loops it alongside
-// applyLoverDeathChain; applyHunterRevengeChain (below) is now just the
-// test-oracle wrapper that TestApplyDeathChainsNoLoversMatchesHunterRevengeChain
-// uses as a reference implementation. Must be called with cmd.mu held.
+// revenge-kill happens.
+//
+// Single-hop by design: applyDeathChains is the sole consumer and loops
+// this alongside applyLoverDeathChain, so a revenge kill that itself
+// triggers another chain is handled there rather than here.
+//
+// Note game.HunterTarget is a single game-scoped field, not per-Hunter.
+// With today's ratio tables and the manual role-pick cap that's moot
+// (exactly one Hunter is ever dealt), but if a second were ever dealt
+// they would share the one target: the already-dead guard above makes the
+// second resolution a safe no-op rather than a mis-kill.
+//
+// Must be called with cmd.mu held.
 func hunterRevengeStep(game *werewolfGame, deadID string) *player {
 	dead, ok := game.Players[deadID]
 	if !ok || dead.Role != roleHunter {
@@ -346,40 +354,6 @@ func hunterRevengeStep(game *werewolfGame, deadID string) *player {
 	}
 	target.Alive = false
 	return copyPlayer(target)
-}
-
-// applyHunterRevengeChain loops hunterRevengeStep starting from deadID.
-// After Task 5's refactor, every production death-application site calls
-// the unified applyDeathChains instead — this function has zero production
-// callers left. It is retained specifically as the behavior-preserving
-// reference implementation that TestApplyDeathChainsNoLoversMatchesHunterRevengeChain
-// uses to assert that applyDeathChains degenerates to this old Hunter-only
-// behavior whenever no lovers exist, not because any production code still
-// calls it directly.
-// Note: game.HunterTarget is a single game-scoped field, not per-Hunter,
-// so if a second Hunter were ever dealt (not possible with today's ratio
-// tables, which deal exactly one), this cannot produce a genuine
-// multi-Hunter chain — it would resolve the same shared target twice and
-// safely no-op the second time via the already-dead guard, never
-// mis-killing, but also never revenging more than once per invocation.
-// Must be called with cmd.mu held. Returns value-copy snapshots of
-// everyone killed, safe to read after unlocking — callers append these to
-// their own kill lists for alive-thread removal, win-condition re-checks,
-// and announcements.
-func applyHunterRevengeChain(game *werewolfGame, deadID string) []*player {
-	var revenged []*player
-	queue := []string{deadID}
-	for len(queue) > 0 {
-		id := queue[0]
-		queue = queue[1:]
-		target := hunterRevengeStep(game, id)
-		if target == nil {
-			continue
-		}
-		revenged = append(revenged, target)
-		queue = append(queue, target.UserID)
-	}
-	return revenged
 }
 
 // applyLoverDeathChain checks whether the player who just died (deadID)
@@ -430,10 +404,13 @@ type chainedDeath struct {
 // Hunter's revenge-kill and Cupid's lover-death, repeating until a pass
 // produces no new deaths. A revenge-killed or lover-killed player can
 // themselves be a Hunter with a locked target, or have a living lover, so
-// both chain types must be checked at every hop — this replaces every
-// direct call to applyHunterRevengeChain in the death-application sites
-// (resolveVote, checkAndHandleGameEnd, handleLeave, finalizeNightResolution)
-// with this unified resolver. Must be called with cmd.mu held.
+// both chain types must be checked at every hop.
+//
+// This is the single entry point every death-application site uses
+// (resolveVote, checkAndHandleGameEnd, handleLeave,
+// finalizeNightResolution) — there is deliberately no per-mechanic
+// variant, so a new chain type only has to be added here to apply
+// everywhere. Must be called with cmd.mu held.
 func applyDeathChains(game *werewolfGame, deadID string) []chainedDeath {
 	var result []chainedDeath
 	seen := map[string]bool{deadID: true}
@@ -457,8 +434,8 @@ func applyDeathChains(game *werewolfGame, deadID string) []chainedDeath {
 
 // splitChainedDeaths partitions applyDeathChains's result back into the
 // two announcement/recap shapes the existing call sites already expect
-// (hunterRevengeLine vs loverDeathLine, HunterRevengeLabel vs
-// LoverDeathLabel).
+// (hunterRevengeLine vs loverDeathLine, HunterRevengeLabels vs
+// LoverDeathLabels).
 func splitChainedDeaths(chained []chainedDeath) (hunterRevenged, loverDeaths []*player) {
 	for _, c := range chained {
 		switch c.Reason {

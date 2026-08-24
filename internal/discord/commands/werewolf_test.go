@@ -1957,7 +1957,15 @@ func TestWitchActionComponentsHealControlShape(t *testing.T) {
 	}
 }
 
-func TestApplyHunterRevengeChainTriggers(t *testing.T) {
+// hunterRevengeOf runs the production death-chain and returns just the
+// hunter-revenge kills, so these cases exercise applyDeathChains (the only
+// implementation) rather than a parallel test-only reimplementation of it.
+func hunterRevengeOf(game *werewolfGame, deadID string) []*player {
+	revenged, _ := splitChainedDeaths(applyDeathChains(game, deadID))
+	return revenged
+}
+
+func TestHunterRevengeTriggers(t *testing.T) {
 	game := &werewolfGame{
 		JoinOrder:    []string{"hunter1", "v1"},
 		HunterTarget: "v1",
@@ -1966,7 +1974,7 @@ func TestApplyHunterRevengeChainTriggers(t *testing.T) {
 			"v1":      {UserID: "v1", Label: "V1", Role: roleVillager, Alive: true},
 		},
 	}
-	revenged := applyHunterRevengeChain(game, "hunter1")
+	revenged := hunterRevengeOf(game, "hunter1")
 	if len(revenged) != 1 || revenged[0].UserID != "v1" {
 		t.Fatalf("expected v1 to be revenge-killed, got %v", revenged)
 	}
@@ -1975,7 +1983,7 @@ func TestApplyHunterRevengeChainTriggers(t *testing.T) {
 	}
 }
 
-func TestApplyHunterRevengeChainNoOpIfDeadPlayerNotHunter(t *testing.T) {
+func TestHunterRevengeNoOpIfDeadPlayerNotHunter(t *testing.T) {
 	game := &werewolfGame{
 		JoinOrder:    []string{"v1", "v2"},
 		HunterTarget: "v2",
@@ -1984,8 +1992,7 @@ func TestApplyHunterRevengeChainNoOpIfDeadPlayerNotHunter(t *testing.T) {
 			"v2": {UserID: "v2", Label: "V2", Role: roleVillager, Alive: true},
 		},
 	}
-	revenged := applyHunterRevengeChain(game, "v1")
-	if len(revenged) != 0 {
+	if revenged := hunterRevengeOf(game, "v1"); len(revenged) != 0 {
 		t.Fatalf("expected no revenge kill (v1 wasn't the Hunter), got %v", revenged)
 	}
 	if !game.Players["v2"].Alive {
@@ -1993,7 +2000,7 @@ func TestApplyHunterRevengeChainNoOpIfDeadPlayerNotHunter(t *testing.T) {
 	}
 }
 
-func TestApplyHunterRevengeChainNoOpIfNoTargetSet(t *testing.T) {
+func TestHunterRevengeNoOpIfNoTargetSet(t *testing.T) {
 	game := &werewolfGame{
 		JoinOrder:    []string{"hunter1", "v1"},
 		HunterTarget: "", // never picked a target
@@ -2002,13 +2009,15 @@ func TestApplyHunterRevengeChainNoOpIfNoTargetSet(t *testing.T) {
 			"v1":      {UserID: "v1", Label: "V1", Role: roleVillager, Alive: true},
 		},
 	}
-	revenged := applyHunterRevengeChain(game, "hunter1")
-	if len(revenged) != 0 {
+	if revenged := hunterRevengeOf(game, "hunter1"); len(revenged) != 0 {
 		t.Fatalf("expected no revenge kill (no target set), got %v", revenged)
+	}
+	if !game.Players["v1"].Alive {
+		t.Error("v1 should still be alive when the Hunter never picked a target")
 	}
 }
 
-func TestApplyHunterRevengeChainNoOpIfTargetAlreadyDead(t *testing.T) {
+func TestHunterRevengeNoOpIfTargetAlreadyDead(t *testing.T) {
 	game := &werewolfGame{
 		JoinOrder:    []string{"hunter1", "v1"},
 		HunterTarget: "v1",
@@ -2017,8 +2026,7 @@ func TestApplyHunterRevengeChainNoOpIfTargetAlreadyDead(t *testing.T) {
 			"v1":      {UserID: "v1", Label: "V1", Role: roleVillager, Alive: false}, // already dead some other way
 		},
 	}
-	revenged := applyHunterRevengeChain(game, "hunter1")
-	if len(revenged) != 0 {
+	if revenged := hunterRevengeOf(game, "hunter1"); len(revenged) != 0 {
 		t.Fatalf("expected no revenge kill (target already dead), got %v", revenged)
 	}
 }
@@ -2071,31 +2079,6 @@ func TestApplyDeathChainsComposesHunterAndLover(t *testing.T) {
 	}
 	if game.Players["t"].Alive || game.Players["l"].Alive {
 		t.Error("both t and l should be dead")
-	}
-}
-
-func TestApplyDeathChainsNoLoversMatchesHunterRevengeChain(t *testing.T) {
-	newGame := func() *werewolfGame {
-		return &werewolfGame{
-			HunterTarget: "t",
-			Players: map[string]*player{
-				"h": {UserID: "h", Label: "Hunter", Role: roleHunter, Alive: false},
-				"t": {UserID: "t", Label: "Target", Role: roleVillager, Alive: true},
-			},
-		}
-	}
-	legacy := applyHunterRevengeChain(newGame(), "h")
-	unified, loverDeaths := splitChainedDeaths(applyDeathChains(newGame(), "h"))
-	if len(loverDeaths) != 0 {
-		t.Fatalf("lover chain fired with no LoverIDs set: %+v", loverDeaths)
-	}
-	if len(legacy) != len(unified) {
-		t.Fatalf("applyDeathChains produced %d kills, applyHunterRevengeChain produced %d", len(unified), len(legacy))
-	}
-	for i := range legacy {
-		if legacy[i].UserID != unified[i].UserID {
-			t.Errorf("kill %d: got %q, want %q", i, unified[i].UserID, legacy[i].UserID)
-		}
 	}
 }
 
