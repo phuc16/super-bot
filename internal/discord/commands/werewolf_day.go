@@ -163,6 +163,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 		gameFound = true
 		game.Phase = phaseDayVote
 		game.Votes = make(map[string]string)
+		game.DayVoteClosed = false
 		for _, id := range game.JoinOrder {
 			if p := game.Players[id]; p.Alive {
 				alive = append(alive, p)
@@ -236,20 +237,33 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 }
 
 // validDayVotes filters votes down to voters who are still alive at
-// resolution time — mirrors validWolfVotes' rationale for the night wolf
-// vote: a player who cast a day-vote and then left (or died some other
-// way) before the window closed can no longer decide the lynch, so their
-// vote must not still count toward it. Does NOT affect the AFK-strike
-// check above (which reads the raw votes map over the currently-alive
-// roster) or the VoteBreakdown recap (which intentionally shows every
-// vote actually cast, for a transparent public record) — only the tally
-// that decides who gets lynched.
+// resolution time, AND drops any vote whose target has died/left before
+// the window closed — mirrors validWolfVotes' rationale for the night wolf
+// vote on both counts: a player who cast a day-vote and then left can no
+// longer decide the lynch, and a vote for someone who died some other way
+// before resolution can't silently cancel out an otherwise-decisive tally
+// (the caller re-tallies over what's left, so this naturally falls through
+// to the next-highest live candidate rather than voiding the lynch
+// outright). The skip sentinel is never filtered as a "target" here since
+// it isn't a player ID. Does NOT affect the AFK-strike check above (which
+// reads the raw votes map over the currently-alive roster) or the
+// VoteBreakdown recap (which intentionally shows every vote actually cast,
+// for a transparent public record) — only the tally that decides who gets
+// lynched.
 func validDayVotes(votes map[string]string, players map[string]*player) map[string]string {
 	valid := make(map[string]string, len(votes))
 	for voterID, targetID := range votes {
-		if voter, exists := players[voterID]; exists && voter.Alive {
-			valid[voterID] = targetID
+		voter, exists := players[voterID]
+		if !exists || !voter.Alive {
+			continue
 		}
+		if targetID != voteSkipValue {
+			target, exists := players[targetID]
+			if !exists || !target.Alive {
+				continue
+			}
+		}
+		valid[voterID] = targetID
 	}
 	return valid
 }
@@ -287,6 +301,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 				game.AFKStrikes[p.UserID]++
 			}
 		}
+		game.DayVoteClosed = true
 
 		top, tie := tallyVotes(validDayVotes(game.Votes, game.Players))
 		if !tie && len(top) == 1 {
@@ -360,10 +375,10 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		resultMsg = "🤷 Không đủ số phiếu áp đảo, không ai bị treo cổ hôm nay."
 	}
 	for _, p := range hunterRevenged {
-		resultMsg += "\n" + hunterRevengeLine(p)
+		resultMsg += "\n" + hunterRevengeLine(p, revealOnDeath)
 	}
 	for _, p := range loverDeaths {
-		resultMsg += "\n" + loverDeathLine(p)
+		resultMsg += "\n" + loverDeathLine(p, revealOnDeath)
 	}
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
@@ -399,6 +414,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		guildID         string
 		priorOverwrite  *discordgo.PermissionOverwrite
 		channelUnlocked bool
+		revealOnDeath   bool
 	)
 	func() {
 		cmd.mu.Lock()
@@ -412,6 +428,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		guildID = game.GuildID
 		priorOverwrite = game.PriorOverwrite
 		channelUnlocked = game.ChannelUnlocked
+		revealOnDeath = game.RevealOnDeath
 
 		for _, id := range game.JoinOrder {
 			p := game.Players[id]
@@ -469,10 +486,10 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 			cmd.announceAFKRemovals(s, channelID, removedNames)
 		}
 		if len(hunterRevenged) > 0 {
-			cmd.announceHunterRevenge(s, channelID, hunterRevenged)
+			cmd.announceHunterRevenge(s, channelID, hunterRevenged, revealOnDeath)
 		}
 		if len(loverDeaths) > 0 {
-			cmd.announceLoverDeaths(s, channelID, loverDeaths)
+			cmd.announceLoverDeaths(s, channelID, loverDeaths, revealOnDeath)
 		}
 		return false
 	}
@@ -505,10 +522,10 @@ func (cmd *WerewolfCommand) announceAFKRemovals(s *discordgo.Session, channelID 
 	}
 }
 
-func (cmd *WerewolfCommand) announceHunterRevenge(s *discordgo.Session, channelID string, revenged []*player) {
+func (cmd *WerewolfCommand) announceHunterRevenge(s *discordgo.Session, channelID string, revenged []*player, revealOnDeath bool) {
 	for _, p := range revenged {
 		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Content:         hunterRevengeLine(p),
+			Content:         hunterRevengeLine(p, revealOnDeath),
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		}); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to announce hunter revenge")
@@ -516,10 +533,10 @@ func (cmd *WerewolfCommand) announceHunterRevenge(s *discordgo.Session, channelI
 	}
 }
 
-func (cmd *WerewolfCommand) announceLoverDeaths(s *discordgo.Session, channelID string, lovers []*player) {
+func (cmd *WerewolfCommand) announceLoverDeaths(s *discordgo.Session, channelID string, lovers []*player, revealOnDeath bool) {
 	for _, p := range lovers {
 		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Content:         loverDeathLine(p),
+			Content:         loverDeathLine(p, revealOnDeath),
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		}); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to announce lover death")
@@ -566,7 +583,7 @@ func winnerNamesWithRoles(game *werewolfGame, result gameResult) string {
 	}
 	names := make([]string, 0, len(winners))
 	for _, p := range winners {
-		names = append(names, fmt.Sprintf("%s (%s)", p.Label, p.Role.label()))
+		names = append(names, fmt.Sprintf("%s (%s)", p.Label, displayRoleLabel(p)))
 	}
 	return strings.Join(names, ", ")
 }
@@ -606,7 +623,7 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 		if !p.Alive {
 			status = "đã chết"
 		}
-		fmt.Fprintf(&roles, "• %s — %s (%s)\n", p.Label, p.Role.label(), status)
+		fmt.Fprintf(&roles, "• %s — %s (%s)\n", p.Label, displayRoleLabel(p), status)
 	}
 
 	afkNote := ""
@@ -653,7 +670,7 @@ func formatRoundBlock(r roundLog) string {
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được bác sĩ cứu)", r.WolfTargetLabel)
 		case r.WitchSavedLabel != "":
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (được phù thủy cứu)", r.WolfTargetLabel)
-		case r.CursedWolfConverted != "":
+		case len(r.CursedWolfConverted) > 0:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s (nhưng đã biến thành Sói Nguyền, không chết)", r.WolfTargetLabel)
 		default:
 			fmt.Fprintf(&b, "\n🐺 Sói cắn: %s", r.WolfTargetLabel)
@@ -734,7 +751,7 @@ func (cmd *WerewolfCommand) handleVote(s *discordgo.Session, i *discordgo.Intera
 
 	cmd.mu.Lock()
 	game, ok := cmd.games[channelID]
-	if !ok || game.Phase != phaseDayVote {
+	if !ok || game.Phase != phaseDayVote || game.DayVoteClosed {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Vòng bỏ phiếu đã kết thúc rồi.")
 		return

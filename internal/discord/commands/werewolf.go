@@ -152,6 +152,26 @@ type player struct {
 	Role    role
 	Faction faction
 	Alive   bool
+	// DealtRole is the role assigned at deal time and never changed again —
+	// unlike Role, which promoteTraitorIfWolvesWiped mutates to
+	// roleWerewolf when the Traitor's promotion fires. Recap/reveal
+	// rendering reads this (via displayRoleLabel) instead of Role directly,
+	// so a promoted Traitor doesn't vanish from the game's own historical
+	// record as if they'd been dealt Werewolf all along — see the "Bob was
+	// correctly read as innocent by the Seer, then the final reveal calls
+	// him a Werewolf with no explanation" class of bug this prevents.
+	DealtRole role
+}
+
+// displayRoleLabel renders the role to show in end-of-game reveals and
+// recaps: p.Role.label() normally, but a promoted Traitor (DealtRole ==
+// roleTraitor, Role since mutated away from it) gets an annotated label
+// instead of silently reading as a plain Werewolf.
+func displayRoleLabel(p *player) string {
+	if p.DealtRole == roleTraitor && p.Role != roleTraitor {
+		return fmt.Sprintf("%s (từng là %s)", p.Role.label(), roleTraitor.label())
+	}
+	return p.Role.label()
 }
 
 // isWolf reports whether p currently counts as wolf-faction for win
@@ -257,7 +277,7 @@ func dealRoles(joinOrder []string, labels map[string]string, ratio roleRatio) ma
 		for k := 0; k < count; k++ {
 			id := shuffled[idx]
 			idx++
-			players[id] = &player{UserID: id, Label: labels[id], Role: r, Faction: factionForRole(r), Alive: true}
+			players[id] = &player{UserID: id, Label: labels[id], Role: r, DealtRole: r, Faction: factionForRole(r), Alive: true}
 		}
 	}
 	assign(ratio.Werewolves, roleWerewolf)
@@ -272,7 +292,7 @@ func dealRoles(joinOrder []string, labels map[string]string, ratio roleRatio) ma
 	assign(ratio.Cupids, roleCupid)
 	for ; idx < len(shuffled); idx++ {
 		id := shuffled[idx]
-		players[id] = &player{UserID: id, Label: labels[id], Role: roleVillager, Faction: factionForRole(roleVillager), Alive: true}
+		players[id] = &player{UserID: id, Label: labels[id], Role: roleVillager, DealtRole: roleVillager, Faction: factionForRole(roleVillager), Alive: true}
 	}
 	return players
 }
@@ -453,12 +473,12 @@ type roundLog struct {
 	SeerResult          role
 	VoteBreakdown       map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
 	LynchedLabel        string
-	HunterRevengeLabel  string // who died from Hunter's revenge this round, "" if it didn't trigger
-	LoverDeathLabel     string // who died from the lover-chain this round, "" if it didn't trigger
-	WitchSavedLabel     string // who the Witch healed this round, "" if she didn't heal
-	WitchPoisonedLabel  string // who the Witch poisoned this round, "" if she didn't poison
-	CursedWolfConverted string // label, if a not-saved Cursed Wolf converted to wolf-faction this round instead of dying
-	DisruptorMutedLabel string // who was muted for the following day-discuss, "" if the Disruptor didn't act (or doesn't exist) this round
+	HunterRevengeLabel  string   // who died from Hunter's revenge this round, "" if it didn't trigger
+	LoverDeathLabel     string   // who died from the lover-chain this round, "" if it didn't trigger
+	WitchSavedLabel     string   // who the Witch healed this round, "" if she didn't heal
+	WitchPoisonedLabel  string   // who the Witch poisoned this round, "" if she didn't poison
+	CursedWolfConverted []string // labels of every not-saved Cursed Wolf that converted to wolf-faction this round instead of dying — a slice since Cursed Wolf has no 1-per-game cap, so a bonus-bite round can convert 2+ in the same round
+	DisruptorMutedLabel string   // who was muted for the following day-discuss, "" if the Disruptor didn't act (or doesn't exist) this round
 
 	WolfBonusBite        bool     // this round used the Wolf-Cub bonus bite (2+ targets)
 	WolfBiteOutcomeLines []string // one pre-formatted line per resolved target this round, used only when WolfBonusBite is true — see formatRoundBlock
@@ -480,7 +500,7 @@ type werewolfGame struct {
 	JoinOrder                     []string                       // frozen once the game leaves phaseLobby
 	WolfThreadID                  string                         // the wolf-coordination thread, persists across the whole game once created (see startWolfThread) — "" only before the first night or after the game truly ends
 	WolfTargetMessageID           string                         // the target-select message in the wolf thread, live-edited as votes come in
-	WolfVotes                     map[string][]string            // wolfUserID -> target(s) this round, locked once cast — no re-voting. Normally 1 target; during a Wolf-Cub bonus-bite round each wolf may pick up to 1+WolfBonusBiteNextNight (captured at picker-build time) targets in one select, each counting as a separate vote toward that target in tallyWolfVotes
+	WolfVotes                     map[string][]string            // wolfUserID -> target(s) this round, locked once cast — no re-voting. Normally 1 target; during a Wolf-Cub bonus-bite round each wolf may pick up to 1+WolfBonusBiteActiveThisRound targets in one select, each counting as a separate vote toward that target in tallyWolfVotes
 	SeerActed                     bool                           // whether the seer has acted this round
 	SeerTarget                    string                         // who the seer checked this round, "" if SeerActed is false
 	SeerResult                    role                           // that check's result — meaningless if SeerTarget == ""
@@ -496,10 +516,12 @@ type werewolfGame struct {
 	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2+-target case, chosen via the select menu in handleWitchHeal)
 	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
 	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
-	WolfBonusBiteNextNight        int                            // extra kill target(s) armed for the next night's wolf vote, beyond the base 1 — incremented once per Wolf Cub death (any cause) so 2+ Wolf Cubs dying the same round compound correctly; consumed (reset to 0) at the start of the next night's wolf-vote resolution
+	WolfBonusBiteNextNight        int                            // extra kill target(s) armed for a FUTURE night's wolf vote, beyond the base 1 — incremented once per Wolf Cub death (any cause) so 2+ Wolf Cubs dying the same round compound correctly. Deliberately NOT read directly by the picker/tally — see WolfBonusBiteActiveThisRound, which snapshots this at night-open so a Wolf Cub death arriving mid-night (e.g. via /werewolf leave) can't retroactively change the bonus for the vote already in progress
+	WolfBonusBiteActiveThisRound  int                            // snapshot of WolfBonusBiteNextNight taken once at the start of runNightPhase, then immediately zeroing the live counter — this is what the picker's MaxValues and resolveNight's topN both read for the round, so they always agree with each other and can't be changed by an arming event mid-round; any new arming during the round accrues in WolfBonusBiteNextNight for the round after this one
 	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2+ if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a bonus-bite select-menu pick, reset each round in runNightPhase
 	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
 	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor/disruptor/hunter handlers against a late click landing during the Witch's stage-2 window. Does NOT gate the Witch's own handlers, which have their own WitchActedThisRound/WitchPromptedThisRound gating for that same window.
+	DayVoteClosed                 bool                           // reset false at the start of each day-vote round (runDayVote); set true once resolveVote's locked block has tallied and applied the lynch — gates handleVote against a late click landing during resolveVote's post-unlock cleanup/messaging/win-check work, mirroring NightActionsClosed for the day-vote side
 	Votes                         map[string]string              // voterID -> targetID, reset each day
 	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
 	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
@@ -929,9 +951,29 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		respondError(s, i, "Không thể khoá kênh để bắt đầu ván Ma Sói, thử lại sau.")
 		return
 	}
-	cmd.mu.Lock()
-	game.PriorOverwrite = priorOverwrite
-	cmd.mu.Unlock()
+	stillCurrent := false
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		if cur, ok := cmd.games[i.ChannelID]; ok && cur == game {
+			game.PriorOverwrite = priorOverwrite
+			stillCurrent = true
+		}
+	}()
+	if !stillCurrent {
+		// Same race the wolf/alive-thread fixes guard against, applied to
+		// the channel-lock permission overwrite instead of a thread: the
+		// game was force-stopped/cancelled/ended in the window between
+		// lockChannelToBotOnly's REST call landing and re-acquiring the
+		// lock to record its result. Nobody else knows the correct
+		// priorOverwrite (it was never written to game state), so restore
+		// it here immediately — otherwise the channel is left permanently
+		// denied SEND_MESSAGES with no game in the map to undo it, and the
+		// next /werewolf start in this channel would capture that leaked
+		// deny as ITS OWN "prior" state.
+		unlockChannel(s, i.GuildID, i.ChannelID, priorOverwrite)
+		return
+	}
 
 	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -954,9 +996,18 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
-	cmd.mu.Lock()
-	game.MessageID = msg.ID
-	cmd.mu.Unlock()
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		// Guard by identity, same as the PriorOverwrite write above: if the
+		// game was force-stopped/cancelled in this window, force-stop
+		// already correctly unlocked the channel (PriorOverwrite was
+		// recorded before this point), so there's nothing left to undo —
+		// just skip writing into a game struct nobody will read again.
+		if cur, ok := cmd.games[i.ChannelID]; ok && cur == game {
+			game.MessageID = msg.ID
+		}
+	}()
 }
 
 func (cmd *WerewolfCommand) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -1083,10 +1134,10 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 		msg = fmt.Sprintf("💨 **%s** đã rời ván. Vai trò: %s.", leftPlayer.Label, leftPlayer.Role.label())
 	}
 	for _, hp := range hunterRevenged {
-		msg += "\n" + hunterRevengeLine(hp)
+		msg += "\n" + hunterRevengeLine(hp, revealOnDeath)
 	}
 	for _, lp := range loverDeaths {
-		msg += "\n" + loverDeathLine(lp)
+		msg += "\n" + loverDeathLine(lp, revealOnDeath)
 	}
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         msg,
@@ -1211,6 +1262,76 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 // in-flight goroutine: the whole night/day phase chain already checks
 // cmd.gameIfCurrent(channelID, seq) before acting and quietly returns once
 // that lookup fails, exactly as it does when a game ends normally.
+// gameTeardownInfo captures everything needed to clean up a game's Discord
+// side-effects (threads, channel lock) after it's already been removed
+// from cmd.games. Shared by handleForceStop (one game, admin-triggered)
+// and Shutdown (every game, process-exit-triggered) so both paths clean up
+// identically instead of duplicating the same three steps.
+type gameTeardownInfo struct {
+	channelID       string
+	threadID        string
+	aliveThreadID   string
+	guildID         string
+	priorOverwrite  *discordgo.PermissionOverwrite
+	channelUnlocked bool
+}
+
+func gameTeardownInfoFor(channelID string, game *werewolfGame) gameTeardownInfo {
+	return gameTeardownInfo{
+		channelID:       channelID,
+		threadID:        game.WolfThreadID,
+		aliveThreadID:   game.AliveThreadID,
+		guildID:         game.GuildID,
+		priorOverwrite:  game.PriorOverwrite,
+		channelUnlocked: game.ChannelUnlocked,
+	}
+}
+
+func teardownGame(s *discordgo.Session, info gameTeardownInfo) {
+	if info.threadID != "" {
+		if _, err := s.ChannelDelete(info.threadID); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread during teardown")
+		}
+	}
+	if info.aliveThreadID != "" {
+		if _, err := s.ChannelDelete(info.aliveThreadID); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread during teardown")
+		}
+	}
+	if !info.channelUnlocked {
+		unlockChannel(s, info.guildID, info.channelID, info.priorOverwrite)
+	}
+}
+
+// Shutdown tears down every in-flight game's Discord side-effects (wolf/
+// alive-discussion threads, channel lock) before the process exits.
+// Without this, a game mid-flight when the bot is redeployed (e.g.
+// `docker exec all-in-one supervisorctl restart <service>`) leaves its
+// channel permanently denied SEND_MESSAGES for @everyone with no game left
+// in memory to fix it via /werewolf force-stop — and the next
+// /werewolf start in that channel would capture the leaked deny as ITS OWN
+// "prior" state, making the lock self-perpetuating across every future
+// game in that channel. Safe to call with zero games running (no-op).
+func (cmd *WerewolfCommand) Shutdown(s *discordgo.Session) {
+	cmd.mu.Lock()
+	infos := make([]gameTeardownInfo, 0, len(cmd.games))
+	for channelID, game := range cmd.games {
+		infos = append(infos, gameTeardownInfoFor(channelID, game))
+	}
+	cmd.games = make(map[string]*werewolfGame)
+	cmd.mu.Unlock()
+
+	for _, info := range infos {
+		teardownGame(s, info)
+		if _, err := s.ChannelMessageSendComplex(info.channelID, &discordgo.MessageSend{
+			Content:         "🛑 Bot khởi động lại — ván Ma Sói đang chạy trong kênh này đã bị huỷ, kênh đã được mở khoá.",
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
+			log.Error().Err(err).Str("channel_id", info.channelID).Msg("werewolf: failed to announce shutdown teardown")
+		}
+	}
+}
+
 func (cmd *WerewolfCommand) handleForceStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if !hasAdminPermission(i.Member) {
 		respondError(s, i, "❌ Chỉ quản trị viên (Administrator hoặc Manage Server) mới được dùng lệnh này.")
@@ -1225,27 +1346,11 @@ func (cmd *WerewolfCommand) handleForceStop(s *discordgo.Session, i *discordgo.I
 		respondError(s, i, "Không có ván Ma Sói nào đang chạy trong kênh này.")
 		return
 	}
-	threadID := game.WolfThreadID
-	aliveThreadID := game.AliveThreadID
-	guildID := game.GuildID
-	priorOverwrite := game.PriorOverwrite
-	channelUnlocked := game.ChannelUnlocked
+	info := gameTeardownInfoFor(channelID, game)
 	delete(cmd.games, channelID)
 	cmd.mu.Unlock()
 
-	if threadID != "" {
-		if _, err := s.ChannelDelete(threadID); err != nil {
-			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread on force-stop")
-		}
-	}
-	if aliveThreadID != "" {
-		if _, err := s.ChannelDelete(aliveThreadID); err != nil {
-			log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread on force-stop")
-		}
-	}
-	if !channelUnlocked {
-		unlockChannel(s, guildID, channelID, priorOverwrite)
-	}
+	teardownGame(s, info)
 
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,

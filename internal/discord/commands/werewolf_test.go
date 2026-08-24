@@ -356,6 +356,33 @@ func TestAlivePlayersIncludesEveryoneEvenSelf(t *testing.T) {
 	}
 }
 
+func TestAliveWolfBiteTargetsIncludesTraitor(t *testing.T) {
+	// Regression for the code-review finding: excluding the Traitor from
+	// the wolf pack's bite-target menu let the pack identify them by pure
+	// elimination (public alive count minus wolf-thread headcount minus
+	// menu size == exactly the Traitor). The wolves don't know who the
+	// Traitor is, so the Traitor must appear as a normal, bitable target.
+	game := &werewolfGame{
+		JoinOrder: []string{"wolf", "traitor", "villager"},
+		Players: map[string]*player{
+			"wolf":     {UserID: "wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"traitor":  {UserID: "traitor", Role: roleTraitor, Faction: factionWolf, Alive: true},
+			"villager": {UserID: "villager", Role: roleVillager, Faction: factionVillager, Alive: true},
+		},
+	}
+	got := aliveWolfBiteTargets(game)
+	ids := map[string]bool{}
+	for _, p := range got {
+		ids[p.UserID] = true
+	}
+	if len(got) != 2 || !ids["traitor"] || !ids["villager"] {
+		t.Errorf("aliveWolfBiteTargets() = %v, want exactly [traitor, villager] — the Traitor must be a valid, visible bite target", got)
+	}
+	if ids["wolf"] {
+		t.Error("aliveWolfBiteTargets() must not include an actual wolf-vote-participant")
+	}
+}
+
 func TestValidDayVotesDropsVotesFromDeadOrGoneVoters(t *testing.T) {
 	players := map[string]*player{
 		"a": {UserID: "a", Alive: true},
@@ -406,6 +433,45 @@ func TestValidDayVotesStaleVoteCannotFlipLynchOutcome(t *testing.T) {
 	// assertion is that only 1 valid vote reaches the tally, not 2.
 	if got := len(validDayVotes(votes, players)); got != 1 {
 		t.Errorf("validDayVotes(...) returned %d votes, want exactly 1 (a's stale vote must be dropped)", got)
+	}
+}
+
+func TestValidDayVotesFallsThroughToRunnerUpWhenLeaderLeaves(t *testing.T) {
+	// Regression for the code-review finding: Alice draws the plurality
+	// (3 votes), then leaves mid-window before resolution. Without
+	// filtering dead TARGETS, the tally would still return Alice as the
+	// sole top candidate, the alive-check on her would fail, and the
+	// decisive lynch would be silently voided instead of falling through
+	// to Bob, the obvious runner-up.
+	players := map[string]*player{
+		"alice": {UserID: "alice", Alive: false}, // left mid-vote
+		"bob":   {UserID: "bob", Alive: true},
+		"v1":    {UserID: "v1", Alive: true},
+		"v2":    {UserID: "v2", Alive: true},
+		"v3":    {UserID: "v3", Alive: true},
+	}
+	votes := map[string]string{
+		"v1": "alice", "v2": "alice", "v3": "alice",
+		"bob": "bob",
+		// a 5th voter's ballot is irrelevant here; 3 votes for alice vs 1 for bob
+	}
+	top, tie := tallyVotes(validDayVotes(votes, players))
+	if tie || len(top) != 1 || top[0] != "bob" {
+		t.Errorf("tallyVotes(validDayVotes(...)) = %v, %v — want bob alone once alice's votes are dropped as a dead target", top, tie)
+	}
+}
+
+func TestValidDayVotesDropsVoteForDeadTargetKeepsSkipUntouched(t *testing.T) {
+	// The skip sentinel must never be treated as a "target" to validate —
+	// it isn't a player ID, so looking it up in players would always fail
+	// and incorrectly drop every skip vote.
+	players := map[string]*player{
+		"v1": {UserID: "v1", Alive: true},
+	}
+	votes := map[string]string{"v1": voteSkipValue}
+	got := validDayVotes(votes, players)
+	if len(got) != 1 || got["v1"] != voteSkipValue {
+		t.Errorf("validDayVotes(...) = %v, want the skip vote preserved", got)
 	}
 }
 
@@ -591,8 +657,41 @@ func TestResolveWolfBiteOutcome(t *testing.T) {
 	}
 }
 
+func TestHunterRevengeLineRespectsRevealOnDeath(t *testing.T) {
+	p := &player{Label: "Alice", Role: roleHunter}
+	revealed := hunterRevengeLine(p, true)
+	if !strings.Contains(revealed, "Thợ Săn") {
+		t.Errorf("hunterRevengeLine(revealOnDeath=true) = %q, want it to name the mechanism", revealed)
+	}
+	hidden := hunterRevengeLine(p, false)
+	if strings.Contains(hidden, "Thợ Săn") {
+		t.Errorf("hunterRevengeLine(revealOnDeath=false) = %q, must not reveal the Hunter role", hidden)
+	}
+	if !strings.Contains(hidden, "Alice") {
+		t.Errorf("hunterRevengeLine(revealOnDeath=false) = %q, still must name who died", hidden)
+	}
+}
+
+func TestLoverDeathLineRespectsRevealOnDeath(t *testing.T) {
+	p := &player{Label: "Bob", Role: roleVillager}
+	revealed := loverDeathLine(p, true)
+	if !strings.Contains(revealed, "người yêu") {
+		t.Errorf("loverDeathLine(revealOnDeath=true) = %q, want it to name the mechanism", revealed)
+	}
+	hidden := loverDeathLine(p, false)
+	if strings.Contains(hidden, "người yêu") {
+		t.Errorf("loverDeathLine(revealOnDeath=false) = %q, must not reveal the lover pairing/Cupid", hidden)
+	}
+	if !strings.Contains(hidden, "Bob") {
+		t.Errorf("loverDeathLine(revealOnDeath=false) = %q, still must name who died", hidden)
+	}
+	if hidden != hunterRevengeLine(&player{Label: "Bob"}, false) {
+		t.Error("hunterRevengeLine and loverDeathLine must render IDENTICAL text when revealOnDeath=false, so the fallback wording itself can't hint at which mechanism caused the chained death")
+	}
+}
+
 func TestFormatRoundBlockCursedWolfConverted(t *testing.T) {
-	r := roundLog{Round: 2, WolfTargetLabel: "Chi", CursedWolfConverted: "Chi"}
+	r := roundLog{Round: 2, WolfTargetLabel: "Chi", CursedWolfConverted: []string{"Chi"}}
 	got := formatRoundBlock(r)
 	if !strings.Contains(got, "biến thành Sói Nguyền") {
 		t.Errorf("formatRoundBlock() = %q, want it to mention the conversion", got)
@@ -602,14 +701,26 @@ func TestFormatRoundBlockCursedWolfConverted(t *testing.T) {
 	}
 }
 
-// TestWitchHasChoicePredicate exercises the same boolean formula used
-// (inline, under cmd.mu) in resolveNight to decide whether to prompt/wait
-// on the Witch at all. The formula itself is tightly coupled to the locked
-// closure in resolveNight and reads live game state, so it isn't extracted
-// into a standalone function — instead this test derives the expected value
-// from witchActionComponents' actual rendering (the ground truth for "does
-// she have anything clickable beyond skip") and checks the formula matches
-// it across the full truth table of (healUsed, poisonUsed, hasBiteTarget).
+func TestCursedWolfConvertedRecordsBothInABonusRound(t *testing.T) {
+	// Regression: CursedWolfConverted used to be a single string,
+	// overwritten per target — a bonus-bite round converting 2 Cursed
+	// Wolves in the same round would silently lose the first one from the
+	// recap. Cursed Wolf has no 1-per-game cap, so this is reachable.
+	var converted []string
+	converted = append(converted, "Alice")
+	converted = append(converted, "Bob")
+	r := roundLog{Round: 4, CursedWolfConverted: converted}
+	if len(r.CursedWolfConverted) != 2 || r.CursedWolfConverted[0] != "Alice" || r.CursedWolfConverted[1] != "Bob" {
+		t.Errorf("CursedWolfConverted = %v, want both Alice and Bob preserved", r.CursedWolfConverted)
+	}
+}
+
+// TestWitchHasChoicePredicate checks witchHasChoiceLeft (shared by
+// resolveNight's prompt/wait decision and by handleWitchHeal/
+// handleWitchPoison's "does she still have another action" check) against
+// witchActionComponents' actual rendering — the ground truth for "does she
+// have anything clickable beyond skip" — across the full truth table of
+// (healUsed, poisonUsed, hasBiteTarget).
 func TestWitchHasChoicePredicate(t *testing.T) {
 	someTarget := &player{UserID: "u2", Label: "Bob"}
 	cases := []struct {
@@ -625,13 +736,13 @@ func TestWitchHasChoicePredicate(t *testing.T) {
 		{true, true, false},
 	}
 	for _, c := range cases {
-		var resolvedTargets []string
 		var biteTargets []*player
+		biteCount := 0
 		if c.hasBite {
-			resolvedTargets = []string{"u2"}
 			biteTargets = []*player{someTarget}
+			biteCount = 1
 		}
-		hasChoice := !c.poisonUsed || (!c.healUsed && len(resolvedTargets) > 0)
+		hasChoice := witchHasChoiceLeft(c.poisonUsed, c.healUsed, biteCount)
 
 		_ = witchActionComponents("chan", biteTargets, c.healUsed, c.poisonUsed, []*player{someTarget})
 		rendersPoisonRow := !c.poisonUsed
@@ -642,6 +753,22 @@ func TestWitchHasChoicePredicate(t *testing.T) {
 			t.Errorf("case %+v: hasChoice=%v but witchActionComponents would render a choice=%v (poison row=%v, heal button=%v)",
 				c, hasChoice, wouldRenderChoice, rendersPoisonRow, rendersHealButton)
 		}
+	}
+}
+
+func TestWitchHasChoiceLeftAllowsBothPotionsSameNight(t *testing.T) {
+	// Regression: using one potion must not report "no choice left" while
+	// the other potion is still unused and there's a bite target to heal —
+	// heal and poison are independent, once-per-game items usable together
+	// the same night.
+	if !witchHasChoiceLeft(false, true, 1) {
+		t.Error("witchHasChoiceLeft(poisonUsed=false, healUsed=true, biteTargetCount=1) = false, want true — poison is still available")
+	}
+	if !witchHasChoiceLeft(true, false, 1) {
+		t.Error("witchHasChoiceLeft(poisonUsed=true, healUsed=false, biteTargetCount=1) = false, want true — heal is still available")
+	}
+	if witchHasChoiceLeft(true, true, 1) {
+		t.Error("witchHasChoiceLeft(poisonUsed=true, healUsed=true, biteTargetCount=1) = true, want false — both potions spent")
 	}
 }
 
@@ -821,6 +948,37 @@ func TestTallyWolfVotesSingleWolfPicksTwoInOneVote(t *testing.T) {
 	}
 }
 
+func TestTallyWolfVotesTwoWolvesUnanimousMultiPick(t *testing.T) {
+	// Regression: a genuinely-coordinated 2-wolf pack that BOTH multi-select
+	// the exact same 2 targets must not be treated as tied-and-ambiguous —
+	// there are exactly 2 slots and exactly 2 named targets, so this is
+	// agreement, not indecision, and both must die.
+	votes := map[string][]string{"w1": {"x", "y"}, "w2": {"x", "y"}}
+	targets, ok := tallyWolfVotes(votes, 2)
+	if !ok {
+		t.Fatal("expected ok=true for a fully unanimous 2-wolf multi-pick")
+	}
+	got := map[string]bool{}
+	for _, tgt := range targets {
+		got[tgt] = true
+	}
+	if len(targets) != 2 || !got["x"] || !got["y"] {
+		t.Errorf("expected both x and y from a unanimous 2-wolf 2-pick vote, got %v", targets)
+	}
+}
+
+func TestTallyWolfVotesThreeWayEvenSplitStillTies(t *testing.T) {
+	// A true 3-way tie for 2 slots (3 candidates each with 1 supporter,
+	// more rivals than room) must still yield zero kills — this is the
+	// genuinely ambiguous case the tie-break exists to protect, not
+	// resolved by the "fits within remaining slots" shortcut.
+	votes := map[string][]string{"w1": {"a"}, "w2": {"b"}, "w3": {"c"}}
+	targets, ok := tallyWolfVotes(votes, 2)
+	if ok || len(targets) != 0 {
+		t.Errorf("expected a 3-way even split for 2 slots to tie with zero kills, got %v, %v", targets, ok)
+	}
+}
+
 func TestValidWolfVotesDropsDeadVoter(t *testing.T) {
 	aliveWolves := []*player{
 		{UserID: "wolf1", Alive: true},
@@ -945,6 +1103,42 @@ func TestApplyWolfCubBonusBiteFlagCompoundsForMultipleWolfCubs(t *testing.T) {
 	applyWolfCubBonusBiteFlag(game, []string{"cub1", "cub2"})
 	if game.WolfBonusBiteNextNight != 2 {
 		t.Errorf("two Wolf Cubs dying the same round must arm 2 bonus targets, got %d", game.WolfBonusBiteNextNight)
+	}
+}
+
+func TestWolfBonusBiteArmedMidRoundDoesNotAffectActiveRound(t *testing.T) {
+	// Regression: a Wolf Cub death arriving mid-night (e.g. /werewolf leave,
+	// which permits leaving during phaseNight) must arm the bonus for the
+	// NEXT night, not retroactively change the vote already in progress.
+	// runNightPhase's snapshot-and-clear step is what this test exercises
+	// directly: WolfBonusBiteActiveThisRound is what the picker/tally read,
+	// and it must be unaffected by a later WolfBonusBiteNextNight increment.
+	game := &werewolfGame{
+		Players: map[string]*player{
+			"cub1": {UserID: "cub1", Role: roleWolfCub, Alive: true},
+		},
+	}
+
+	// Night opens: nothing armed yet.
+	game.WolfBonusBiteActiveThisRound = game.WolfBonusBiteNextNight
+	game.WolfBonusBiteNextNight = 0
+	if game.WolfBonusBiteActiveThisRound != 0 {
+		t.Fatalf("night should open with no bonus active, got %d", game.WolfBonusBiteActiveThisRound)
+	}
+
+	// Mid-round: the Wolf Cub leaves, arming the bonus.
+	game.Players["cub1"].Alive = false
+	applyWolfCubBonusBiteFlag(game, []string{"cub1"})
+
+	// The round already in progress must still see zero active bonus...
+	if game.WolfBonusBiteActiveThisRound != 0 {
+		t.Errorf("mid-round arming must not affect the round already open, got active=%d", game.WolfBonusBiteActiveThisRound)
+	}
+	// ...while the NEXT night's snapshot picks it up correctly.
+	nextActive := game.WolfBonusBiteNextNight
+	game.WolfBonusBiteNextNight = 0
+	if nextActive != 1 {
+		t.Errorf("the bonus armed mid-round must carry over to the next night, got %d", nextActive)
 	}
 }
 
@@ -1429,6 +1623,52 @@ func TestWinnerNamesWithRolesWerewolvesWin(t *testing.T) {
 	}
 }
 
+func TestDisplayRoleLabelAnnotatesPromotedTraitor(t *testing.T) {
+	// Regression: promoteTraitorIfWolvesWiped mutates Role to roleWerewolf
+	// in place, which would otherwise erase the Traitor from the end-game
+	// reveal entirely (printing "Ma Sói" as if they'd been dealt Werewolf
+	// all along). DealtRole preserves what they actually started as.
+	promoted := &player{Label: "Bob", Role: roleWerewolf, DealtRole: roleTraitor}
+	got := displayRoleLabel(promoted)
+	want := "Ma Sói (từng là Kẻ Phản Bội)"
+	if got != want {
+		t.Errorf("displayRoleLabel(promoted traitor) = %q, want %q", got, want)
+	}
+}
+
+func TestDisplayRoleLabelUnchangedForEveryoneElse(t *testing.T) {
+	cases := []struct {
+		name string
+		p    *player
+	}{
+		{"never-promoted traitor", &player{Role: roleTraitor, DealtRole: roleTraitor}},
+		{"plain werewolf", &player{Role: roleWerewolf, DealtRole: roleWerewolf}},
+		{"converted cursed wolf (Role unchanged, only Faction flips)", &player{Role: roleCursedWolf, DealtRole: roleCursedWolf, Faction: factionWolf}},
+		{"villager", &player{Role: roleVillager, DealtRole: roleVillager}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := displayRoleLabel(c.p); got != c.p.Role.label() {
+				t.Errorf("displayRoleLabel() = %q, want plain %q", got, c.p.Role.label())
+			}
+		})
+	}
+}
+
+func TestWinnerNamesWithRolesAnnotatesPromotedTraitor(t *testing.T) {
+	game := &werewolfGame{
+		JoinOrder: []string{"bob"},
+		Players: map[string]*player{
+			"bob": {UserID: "bob", Label: "Bob", Role: roleWerewolf, DealtRole: roleTraitor, Faction: factionWolf, Alive: true},
+		},
+	}
+	got := winnerNamesWithRoles(game, resultWerewolvesWin)
+	want := "Bob (Ma Sói (từng là Kẻ Phản Bội))"
+	if got != want {
+		t.Errorf("winnerNamesWithRoles() = %q, want %q — a promoted Traitor must not read as a plain Werewolf in the winner list", got, want)
+	}
+}
+
 func TestWinnerNamesWithRolesVillagersWin(t *testing.T) {
 	game := &werewolfGame{
 		JoinOrder: []string{"w1", "v1", "seer1"},
@@ -1533,6 +1773,32 @@ func TestDMRoleRevealContentIncludesWinCondition(t *testing.T) {
 	}
 }
 
+func TestShutdownNoOpWithZeroGames(t *testing.T) {
+	// Shutdown must be safe to call even when no games are running (the
+	// common case — most redeploys don't catch a game mid-flight) without
+	// touching the session at all, since a nil session here would panic if
+	// Shutdown tried to call any Discord API method.
+	cmd := &WerewolfCommand{games: make(map[string]*werewolfGame)}
+	cmd.Shutdown(nil)
+	if len(cmd.games) != 0 {
+		t.Errorf("games map = %v, want empty", cmd.games)
+	}
+}
+
+func TestGameTeardownInfoForCapturesGameState(t *testing.T) {
+	game := &werewolfGame{
+		WolfThreadID:    "wolf-thread",
+		AliveThreadID:   "alive-thread",
+		GuildID:         "guild1",
+		ChannelUnlocked: true,
+	}
+	info := gameTeardownInfoFor("chan1", game)
+	if info.channelID != "chan1" || info.threadID != "wolf-thread" || info.aliveThreadID != "alive-thread" ||
+		info.guildID != "guild1" || !info.channelUnlocked {
+		t.Errorf("gameTeardownInfoFor() = %+v, did not faithfully capture the game's teardown-relevant fields", info)
+	}
+}
+
 func TestWerewolfDefinitionHasCustomRolesOption(t *testing.T) {
 	cmd := WerewolfCmd
 	def := cmd.Definition()
@@ -1602,6 +1868,10 @@ func TestRoleCountConfirmValid(t *testing.T) {
 		{"no villager side", map[role]int{roleWerewolf: 7}, 7, false},
 		{"cursed wolf alone is not enough — no wolf-vote-participant", map[role]int{roleCursedWolf: 1, roleVillager: 6}, 7, false},
 		{"werewolf plus cursed wolf is valid", map[role]int{roleWerewolf: 1, roleCursedWolf: 1, roleVillager: 5}, 7, true},
+		{"wolf faction at half the roster is an instant loss, rejected", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5, false},
+		{"wolf faction just under half is valid", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5, true},
+		{"traitor counts toward the wolf-faction floor too", map[role]int{roleWerewolf: 2, roleTraitor: 1, roleVillager: 2}, 5, false},
+		{"cursed wolf does NOT count toward the wolf-faction floor (deals villager-faction)", map[role]int{roleWerewolf: 2, roleCursedWolf: 2, roleVillager: 1}, 5, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -121,6 +121,12 @@ func run() error {
 	<-stop
 
 	log.Info().Msg("Shutting down gracefully...")
+	// Tear down every in-flight werewolf game's Discord side-effects
+	// (threads, channel lock) BEFORE the session closes — otherwise a game
+	// mid-flight at redeploy time leaves its channel permanently denied
+	// SEND_MESSAGES with nothing left in memory to fix it. Must run before
+	// discordClient.Close() (deferred above) since it needs a live session.
+	commands.WerewolfCmd.Shutdown(discordClient.Session)
 	logger.LogMetricsSummary()
 	storage.LogConnectionStats()
 	taskScheduler.Stop()

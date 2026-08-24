@@ -134,7 +134,17 @@ func roleCountConfirmValid(counts map[role]int, playerCount int) bool {
 		villagerSide += counts[r]
 	}
 	wolfVoteParticipants := counts[roleWerewolf] + counts[roleWolfCub]
-	return wolfSide+villagerSide == playerCount && wolfSide >= 1 && villagerSide >= 1 && wolfVoteParticipants >= 1
+	// Faction balance floor: checkWinCondition declares a wolf win the
+	// instant aliveWolves >= aliveOthers, so a custom setup that already
+	// meets that bar at deal time is an instant, guaranteed loss for the
+	// village before night 1 even resolves — no day discussion or vote
+	// ever happens. Computed from wolf-FACTION membership (factionForRole),
+	// not the UI's wolfSide grouping above: Cursed Wolf is grouped into
+	// wolfSide for the editor's display, but deals as villager-faction
+	// until it actually converts, so it must NOT count toward this floor.
+	wolfFaction := counts[roleWerewolf] + counts[roleWolfCub] + counts[roleTraitor]
+	return wolfSide+villagerSide == playerCount && wolfSide >= 1 && villagerSide >= 1 &&
+		wolfVoteParticipants >= 1 && wolfFaction*2 < playerCount
 }
 
 // roleRatioFromCounts converts the editor's counts into a roleRatio for
