@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -756,6 +757,65 @@ func TestWitchHasChoicePredicate(t *testing.T) {
 	}
 }
 
+func TestHealableBiteTargetCount(t *testing.T) {
+	cases := []struct {
+		name        string
+		biteTargets []string
+		poisonID    string
+		want        int
+	}{
+		{"no poison yet, all bite targets healable", []string{"a", "b"}, "", 2},
+		{"poisoned a non-bite-target, all still healable", []string{"a", "b"}, "z", 2},
+		{"poisoned one of two bite targets, other still healable", []string{"a", "b"}, "a", 1},
+		{"poisoned the lone bite target, none healable", []string{"a"}, "a", 0},
+		{"no bite targets at all", nil, "", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := healableBiteTargetCount(c.biteTargets, c.poisonID); got != c.want {
+				t.Errorf("healableBiteTargetCount(%v, %q) = %d, want %d", c.biteTargets, c.poisonID, got, c.want)
+			}
+		})
+	}
+}
+
+func TestWitchTurnClosesAfterPoisoningTheLoneBiteTarget(t *testing.T) {
+	// Regression: poisoning the only bite target makes heal unreachable
+	// (handleWitchHeal refuses to heal someone she poisoned), so her turn
+	// MUST be treated as over. Reading the raw bite-target count here
+	// instead of the healable count left her turn "open" with only a
+	// button guaranteed to error, stalling the whole night for the full
+	// witchActionWindow every such round.
+	const loneTarget = "victim"
+	biteTargets := []string{loneTarget}
+
+	// She has just poisoned the lone bite target; heal is still unused.
+	healable := healableBiteTargetCount(biteTargets, loneTarget)
+	if witchHasChoiceLeft(true /*poisonUsed*/, false /*healUsed*/, healable) {
+		t.Error("witch should have NO choice left after poisoning the only bite target — heal is unreachable, so her turn must close")
+	}
+
+	// Contrast: poisoning someone who ISN'T the bite target must leave
+	// heal available and her turn open.
+	healableOther := healableBiteTargetCount(biteTargets, "someone-else")
+	if !witchHasChoiceLeft(true, false, healableOther) {
+		t.Error("witch should still have heal available after poisoning a non-bite-target")
+	}
+}
+
+func TestWitchTurnStaysOpenAfterPoisoningOneOfTwoBiteTargets(t *testing.T) {
+	// Bonus-bite round: poisoning one bite target must still leave the
+	// OTHER one healable, keeping her turn open for that second action.
+	biteTargets := []string{"a", "b"}
+	healable := healableBiteTargetCount(biteTargets, "a")
+	if healable != 1 {
+		t.Fatalf("healableBiteTargetCount = %d, want 1", healable)
+	}
+	if !witchHasChoiceLeft(true /*poisonUsed*/, false /*healUsed*/, healable) {
+		t.Error("witch should still be able to heal the other bite target after poisoning one of two")
+	}
+}
+
 func TestWitchHasChoiceLeftAllowsBothPotionsSameNight(t *testing.T) {
 	// Regression: using one potion must not report "no choice left" while
 	// the other potion is still unused and there's a bite target to heal —
@@ -1221,6 +1281,62 @@ func TestTallyWolfVotesTopTwoUnanimousYieldsOne(t *testing.T) {
 	if !ok || len(targets) != 1 || targets[0] != "a" {
 		t.Fatalf("unanimous tallyWolfVotes(topN=2) = %v, %v; want [a], true", targets, ok)
 	}
+}
+
+func TestTruncateLabelCutsOnRuneBoundaries(t *testing.T) {
+	// Regression: truncateLabel used to slice by BYTE index, which for
+	// Vietnamese (2-3 bytes/rune) and emoji (4 bytes/rune) both truncated
+	// far earlier than the intended 60 characters and could split a rune
+	// in half, producing a replacement glyph in the menu.
+	t.Run("valid utf8 preserved when cutting", func(t *testing.T) {
+		// 80 Vietnamese runes — comfortably over the limit, and every rune
+		// is multi-byte so a byte-index cut would land mid-character.
+		long := strings.Repeat("ữ", 80)
+		got := truncateLabel(long)
+		if !utf8.ValidString(got) {
+			t.Errorf("truncateLabel produced invalid UTF-8: %q", got)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Errorf("truncateLabel(%d runes) = %q, want it truncated with an ellipsis", len([]rune(long)), got)
+		}
+		if runes := len([]rune(strings.TrimSuffix(got, "..."))); runes != 60 {
+			t.Errorf("truncateLabel kept %d runes, want exactly 60", runes)
+		}
+	})
+
+	t.Run("emoji not split", func(t *testing.T) {
+		long := strings.Repeat("🐺", 80)
+		got := truncateLabel(long)
+		if !utf8.ValidString(got) {
+			t.Errorf("truncateLabel split an emoji, producing invalid UTF-8: %q", got)
+		}
+		if strings.ContainsRune(got, utf8.RuneError) {
+			t.Errorf("truncateLabel produced a replacement character: %q", got)
+		}
+	})
+
+	t.Run("names differing past the old byte cut stay distinguishable", func(t *testing.T) {
+		// Both names are identical for their first 30 Vietnamese runes
+		// (60 bytes — exactly where the old byte-index cut landed) and
+		// differ only after that. Under the old behavior both collapsed
+		// to the same visible option, so a voter could not tell them
+		// apart; under rune-based truncation the 60-rune budget reaches
+		// past the divergence.
+		prefix := strings.Repeat("ữ", 30)
+		a := truncateLabel(prefix + "AAA")
+		b := truncateLabel(prefix + "BBB")
+		if a == b {
+			t.Errorf("two distinct names truncated to the same label %q — players would be indistinguishable in the menu", a)
+		}
+	})
+
+	t.Run("short labels pass through untouched", func(t *testing.T) {
+		for _, s := range []string{"", "Bob", "Nguyễn Văn A", "🐺 Sói"} {
+			if got := truncateLabel(s); got != s {
+				t.Errorf("truncateLabel(%q) = %q, want it unchanged", s, got)
+			}
+		}
+	})
 }
 
 func TestWitchActionComponentsHealControlShape(t *testing.T) {
@@ -1755,6 +1871,42 @@ func TestWinnerNamesWithRolesLoversWinCupidIsOneOfThePair(t *testing.T) {
 	}
 }
 
+func TestCupidWinConditionDMMatchesActualSelfPairBehavior(t *testing.T) {
+	// Regression: Cupid's own role DM used to say they win with a
+	// mixed-faction couple "unless you are one of the two" — the exact
+	// opposite of what the code does. A self-paired Cupid IS one of the
+	// two lovers and IS counted as a winner (proven by the sibling test
+	// TestWinnerNamesWithRolesLoversWinCupidIsOneOfThePair), so the DM was
+	// steering players away from a genuinely winning line.
+	//
+	// Pin the DM text against the real behavior: build the exact
+	// self-paired scenario, confirm the engine calls Cupid a winner, then
+	// assert the DM does not tell them otherwise.
+	game := &werewolfGame{
+		JoinOrder: []string{"wolf", "cupid1"},
+		LoverIDs:  [2]string{"wolf", "cupid1"},
+		Players: map[string]*player{
+			"wolf":   {UserID: "wolf", Label: "Wolf", Role: roleWerewolf, Faction: factionWolf, Alive: true},
+			"cupid1": {UserID: "cupid1", Label: "Cup", Role: roleCupid, Faction: factionVillager, Alive: true},
+		},
+	}
+	if got := checkWinConditionWithLovers(game.Players, game.LoverIDs); got != resultLoversWin {
+		t.Fatalf("self-paired mixed-faction couple as last two = %v, want resultLoversWin", got)
+	}
+	if winners := winnerNamesWithRoles(game, resultLoversWin); !strings.Contains(winners, "Cup") {
+		t.Fatalf("engine winner list %q does not include the self-paired Cupid — premise of this test is wrong", winners)
+	}
+
+	dm := roleWinCondition(roleCupid)
+	// The old wording was "...trừ khi chính bạn là 1 trong 2 người đó"
+	// ("unless you are one of the two"), i.e. an exclusion clause. The
+	// engine grants the win in exactly that case, so any phrasing that
+	// excludes a self-paired Cupid is wrong.
+	if strings.Contains(dm, "trừ khi chính bạn là 1 trong 2") {
+		t.Errorf("Cupid win-condition DM excludes a self-paired Cupid from the lovers win, but the engine counts them as a winner: %q", dm)
+	}
+}
+
 func TestRoleWinConditionEveryRoleMentionsItsSide(t *testing.T) {
 	cases := []struct {
 		r    role
@@ -1819,6 +1971,54 @@ func TestShutdownNoOpWithZeroGames(t *testing.T) {
 	cmd.Shutdown(nil)
 	if len(cmd.games) != 0 {
 		t.Errorf("games map = %v, want empty", cmd.games)
+	}
+}
+
+func TestWolfThreadSweepSkipsPlayersNeverAddedToTheThread(t *testing.T) {
+	// Regression: the dead-wolf sweep used to select on Faction alone, so
+	// a wolf-FACTION player who is never actually a thread member — the
+	// Traitor, who deliberately never joins — got "removed" from a thread
+	// they were never in, every remaining night of the game once they
+	// died. That's the exact repeat-forever behavior WolfThreadRemovedIDs
+	// was added to stop, since a failed removal is never recorded.
+	//
+	// This exercises the sweep's predicate directly (the surrounding
+	// function does Discord I/O), asserting the Traitor is excluded while
+	// a real dead wolf-thread member is still picked up.
+	game := &werewolfGame{
+		JoinOrder: []string{"wolf", "traitor", "villager"},
+		Players: map[string]*player{
+			"wolf":     {UserID: "wolf", Role: roleWerewolf, Faction: factionWolf, Alive: false},
+			"traitor":  {UserID: "traitor", Role: roleTraitor, Faction: factionWolf, Alive: false},
+			"villager": {UserID: "villager", Role: roleVillager, Faction: factionVillager, Alive: false},
+		},
+		// Only the real wolf was ever ThreadMemberAdd'd — the Traitor is
+		// excluded from aliveWolfVoters and so never joins.
+		WolfThreadMemberIDs:  map[string]bool{"wolf": true},
+		WolfThreadRemovedIDs: map[string]bool{},
+	}
+
+	var swept []string
+	for _, p := range game.Players {
+		if !p.Alive && game.WolfThreadMemberIDs[p.UserID] && !game.WolfThreadRemovedIDs[p.UserID] {
+			swept = append(swept, p.UserID)
+		}
+	}
+	if len(swept) != 1 || swept[0] != "wolf" {
+		t.Errorf("sweep selected %v, want only [wolf] — the Traitor was never a thread member and must not be retried", swept)
+	}
+
+	// Once that removal succeeds and is recorded, the next night's sweep
+	// must find nothing left to do.
+	game.WolfThreadRemovedIDs["wolf"] = true
+	swept = nil
+	for _, p := range game.Players {
+		if !p.Alive && game.WolfThreadMemberIDs[p.UserID] && !game.WolfThreadRemovedIDs[p.UserID] {
+			swept = append(swept, p.UserID)
+		}
+	}
+	if len(swept) != 0 {
+		t.Errorf("sweep re-selected %v after a recorded successful removal, want nothing", swept)
 	}
 }
 
@@ -1909,6 +2109,14 @@ func TestRoleCountConfirmValid(t *testing.T) {
 		{"wolf faction that reaches parity after just ONE plain kill is rejected", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5, false},
 		{"wolf faction with margin to survive one kill is valid", map[role]int{roleWerewolf: 3, roleVillager: 6}, 9, true},
 		{"wolf faction one over that margin is rejected", map[role]int{roleWerewolf: 4, roleVillager: 5}, 9, false},
+		// Regression: an earlier revision applied the Cursed-Wolf-sized
+		// (+2) margin unconditionally, wrongly rejecting ordinary setups
+		// with no Cursed Wolf at all. 2 wolves at 6 players is a standard,
+		// perfectly playable config — night 1 leaves 2 vs 3 with a full
+		// day of discussion and a vote.
+		{"standard 2-wolf 6-player setup with no cursed wolf is valid", map[role]int{roleWerewolf: 2, roleSeer: 1, roleVillager: 3}, 6, true},
+		{"same size but WITH a cursed wolf needs the bigger margin, rejected", map[role]int{roleWerewolf: 2, roleCursedWolf: 1, roleVillager: 3}, 6, false},
+		{"cursed wolf present but wolf faction small enough for the bigger margin", map[role]int{roleWerewolf: 2, roleCursedWolf: 1, roleVillager: 4}, 7, true},
 		{"traitor counts toward the wolf-faction floor too", map[role]int{roleWerewolf: 2, roleTraitor: 1, roleVillager: 2}, 5, false},
 		{"cursed wolf's conversion swing means it still can't be excluded for free — this config is an instant loss after one bite", map[role]int{roleWerewolf: 2, roleCursedWolf: 2, roleVillager: 1}, 5, false},
 	}
@@ -1918,6 +2126,96 @@ func TestRoleCountConfirmValid(t *testing.T) {
 				t.Errorf("roleCountConfirmValid(%v, %d) = %v, want %v", c.counts, c.playerCount, got, c.want)
 			}
 		})
+	}
+}
+
+func TestFixedTableSetupsAllPassTheCustomRolesBalanceFloor(t *testing.T) {
+	// Strong invariant guarding against over-correcting the balance floor:
+	// rolesForPlayerCount is the project's own authoritative set of
+	// known-good, playtested configs, so EVERY one of them must be
+	// reachable through the custom-roles editor too. An earlier revision
+	// applied a Cursed-Wolf-sized margin unconditionally and would have
+	// failed this test at several player counts.
+	for n := werewolfMinPlayers; n <= werewolfMaxPlayers; n++ {
+		ratio, err := rolesForPlayerCount(n)
+		if err != nil {
+			t.Fatalf("rolesForPlayerCount(%d) errored: %v", n, err)
+		}
+		counts := map[role]int{
+			roleWerewolf:   ratio.Werewolves,
+			roleWolfCub:    ratio.WolfCubs,
+			roleCursedWolf: ratio.CursedWolves,
+			roleTraitor:    ratio.Traitors,
+			roleSeer:       ratio.Seers,
+			roleDoctor:     ratio.Doctors,
+			roleWitch:      ratio.Witches,
+			roleHunter:     ratio.Hunters,
+			roleDisruptor:  ratio.Disruptors,
+			roleCupid:      ratio.Cupids,
+		}
+		// dealRoles fills every unclaimed seat with a plain Villager, so
+		// the editor's equivalent config needs that remainder spelled out.
+		counts[roleVillager] = n - roleRatioTotal(ratio)
+		if counts[roleVillager] < 0 {
+			t.Fatalf("player count %d: fixed table claims more seats (%d) than players", n, roleRatioTotal(ratio))
+		}
+		if !roleCountConfirmValid(counts, n) {
+			t.Errorf("player count %d: the FIXED TABLE's own config %v is rejected by the custom-roles validator (%s) — the floor is over-constrained",
+				n, counts, roleCountConfirmError(counts, n))
+		}
+	}
+}
+
+func TestEveryPlayerCountHasAReachableCustomConfig(t *testing.T) {
+	// Guards against the floor being tightened until some player count has
+	// NO valid custom-roles configuration at all, which would silently
+	// make custom-roles unusable at that size rather than failing loudly.
+	for n := werewolfMinPlayers; n <= werewolfMaxPlayers; n++ {
+		found := false
+		for wolves := 1; wolves < n && !found; wolves++ {
+			counts := map[role]int{roleWerewolf: wolves, roleVillager: n - wolves}
+			if roleCountConfirmValid(counts, n) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("player count %d has no reachable wolves+villagers custom config — the balance floor locked the size out entirely", n)
+		}
+	}
+}
+
+func TestRoleCountConfirmErrorReturnsEmptyForValidCounts(t *testing.T) {
+	// The doc comment promises "" for valid counts, so the empty string is
+	// a safe standalone validity test. An earlier revision documented that
+	// contract without implementing it — the default switch arm returned
+	// the balance-floor message for valid input too.
+	counts := map[role]int{roleWerewolf: 2, roleSeer: 1, roleVillager: 3}
+	const playerCount = 6
+	if !roleCountConfirmValid(counts, playerCount) {
+		t.Fatalf("test setup bug: %v at %d players should be valid", counts, playerCount)
+	}
+	if got := roleCountConfirmError(counts, playerCount); got != "" {
+		t.Errorf("roleCountConfirmError(valid counts) = %q, want \"\" per its documented contract", got)
+	}
+}
+
+func TestRoleCountConfirmErrorNeverSuggestsAnIneffectiveRemedy(t *testing.T) {
+	// The balance-floor message must not tell the starter to reduce a role
+	// that isn't counted toward the floor — following that advice would
+	// loop forever with no progress. Cursed Wolf is excluded from
+	// wolfFaction, so it must not appear in the "reduce these" list.
+	counts := map[role]int{roleWerewolf: 4, roleCursedWolf: 1, roleVillager: 4}
+	const playerCount = 9
+	if roleCountConfirmValid(counts, playerCount) {
+		t.Fatalf("test setup bug: %v at %d players should be rejected", counts, playerCount)
+	}
+	msg := roleCountConfirmError(counts, playerCount)
+	reduceList, _, found := strings.Cut(msg, "hoặc tăng số người phe Dân")
+	if !found {
+		t.Fatalf("balance-floor message shape changed, update this test: %q", msg)
+	}
+	if strings.Contains(reduceList, "Sói Nguyền") {
+		t.Errorf("balance-floor message tells the starter to reduce Sói Nguyền, which is excluded from the wolf-faction count and can never clear the rejection: %q", msg)
 	}
 }
 

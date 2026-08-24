@@ -920,11 +920,19 @@ func displayLabel(u *discordgo.User) string {
 	return u.Username
 }
 
-// truncateLabel keeps a button label within Discord's 80-char limit.
+// truncateLabel keeps a button/select-option label within Discord's 80-char
+// limit, cutting on rune boundaries rather than bytes. Discord counts
+// characters, and this project's display names are largely Vietnamese
+// (2-3 bytes per accented rune) or contain emoji (4 bytes), so a byte-index
+// cut both truncated far earlier than intended and could split a character
+// in half — rendering a replacement glyph, and worse, letting two players
+// whose names differ only past the cut collapse into visually identical
+// menu options a voter can't tell apart.
 func truncateLabel(label string) string {
-	const maxLen = 60
-	if len(label) > maxLen {
-		return label[:maxLen] + "..."
+	const maxRunes = 60
+	runes := []rune(label)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "..."
 	}
 	return label
 }

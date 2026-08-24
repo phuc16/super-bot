@@ -116,6 +116,20 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	if mutedUserID != "" && aliveThreadID != "" {
 		if err := s.ChannelPermissionSet(aliveThreadID, mutedUserID, discordgo.PermissionOverwriteTypeMember, 0, discordgo.PermissionSendMessagesInThreads); err != nil {
 			log.Error().Err(err).Str("user_id", mutedUserID).Msg("werewolf: failed to apply disruptor per-member mute")
+		} else {
+			// Record who actually got muted, so runDayVote removes exactly
+			// this overwrite rather than re-deriving the target from
+			// DisruptorTarget + current aliveness — that re-derivation
+			// silently skipped the removal whenever the target died during
+			// the discussion window, leaving the overwrite orphaned.
+			// Recorded only on success: a failed apply has nothing to undo.
+			func() {
+				cmd.mu.Lock()
+				defer cmd.mu.Unlock()
+				if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+					g.DisruptorMutedUserID = mutedUserID
+				}
+			}()
 		}
 	}
 
@@ -172,14 +186,14 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 		summary = aliveDeadSummary(game)
 		guildID = game.GuildID
 		aliveThreadID = game.AliveThreadID
-		// Same liveness check runDayDiscuss applies before setting the mute:
-		// if the target died overnight no per-member overwrite was ever
-		// created, and deleting a nonexistent one just logs an API error
-		// every round.
-		mutedUserID = game.DisruptorTarget
-		if target, exists := game.Players[mutedUserID]; mutedUserID == "" || !exists || !target.Alive {
-			mutedUserID = ""
-		}
+		// Read exactly who runDayDiscuss actually muted, rather than
+		// re-deriving it from DisruptorTarget + current aliveness. Those
+		// two gates are the same predicate at different instants, so a
+		// target who died during the discussion window would have had the
+		// overwrite applied and then skipped at removal, orphaning it on
+		// the thread. Cleared here so it's never removed twice.
+		mutedUserID = game.DisruptorMutedUserID
+		game.DisruptorMutedUserID = ""
 	}()
 	if !gameFound {
 		return
@@ -403,6 +417,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		gameFound       bool
 		ended           bool
 		removedNames    []string
+		removedPlayers  []*player
 		removedIDs      []string
 		hunterRevenged  []*player
 		loverDeaths     []*player
@@ -435,6 +450,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 			if p.Alive && shouldRemoveForAFK(game.AFKStrikes[id]) {
 				p.Alive = false
 				removedNames = append(removedNames, p.Label)
+				removedPlayers = append(removedPlayers, copyPlayer(p))
 				removedIDs = append(removedIDs, id)
 			}
 		}
@@ -487,8 +503,8 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		for _, p := range loverDeaths {
 			removeFromAliveThread(s, aliveThreadID, p.UserID)
 		}
-		if len(removedNames) > 0 {
-			cmd.announceAFKRemovals(s, channelID, removedNames)
+		if len(removedPlayers) > 0 {
+			cmd.announceAFKRemovals(s, channelID, removedPlayers, revealOnDeath)
 		}
 		if len(hunterRevenged) > 0 {
 			cmd.announceHunterRevenge(s, channelID, hunterRevenged, revealOnDeath)
@@ -499,26 +515,41 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		return false
 	}
 
-	if threadID != "" {
-		if _, err := s.ChannelDelete(threadID); err != nil {
-			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread on game end")
-		}
-	}
-	if aliveThreadID != "" {
-		if _, err := s.ChannelDelete(aliveThreadID); err != nil {
-			log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread on game end")
-		}
-	}
-	if !channelUnlocked {
-		unlockChannel(s, guildID, channelID, priorOverwrite)
-	}
+	// Routed through the shared teardownGame rather than open-coding the
+	// same three steps: this is the path a normal game-end actually takes,
+	// so it MUST get teardownGame's unlock-before-delete ordering (a
+	// mid-teardown process kill has to leave the channel usable, not
+	// locked with no game left in memory to unlock it). Open-coding it here
+	// is exactly how the two copies drifted apart before.
+	teardownGame(s, gameTeardownInfo{
+		channelID:       channelID,
+		threadID:        threadID,
+		aliveThreadID:   aliveThreadID,
+		guildID:         guildID,
+		priorOverwrite:  priorOverwrite,
+		channelUnlocked: channelUnlocked,
+	})
 
 	cmd.announceGameEnd(s, endedGame, result, removedNames)
 	return true
 }
 
-func (cmd *WerewolfCommand) announceAFKRemovals(s *discordgo.Session, channelID string, names []string) {
-	content := fmt.Sprintf("💤 %s bị loại vì AFK 2 lượt liên tiếp.", strings.Join(names, ", "))
+// announceAFKRemovals reports players auto-eliminated for inactivity. Like
+// every other death announcement in the game (night kill, poison, lynch,
+// voluntary leave, hunter revenge, lover death) it honours RevealOnDeath —
+// an AFK elimination is still an elimination, and silently concealing its
+// role while every other death in the same game publishes one would be an
+// information asymmetry, not a design choice.
+func (cmd *WerewolfCommand) announceAFKRemovals(s *discordgo.Session, channelID string, removed []*player, revealOnDeath bool) {
+	labels := make([]string, 0, len(removed))
+	for _, p := range removed {
+		if revealOnDeath {
+			labels = append(labels, fmt.Sprintf("%s (%s)", p.Label, displayRoleLabel(p)))
+		} else {
+			labels = append(labels, p.Label)
+		}
+	}
+	content := fmt.Sprintf("💤 %s bị loại vì AFK 2 lượt liên tiếp.", strings.Join(labels, ", "))
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         content,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},

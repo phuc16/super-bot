@@ -513,7 +513,8 @@ type werewolfGame struct {
 	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
 	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it — deliberate deviation from canonical Ultimate Werewolf, where the Hunter instead picks reactively, only at the moment they die, with full information at that instant; this project intentionally uses a standing pre-committed pick instead (an earlier design decision, not an oversight — see dmHunterPrompt)
 	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
-	DisruptorTarget               string                         // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss/day-vote phase transition to apply/remove the per-member mute
+	DisruptorTarget               string                         // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss phase transition to decide who to mute
+	DisruptorMutedUserID          string                         // who currently has a live per-member mute overwrite on the alive thread, "" if nobody. Set by runDayDiscuss only after the overwrite is actually applied, and cleared by runDayVote after removing it. Deliberately NOT re-derived from DisruptorTarget at removal time: the apply and remove gates would then be the same predicate evaluated at two different instants, so a target who died mid-discussion would get the overwrite applied and never removed, orphaning it on the thread forever
 	DisruptorActedThisRound       bool                           // reset each round; true once the Disruptor has made at least one pick this round — gates the progress announcement to the first pick only, mirroring Hunter's pre-AFK-exemption shape
 	LoverIDs                      [2]string                      // set once by Cupid on round 1; ["", ""] means no pairing was made
 	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
@@ -534,7 +535,8 @@ type werewolfGame struct {
 	PriorOverwrite                *discordgo.PermissionOverwrite // @everyone's channel overwrite before this game locked it; nil if there was none
 	AliveThreadID                 string                         // private thread all players use for day-discussion chat; "" before it's created
 	ChannelUnlocked               bool                           // true once unlockChannel has already run for this game (e.g. the alive-thread-creation fallback below) — terminal cleanup paths must check this before calling unlockChannel again
-	WolfThreadRemovedIDs          map[string]bool                // wolf-faction user IDs already ThreadMemberRemove'd from the persistent wolf thread — startWolfThread's per-night dead-wolf sweep checks this so it doesn't retry (and re-log an error for) a removal that already succeeded on an earlier night
+	WolfThreadMemberIDs           map[string]bool                // user IDs successfully ThreadMemberAdd'd to the persistent wolf thread. The per-night dead-wolf sweep only considers these: a wolf-FACTION player who was never actually a member (the Traitor, who deliberately never joins; a Cursed Wolf that converted and died before its first wolf night) would otherwise be "removed" from a thread they were never in, every remaining night of the game
+	WolfThreadRemovedIDs          map[string]bool                // user IDs already ThreadMemberRemove'd from the persistent wolf thread — startWolfThread's per-night dead-wolf sweep checks this so it doesn't retry (and re-log an error for) a removal that already succeeded on an earlier night
 }
 
 // WerewolfCommand handles /werewolf and all its button/select interactions.
@@ -819,6 +821,13 @@ func (cmd *WerewolfCommand) Definition() *discordgo.ApplicationCommand {
 	return &discordgo.ApplicationCommand{
 		Name:        "werewolf",
 		Description: "Trò chơi Ma Sói trong kênh này",
+		// Guild-only: every subcommand needs a real guild channel (thread
+		// creation, @everyone permission overwrites, member lookups), and
+		// in a DM context Discord sends no i.Member at all. Restricting it
+		// here stops the command from even appearing in DMs; the handlers
+		// still guard i.Member defensively via interactionUserID, since a
+		// Definition change only takes effect once commands re-register.
+		Contexts: &[]discordgo.InteractionContextType{discordgo.InteractionContextGuild},
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
@@ -890,7 +899,16 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		customRoles = v
 	}
 
-	starterID := i.Member.User.ID
+	// interactionUserID rather than i.Member.User.ID: the Definition marks
+	// this command guild-only, but that only takes effect once commands
+	// re-register, and an unguarded dereference here would panic the
+	// handler goroutine on a DM-context invocation rather than failing the
+	// one interaction.
+	starterID := interactionUserID(i)
+	if starterID == "" {
+		respondError(s, i, "Không xác định được người dùng, thử lại nhé.")
+		return
+	}
 	game := &werewolfGame{
 		GuildID:              i.GuildID,
 		ChannelID:            i.ChannelID,
@@ -903,6 +921,7 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		JoinOrder:            []string{},
 		Votes:                make(map[string]string),
 		AFKStrikes:           make(map[string]int),
+		WolfThreadMemberIDs:  make(map[string]bool),
 		WolfThreadRemovedIDs: make(map[string]bool),
 	}
 
@@ -1047,7 +1066,13 @@ func (cmd *WerewolfCommand) handleStatus(s *discordgo.Session, i *discordgo.Inte
 }
 
 func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	userID := i.Member.User.ID
+	// See handleStart: nil-safe lookup so a DM-context invocation fails the
+	// interaction instead of panicking the handler goroutine.
+	userID := interactionUserID(i)
+	if userID == "" {
+		respondError(s, i, "Không xác định được người dùng, thử lại nhé.")
+		return
+	}
 
 	cmd.mu.Lock()
 	game, ok := cmd.games[i.ChannelID]
@@ -1229,24 +1254,17 @@ func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo
 	// game leaves phaseLobby/phaseRoleEdit, so WolfThreadID can't be set yet
 	// here — but clean it up defensively in case the UI ever races ahead of
 	// the phase change, mirroring the cleanup the win/end paths already do.
-	threadID := game.WolfThreadID
-	aliveThreadID := game.AliveThreadID
-	guildID := game.GuildID
-	priorOverwrite := game.PriorOverwrite
+	// Routed through the shared teardownGame (rather than open-coding the
+	// same steps) so this path can't drift from the others again, and so it
+	// inherits the unlock-before-delete ordering and the ChannelUnlocked
+	// check — the latter is always false at this phase today, but reading
+	// it via gameTeardownInfoFor keeps that an observation rather than an
+	// assumption baked into this call site.
+	info := gameTeardownInfoFor(channelID, game)
 	delete(cmd.games, channelID)
 	cmd.mu.Unlock()
 
-	if threadID != "" {
-		if _, err := s.ChannelDelete(threadID); err != nil {
-			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread on lobby cancel")
-		}
-	}
-	if aliveThreadID != "" {
-		if _, err := s.ChannelDelete(aliveThreadID); err != nil {
-			log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread on lobby cancel")
-		}
-	}
-	unlockChannel(s, guildID, channelID, priorOverwrite)
+	teardownGame(s, info)
 
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
@@ -1401,7 +1419,10 @@ func (cmd *WerewolfCommand) handleStartGame(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Bàn này đã đóng đăng ký hoặc kết thúc.")
 		return
 	}
-	if i.Member.User.ID != game.StarterID {
+	// interactionUserID, not i.Member.User.ID: nil-safe, and an empty
+	// result can never equal a real StarterID, so an unidentifiable
+	// clicker is correctly rejected rather than panicking the handler.
+	if interactionUserID(i) != game.StarterID {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ người mở bàn mới được bắt đầu.")
 		return
@@ -1486,7 +1507,7 @@ func roleWinCondition(r role) string {
 	case roleTraitor:
 		return "🏆 Bạn luôn thắng cùng **phe Sói**, dù Tiên Tri soi bạn ra \"không phải Sói\" và bạn không bỏ phiếu cắn cùng bầy. Nếu mọi Sói khác chết mà bạn còn sống, bạn tự động trở thành Sói thường."
 	case roleCupid:
-		return "🏆 Bạn thắng cùng **phe Dân** như bình thường — trừ khi 2 người bạn ghép đôi thuộc 2 phe khác nhau và cả hai sống sót đến khi là 2 người cuối cùng, lúc đó bạn thắng cùng họ (dù còn sống hay đã chết) trừ khi chính bạn là 1 trong 2 người đó."
+		return "🏆 Bạn thắng cùng **phe Dân** như bình thường — trừ khi 2 người bạn ghép đôi thuộc 2 phe khác nhau và cả hai sống sót đến khi là 2 người cuối cùng, lúc đó bạn luôn thắng cùng họ (dù còn sống hay đã chết, kể cả khi chính bạn là 1 trong 2 người đó)."
 	default:
 		return "🏆 Bạn thắng cùng **phe Dân**: khi toàn bộ phe Sói đã chết."
 	}
@@ -1560,9 +1581,8 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 				Str("channel_id", channelID).
 				Msg("werewolf: recovered from panic in game goroutine")
 
-			var threadID, aliveThreadID, guildID string
-			var priorOverwrite *discordgo.PermissionOverwrite
-			var cleaned, channelUnlocked bool
+			var info gameTeardownInfo
+			var cleaned bool
 			func() {
 				cmd.mu.Lock()
 				defer cmd.mu.Unlock()
@@ -1570,28 +1590,16 @@ func (cmd *WerewolfCommand) startPreflight(s *discordgo.Session, channelID strin
 				if game == nil {
 					return
 				}
-				threadID = game.WolfThreadID
-				aliveThreadID = game.AliveThreadID
-				guildID = game.GuildID
-				priorOverwrite = game.PriorOverwrite
-				channelUnlocked = game.ChannelUnlocked
+				info = gameTeardownInfoFor(channelID, game)
 				delete(cmd.games, channelID)
 				cleaned = true
 			}()
 			if cleaned {
-				if threadID != "" {
-					if _, err := s.ChannelDelete(threadID); err != nil {
-						log.Error().Err(err).Msg("werewolf: failed to delete wolf thread during panic cleanup")
-					}
-				}
-				if aliveThreadID != "" {
-					if _, err := s.ChannelDelete(aliveThreadID); err != nil {
-						log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread during panic cleanup")
-					}
-				}
-				if !channelUnlocked {
-					unlockChannel(s, guildID, channelID, priorOverwrite)
-				}
+				// Shared teardownGame, not an open-coded copy: this is the
+				// path that runs when something has ALREADY gone wrong, so
+				// it especially must inherit the unlock-before-delete
+				// ordering rather than being the one copy that drifts.
+				teardownGame(s, info)
 				log.Error().Str("channel_id", channelID).Msg("werewolf: cleaned up game state after panic recovery")
 			}
 		}
