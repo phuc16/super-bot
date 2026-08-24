@@ -502,8 +502,8 @@ type roundLog struct {
 	SeerResult          role
 	VoteBreakdown       map[string][]string // target label (or voteSkipLabel) -> voter labels who chose it
 	LynchedLabel        string
-	HunterRevengeLabel  string   // who died from Hunter's revenge this round, "" if it didn't trigger
-	LoverDeathLabel     string   // who died from the lover-chain this round, "" if it didn't trigger
+	HunterRevengeLabels []string // everyone who died from a Hunter's revenge this round. A SLICE, and appended to rather than assigned: a single round's roundLog entry is written by up to four separate death sites (night resolution, day lynch, voluntary leave, AFK sweep), so assigning would let a later site silently erase an earlier one's chained death from the recap
+	LoverDeathLabels    []string // everyone who died from the lover-chain this round — same append-not-assign rule as HunterRevengeLabels, for the same reason
 	WitchSavedLabel     string   // who the Witch healed this round, "" if she didn't heal
 	WitchPoisonedLabel  string   // who the Witch poisoned this round, "" if she didn't poison
 	CursedWolfConverted []string // labels of every not-saved Cursed Wolf that converted to wolf-faction this round instead of dying — a slice since Cursed Wolf has no 1-per-game cap, so a bonus-bite round can convert 2+ in the same round
@@ -808,6 +808,97 @@ func removeFromAliveThread(s *discordgo.Session, threadID, userID string) {
 	if err := s.ThreadMemberRemove(threadID, userID); err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("werewolf: failed to remove player from alive-discussion thread")
 	}
+}
+
+// evictFromWolfThread removes any of userIDs who are current wolf-thread
+// members from that thread immediately, and records the successful
+// removals so startWolfThread's per-night sweep won't retry them.
+//
+// Call this from every path that kills someone while the wolf thread may
+// still be live (night resolution, voluntary leave). Takes and releases
+// cmd.mu itself, so callers must NOT hold it.
+func (cmd *WerewolfCommand) evictFromWolfThread(s *discordgo.Session, channelID string, seq uint64, userIDs []string) {
+	if len(userIDs) == 0 {
+		return
+	}
+	var threadID string
+	var memberIDs, removedIDs map[string]bool
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		g := cmd.gameIfCurrent(channelID, seq)
+		if g == nil {
+			return
+		}
+		threadID = g.WolfThreadID
+		memberIDs = copyBoolSet(g.WolfThreadMemberIDs)
+		removedIDs = copyBoolSet(g.WolfThreadRemovedIDs)
+	}()
+	if threadID == "" {
+		return
+	}
+
+	evicted := removeFromWolfThreadNow(s, threadID, memberIDs, removedIDs, userIDs)
+	if len(evicted) == 0 {
+		return
+	}
+	cmd.mu.Lock()
+	defer cmd.mu.Unlock()
+	g := cmd.gameIfCurrent(channelID, seq)
+	if g == nil {
+		return
+	}
+	if g.WolfThreadRemovedIDs == nil {
+		g.WolfThreadRemovedIDs = make(map[string]bool)
+	}
+	for _, id := range evicted {
+		g.WolfThreadRemovedIDs[id] = true
+	}
+}
+
+// copyBoolSet snapshots a set-shaped map so it can be read safely after
+// cmd.mu is released.
+func copyBoolSet(src map[string]bool) map[string]bool {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]bool, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// removeFromWolfThreadNow evicts a just-died wolf from the persistent wolf
+// thread immediately, rather than waiting for startWolfThread's sweep at
+// the top of the NEXT night.
+//
+// The sweep alone is not enough for a death that happens mid-night: the
+// pack's thread is unlocked and its vote tally is being live-edited right
+// then, so someone announced as out of the game would otherwise keep
+// reading the pack's discussion and watching the current bite being
+// decided — and keep that access through the following day too.
+//
+// Returns the IDs actually removed, for the caller to record in
+// WolfThreadRemovedIDs so the next night's sweep doesn't retry them. Only
+// attempts users the game believes are current thread members; everyone
+// else (villagers, the Traitor, an already-swept wolf) is skipped.
+func removeFromWolfThreadNow(s *discordgo.Session, threadID string, memberIDs, removedIDs map[string]bool, userIDs []string) []string {
+	if threadID == "" {
+		return nil
+	}
+	var removed []string
+	for _, id := range userIDs {
+		if !memberIDs[id] || removedIDs[id] {
+			continue
+		}
+		if err := s.ThreadMemberRemove(threadID, id); err != nil {
+			log.Error().Err(err).Str("user_id", id).Msg("werewolf: failed to remove departed wolf from wolf thread")
+			continue
+		}
+		removed = append(removed, id)
+	}
+	return removed
 }
 
 func werewolfLobbyButtons(channelID string, disabled bool) []discordgo.MessageComponent {
@@ -1142,12 +1233,55 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 				break
 			}
 		}
-		content := werewolfLobbyContent(game)
+
 		channelID := game.ChannelID
 		messageID := game.MessageID
+
+		// An empty lobby must be torn down, not left sitting. The channel
+		// is locked to bot-only from /werewolf start onward, and a lobby
+		// has no expiry timer — so an abandoned one would hold the channel
+		// read-only indefinitely with nobody left who could cancel it.
+		if len(game.JoinOrder) == 0 {
+			info := gameTeardownInfoFor(channelID, game)
+			delete(cmd.games, channelID)
+			cmd.mu.Unlock()
+
+			teardownGame(s, info)
+			respondSuccess(s, i, "Đã rời bàn. Bàn trống nên đã được đóng lại.")
+			if messageID != "" {
+				emptyComponents := []discordgo.MessageComponent{}
+				emptyContent := "🚫 Bàn Ma Sói đã đóng vì không còn ai tham gia."
+				if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+					Channel:         channelID,
+					ID:              messageID,
+					Content:         &emptyContent,
+					Components:      &emptyComponents,
+					AllowedMentions: &discordgo.MessageAllowedMentions{},
+				}); err != nil {
+					log.Error().Err(err).Msg("werewolf: failed to close empty lobby message")
+				}
+			}
+			return
+		}
+
+		// If the STARTER left, hand the lobby to whoever joined earliest.
+		// Otherwise they'd keep exclusive authority over a lobby they're
+		// no longer in — able to start a game for other people or cancel
+		// it — and if they went offline, nobody but an admin could ever
+		// start or clear it.
+		starterLeft := userID == game.StarterID
+		if starterLeft {
+			game.StarterID = game.JoinOrder[0]
+		}
+		newStarterID := game.StarterID
+		content := werewolfLobbyContent(game)
 		cmd.mu.Unlock()
 
-		respondSuccess(s, i, "Đã rời bàn.")
+		if starterLeft {
+			respondSuccess(s, i, "Đã rời bàn. Quyền mở bàn đã chuyển cho người tham gia sớm nhất.")
+		} else {
+			respondSuccess(s, i, "Đã rời bàn.")
+		}
 		if messageID != "" {
 			components := werewolfLobbyButtons(channelID, false)
 			if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
@@ -1158,6 +1292,14 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 				AllowedMentions: &discordgo.MessageAllowedMentions{},
 			}); err != nil {
 				log.Error().Err(err).Msg("werewolf: failed to update lobby message after leave")
+			}
+		}
+		if starterLeft {
+			if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+				Content:         fmt.Sprintf("👑 Người mở bàn đã rời đi — <@%s> giờ là người mở bàn và có thể bấm \"Bắt đầu\" hoặc \"Huỷ\".", newStarterID),
+				AllowedMentions: &discordgo.MessageAllowedMentions{Users: []string{newStarterID}},
+			}); err != nil {
+				log.Error().Err(err).Msg("werewolf: failed to announce lobby host handover")
 			}
 		}
 		return
@@ -1182,16 +1324,17 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	applyWolfCubBonusBiteFlag(game, append(append([]string{userID}, idsOf(hunterRevenged)...), idsOf(loverDeaths)...))
 	if n := len(game.History); n > 0 {
 		if len(hunterRevenged) > 0 {
-			game.History[n-1].HunterRevengeLabel = hunterRevenged[0].Label
+			game.History[n-1].HunterRevengeLabels = append(game.History[n-1].HunterRevengeLabels, labelsOf(hunterRevenged)...)
 		}
 		if len(loverDeaths) > 0 {
-			game.History[n-1].LoverDeathLabel = loverDeaths[0].Label
+			game.History[n-1].LoverDeathLabels = append(game.History[n-1].LoverDeathLabels, labelsOf(loverDeaths)...)
 		}
 	}
 	revealOnDeath := game.RevealOnDeath
 	channelID := game.ChannelID
 	seq := game.Seq
 	aliveThreadID := game.AliveThreadID
+	deadNow := append(append([]string{userID}, idsOf(hunterRevenged)...), idsOf(loverDeaths)...)
 	cmd.mu.Unlock()
 
 	removeFromAliveThread(s, aliveThreadID, userID)
@@ -1201,6 +1344,13 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	for _, lp := range loverDeaths {
 		removeFromAliveThread(s, aliveThreadID, lp.UserID)
 	}
+	// Evict from the wolf thread NOW rather than leaving it to
+	// startWolfThread's sweep at the top of the next night: mid-night the
+	// pack's thread is unlocked and its vote tally is being live-edited,
+	// so a wolf who just left would otherwise sit there watching the
+	// current bite get decided, and keep that access all through the
+	// following day.
+	cmd.evictFromWolfThread(s, channelID, seq, deadNow)
 	respondSuccess(s, i, "Đã rời ván. Bạn sẽ được coi như đã bị loại.")
 
 	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
@@ -1260,6 +1410,32 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 			}
 		}
 	}
+
+	// Same two rules the /werewolf leave path applies — this is just the
+	// button-driven way to leave the same lobby, and the consequences of
+	// getting it wrong (a locked channel nobody can free, or a departed
+	// starter still holding lobby authority) are identical.
+	if len(game.JoinOrder) == 0 {
+		info := gameTeardownInfoFor(channelID, game)
+		delete(cmd.games, channelID)
+		cmd.mu.Unlock()
+
+		teardownGame(s, info)
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:         "🚫 Bàn Ma Sói đã đóng vì không còn ai tham gia.",
+				Components:      []discordgo.MessageComponent{},
+				AllowedMentions: &discordgo.MessageAllowedMentions{},
+			},
+		})
+		return
+	}
+	starterLeft := !joining && clickerID == game.StarterID
+	if starterLeft {
+		game.StarterID = game.JoinOrder[0]
+	}
+	newStarterID := game.StarterID
 	content := werewolfLobbyContent(game)
 	cmd.mu.Unlock()
 
@@ -1271,6 +1447,14 @@ func (cmd *WerewolfCommand) handleJoinLeave(s *discordgo.Session, i *discordgo.I
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		},
 	})
+	if starterLeft {
+		if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:         fmt.Sprintf("👑 Người mở bàn đã rời đi — <@%s> giờ là người mở bàn và có thể bấm \"Bắt đầu\" hoặc \"Huỷ\".", newStarterID),
+			AllowedMentions: &discordgo.MessageAllowedMentions{Users: []string{newStarterID}},
+		}); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to announce lobby host handover")
+		}
+	}
 }
 
 func (cmd *WerewolfCommand) handleCancelLobby(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {

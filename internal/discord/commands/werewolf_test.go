@@ -1050,6 +1050,203 @@ func TestChunkRecapMessagesEmptyHistory(t *testing.T) {
 	}
 }
 
+func TestChunkRecapMessagesNeverExceedsTheLimitEvenForOneHugeRound(t *testing.T) {
+	// The chunker used to split only BETWEEN rounds, so a single round
+	// bigger than the limit was emitted as one oversized chunk. Discord
+	// rejects a >2000-character message with 400/50035, and the send
+	// error is only logged — so that round would silently vanish from the
+	// recap with nothing in the channel indicating a loss.
+	//
+	// The realistic driver is the vote breakdown: every voter's display
+	// name is rendered in full (never truncated, unlike select-menu
+	// options), so the block scales with players x name length. At 20
+	// players with max-length (32-char) names and votes spread across
+	// many targets, one round measured ~1945 characters — inside a hair
+	// of the limit. These cases deliberately go past it.
+	longName := func(i int) string {
+		s := fmt.Sprintf("Nguyễn Hoàng Phương Anh Thị %02d", i)
+		r := []rune(s)
+		if len(r) > 32 {
+			r = r[:32]
+		}
+		return string(r)
+	}
+
+	build := func(spread, voters int) roundLog {
+		vb := map[string][]string{}
+		per := voters / spread
+		if per < 1 {
+			per = 1
+		}
+		for tIdx := 0; tIdx < spread; tIdx++ {
+			var vs []string
+			for v := 0; v < per; v++ {
+				vs = append(vs, longName(tIdx*per+v))
+			}
+			vb[longName(100+tIdx)] = vs
+		}
+		return roundLog{
+			Round:                7,
+			WolfTargetLabel:      longName(1) + ", " + longName(2),
+			WolfBonusBite:        true,
+			WolfBiteOutcomeLines: []string{longName(1) + ": chết", longName(2) + ": biến thành Sói Nguyền, không chết"},
+			WitchSavedLabel:      longName(3),
+			WitchPoisonedLabel:   longName(4),
+			DoctorTargetLabel:    longName(5),
+			SeerTargetLabel:      longName(6),
+			SeerResult:           roleWerewolf,
+			HunterRevengeLabels:  []string{longName(7)},
+			LoverDeathLabels:     []string{longName(8)},
+			DisruptorMutedLabel:  longName(9),
+			LynchedLabel:         longName(10),
+			VoteBreakdown:        vb,
+		}
+	}
+
+	cases := []struct {
+		name    string
+		history []roundLog
+	}{
+		{"one maximal 20-player round, votes fully spread", []roundLog{build(20, 20)}},
+		{"one round far past the limit (40 vote lines)", []roundLog{build(40, 40)}},
+		{"several maximal rounds in a row", []roundLog{build(20, 20), build(20, 20), build(20, 20)}},
+	}
+
+	const limit = 1900
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			chunks := chunkRecapMessages(c.history, limit)
+			if len(chunks) == 0 {
+				t.Fatal("expected at least one chunk")
+			}
+			for i, ch := range chunks {
+				if n := len([]rune(ch)); n > limit {
+					t.Errorf("chunk %d is %d characters, over the %d limit — Discord would reject this message and the round would silently vanish",
+						i, n, limit)
+				}
+				// Also confirm the real Discord ceiling, independent of
+				// whatever limit callers pass.
+				if n := len([]rune(ch)); n > 2000 {
+					t.Errorf("chunk %d is %d characters, over Discord's hard 2000-char message limit", i, n)
+				}
+			}
+			// Nothing may be silently dropped: every round number in the
+			// input must still appear somewhere across the chunks.
+			joined := strings.Join(chunks, "")
+			if !strings.Contains(joined, "🗳️") {
+				t.Error("the vote breakdown vanished entirely from the split output")
+			}
+		})
+	}
+}
+
+func TestChunkRecapMessagesCapsTheMessageBurst(t *testing.T) {
+	// game.History grows one entry per round with no bound, and the recap
+	// posts every chunk back-to-back at game end. Discord throttles a
+	// channel to roughly 5 messages per 5 seconds, so an uncapped recap
+	// for a long, eventful game would spend ~25s rate-limited while
+	// burying the channel. Measured: a realistic game yields 2-10 chunks
+	// and never trips the cap; a pathological one (every special role
+	// firing every round) reached 25+ before this cap existed.
+	verbose := func(r int) roundLog {
+		return roundLog{
+			Round:                r,
+			WolfTargetLabel:      "Nguyễn Văn A",
+			WolfBonusBite:        true,
+			WolfBiteOutcomeLines: []string{"Nguyễn Văn A: chết", "Trần Thị B: biến thành Sói Nguyền, không chết"},
+			WitchSavedLabel:      "Trần Thị B",
+			WitchPoisonedLabel:   "Lê Văn C",
+			DoctorTargetLabel:    "Phạm Thị D",
+			SeerTargetLabel:      "Hoàng Văn E",
+			SeerResult:           roleWerewolf,
+			HunterRevengeLabels:  []string{"Vũ Thị F"},
+			LoverDeathLabels:     []string{"Đặng Văn G"},
+			DisruptorMutedLabel:  "Bùi Thị H",
+			LynchedLabel:         "Đỗ Văn I",
+			VoteBreakdown: map[string][]string{
+				"Đỗ Văn I":         {"a", "b", "c", "d", "e"},
+				"Không treo cổ ai": {"f", "g"},
+			},
+		}
+	}
+
+	t.Run("a long eventful game is capped", func(t *testing.T) {
+		const rounds = 150 // far past the cap, so truncation is unambiguous
+		var h []roundLog
+		for r := 1; r <= rounds; r++ {
+			h = append(h, verbose(r))
+		}
+		chunks := chunkRecapMessages(h, 1900)
+		if len(chunks) != maxRecapMessages {
+			t.Errorf("%d eventful rounds produced %d messages, want exactly the %d cap", rounds, len(chunks), maxRecapMessages)
+		}
+		// The first message must say something was dropped, so players
+		// aren't silently shown a partial history as if it were complete.
+		if !strings.Contains(chunks[0], "lược bớt") {
+			t.Errorf("first message must disclose the truncation, got %q", chunks[0])
+		}
+		// The most recent rounds — the decisive ones — must survive.
+		if !strings.Contains(chunks[len(chunks)-1], fmt.Sprintf("Đêm/Ngày %d:", rounds)) {
+			t.Errorf("last message should contain the final round %d, got %q", rounds, chunks[len(chunks)-1])
+		}
+	})
+
+	t.Run("a game exactly at the cap is not truncated", func(t *testing.T) {
+		// Boundary: producing exactly maxRecapMessages chunks naturally
+		// must NOT trigger the truncation path, or a game right at the
+		// edge would claim to have dropped history it didn't drop.
+		var h []roundLog
+		for r := 1; ; r++ {
+			h = append(h, verbose(r))
+			chunks := chunkRecapMessages(h, 1900)
+			if len(chunks) == maxRecapMessages {
+				if strings.Contains(chunks[0], "lược bớt") {
+					t.Errorf("a recap that lands exactly on the %d-message cap claimed to be truncated", maxRecapMessages)
+				}
+				if !strings.Contains(chunks[0], "Đêm/Ngày 1:") {
+					t.Errorf("an untruncated recap must still start at round 1, got %q", chunks[0])
+				}
+				return
+			}
+			if r > 500 {
+				t.Fatal("never reached the cap — chunking may be broken")
+			}
+		}
+	})
+
+	t.Run("a normal game is untouched by the cap", func(t *testing.T) {
+		var h []roundLog
+		for r := 1; r <= 12; r++ {
+			h = append(h, roundLog{Round: r, WolfTargetLabel: "A", LynchedLabel: "B"})
+		}
+		chunks := chunkRecapMessages(h, 1900)
+		if len(chunks) >= maxRecapMessages {
+			t.Errorf("a 12-round ordinary game produced %d messages — the cap should be nowhere near", len(chunks))
+		}
+		for _, c := range chunks {
+			if strings.Contains(c, "lược bớt") {
+				t.Error("an uncapped recap must not claim anything was dropped")
+			}
+		}
+		// Round 1 must still be present when nothing was dropped.
+		if !strings.Contains(chunks[0], "Đêm/Ngày 1:") {
+			t.Errorf("first message should start at round 1, got %q", chunks[0])
+		}
+	})
+
+	t.Run("every chunk stays under Discord's message limit", func(t *testing.T) {
+		var h []roundLog
+		for r := 1; r <= 60; r++ {
+			h = append(h, verbose(r))
+		}
+		for i, c := range chunkRecapMessages(h, 1900) {
+			if n := len([]rune(c)); n > 2000 {
+				t.Errorf("chunk %d is %d characters, over Discord's 2000-char message limit", i, n)
+			}
+		}
+	})
+}
+
 func TestFactionForRole(t *testing.T) {
 	cases := []struct {
 		r    role
@@ -1460,6 +1657,84 @@ func selectMenuOf(t *testing.T, rows []discordgo.MessageComponent) discordgo.Sel
 	return menu
 }
 
+func TestWolfThreadIdleGapStaysUnderAutoArchive(t *testing.T) {
+	// The wolf thread now persists for the whole game instead of being
+	// recreated each night, so it sits IDLE from the end of one night's
+	// wolf activity until the next night reopens it. If that gap ever
+	// exceeded Discord's AutoArchiveDuration the thread would archive
+	// mid-game.
+	//
+	// setWolfThreadLocked clears Archived on every lock/unlock, so an
+	// archive would in practice be recovered — but relying on that would
+	// mean the pack briefly loses their thread and the recovery becomes
+	// load-bearing. Keep a real margin instead, and fail loudly if any
+	// window constant is bumped far enough to erode it.
+	//
+	// Worst case gap, at the largest possible roster:
+	//   witchActionWindow            (rest of the night after the wolf vote)
+	// + dayDiscussWindowFor(20)      (full day discussion)
+	// + dayVoteWindow                (the vote)
+	// ...before the next night's wolf message lands.
+	idleGap := witchActionWindow +
+		dayDiscussWindowFor(werewolfMaxPlayers) +
+		dayVoteWindow
+
+	autoArchive := time.Duration(wolfThreadAutoArchiveMinutes) * time.Minute
+	if idleGap >= autoArchive {
+		t.Fatalf("worst-case wolf-thread idle gap is %v, at or beyond the %v auto-archive window — the thread will archive mid-game",
+			idleGap, autoArchive)
+	}
+	// Insist on a real margin, not a hair's breadth: a gap over half the
+	// window means one more constant bump breaks it.
+	if idleGap > autoArchive/2 {
+		t.Errorf("worst-case wolf-thread idle gap is %v, more than half the %v auto-archive window — margin is too thin",
+			idleGap, autoArchive)
+	}
+}
+
+func TestOneFullCycleFitsWellInsideAnInteractionTokenLifetime(t *testing.T) {
+	// Discord interaction tokens expire 15 minutes after the originating
+	// interaction. Nothing in the phase chain currently edits a message
+	// via an interaction token after a long sleep (the lobby edit uses
+	// ChannelMessageEditComplex with the bot token, and each button click
+	// answers its own fresh interaction) — but if a future change did
+	// reach for a token after a full cycle, it needs to still be valid.
+	//
+	// Compute the worst-case single night+day cycle so that assumption is
+	// measured rather than assumed.
+	const discordInteractionTokenLifetime = 15 * time.Minute
+
+	// Night: the wolf discussion window is the long pole, and the balance
+	// floor caps wolf-faction at 9 in a 20-player game (9*2+1 < 20).
+	const maxWolves = 9
+	nightWindow := wolfDiscussWindowFor(maxWolves)
+	if nightActionWindow > nightWindow {
+		nightWindow = nightActionWindow
+	}
+	cycle := nightWindow + witchActionWindow +
+		dayDiscussWindowFor(werewolfMaxPlayers) + dayVoteWindow
+
+	if cycle >= discordInteractionTokenLifetime {
+		t.Errorf("worst-case night+day cycle is %v, at or beyond Discord's %v interaction-token lifetime — any code that reuses a token across a cycle would fail",
+			cycle, discordInteractionTokenLifetime)
+	}
+	t.Logf("worst-case cycle: %v (night %v + witch %v + day %v + vote %v)",
+		cycle, nightWindow, witchActionWindow, dayDiscussWindowFor(werewolfMaxPlayers), dayVoteWindow)
+}
+
+func TestRoleEditTimeoutFitsInsideInteractionTokenLifetime(t *testing.T) {
+	// The two role-count editor messages are ephemeral FOLLOWUPS created
+	// against the "Bắt đầu" button's interaction token, and the watchdog
+	// waits roleEditTimeout before giving up. Followup creation happens
+	// immediately, but keep the timeout inside the token's life so any
+	// future token-based edit of those messages stays possible.
+	const discordInteractionTokenLifetime = 15 * time.Minute
+	if roleEditTimeout >= discordInteractionTokenLifetime {
+		t.Errorf("roleEditTimeout is %v, at or beyond Discord's %v interaction-token lifetime",
+			roleEditTimeout, discordInteractionTokenLifetime)
+	}
+}
+
 func TestSelectMenusRespectDiscordOptionLimits(t *testing.T) {
 	// Discord rejects a select menu with 0 options or more than 25, and
 	// requires 1 <= MinValues <= MaxValues <= len(Options). A rejected
@@ -1810,8 +2085,41 @@ func TestApplyDeathChainsLoverKilledHunterRevenges(t *testing.T) {
 	}
 }
 
+func TestRoundLogChainDeathsAccumulateAcrossDeathSites(t *testing.T) {
+	// A single round's roundLog entry is written by up to four separate
+	// death sites — night resolution, the day lynch, a voluntary leave,
+	// and the AFK sweep — all targeting History[len-1]. These fields used
+	// to be single strings assigned (not appended), so a later site
+	// silently erased an earlier one's chained death from the recap: the
+	// round would report fewer deaths than actually happened.
+	entry := &roundLog{Round: 4}
+
+	// A player leaves mid-round; their lover dies with them.
+	entry.LoverDeathLabels = append(entry.LoverDeathLabels, labelsOf([]*player{{Label: "Lover-Of-Leaver"}})...)
+	// Later the same round, the day vote lynches someone who was a Hunter,
+	// and their target dies too.
+	entry.HunterRevengeLabels = append(entry.HunterRevengeLabels, labelsOf([]*player{{Label: "Hunter-Target"}})...)
+	// And that lynched player also had a lover.
+	entry.LoverDeathLabels = append(entry.LoverDeathLabels, labelsOf([]*player{{Label: "Lover-Of-Lynched"}})...)
+
+	if len(entry.LoverDeathLabels) != 2 {
+		t.Errorf("LoverDeathLabels = %v, want both chained lover deaths preserved", entry.LoverDeathLabels)
+	}
+	if len(entry.HunterRevengeLabels) != 1 {
+		t.Errorf("HunterRevengeLabels = %v, want 1", entry.HunterRevengeLabels)
+	}
+
+	// Every name must actually reach the rendered recap.
+	block := formatRoundBlock(*entry)
+	for _, want := range []string{"Lover-Of-Leaver", "Lover-Of-Lynched", "Hunter-Target"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("recap block dropped %q — a chained death is missing from the round:\n%s", want, block)
+		}
+	}
+}
+
 func TestFormatRoundBlockLoverDeath(t *testing.T) {
-	r := roundLog{Round: 3, LoverDeathLabel: "Lam"}
+	r := roundLog{Round: 3, LoverDeathLabels: []string{"Lam"}}
 	got := formatRoundBlock(r)
 	if !strings.Contains(got, "Lam") {
 		t.Errorf("formatRoundBlock() = %q, want the lover-death mentioned", got)
@@ -1827,7 +2135,7 @@ func TestFormatRoundBlockOmitsLoverDeathWhenEmpty(t *testing.T) {
 }
 
 func TestFormatRoundBlockHunterRevenge(t *testing.T) {
-	r := roundLog{Round: 3, LynchedLabel: "Alice", HunterRevengeLabel: "Bob"}
+	r := roundLog{Round: 3, LynchedLabel: "Alice", HunterRevengeLabels: []string{"Bob"}}
 	got := formatRoundBlock(r)
 	if !strings.Contains(got, "🏹 Thợ săn kéo theo: Bob") {
 		t.Errorf("expected hunter revenge line, got:\n%s", got)

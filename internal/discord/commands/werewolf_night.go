@@ -34,6 +34,17 @@ const (
 
 	wolfDiscussBase    = 60 * time.Second
 	wolfDiscussPerWolf = 20 * time.Second
+
+	// wolfThreadAutoArchiveMinutes is the AutoArchiveDuration Discord
+	// applies to the wolf thread (Discord only accepts 60, 1440, 4320 or
+	// 10080 — i.e. minutes). Since the thread now persists for the whole
+	// game rather than being recreated nightly, it sits idle from the end
+	// of one night's wolf activity until the next night reopens it, and
+	// must not auto-archive in between. setWolfThreadLocked also clears
+	// Archived defensively on every lock/unlock, but the window still has
+	// to be comfortably longer than a full day+night cycle — see
+	// TestWolfThreadIdleGapStaysUnderAutoArchive, which pins that.
+	wolfThreadAutoArchiveMinutes = 60
 )
 
 // wolfDiscussWindowFor returns the night-discussion window for the wolves'
@@ -964,7 +975,7 @@ func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID stri
 		thread, err := s.ThreadStartComplex(channelID, &discordgo.ThreadStart{
 			Name:                "🐺 Bàn Sói",
 			Type:                discordgo.ChannelTypeGuildPrivateThread,
-			AutoArchiveDuration: 60,
+			AutoArchiveDuration: wolfThreadAutoArchiveMinutes,
 			Invitable:           false,
 		})
 		if err != nil {
@@ -1402,6 +1413,15 @@ func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID 
 // already has all the information she needs the moment she's prompted. Unlike
 // waitForNightActions, this has no Discord-facing side effect (no reminder
 // message to send), so it takes no *discordgo.Session.
+// waitForWitchAction blocks until the Witch finishes her turn, she leaves
+// the game, or the deadline passes.
+//
+// The liveness check is not optional: her handlers all reject once she's
+// no longer alive, so if she leaves (or is otherwise eliminated) while her
+// prompt is open, WitchActedThisRound can never become true and waiting on
+// it alone would burn the entire witchActionWindow with nobody able to end
+// it early. nightActionsComplete recomputes the alive roster every tick for
+// exactly this reason; this waiter has to as well.
 func (cmd *WerewolfCommand) waitForWitchAction(channelID string, deadline time.Time, seq uint64) {
 	for {
 		var gameFound, done bool
@@ -1413,7 +1433,7 @@ func (cmd *WerewolfCommand) waitForWitchAction(channelID string, deadline time.T
 				return
 			}
 			gameFound = true
-			done = game.WitchActedThisRound
+			done = game.WitchActedThisRound || len(alivePlayersOfRole(game, roleWitch)) == 0
 		}()
 		if !gameFound || done || time.Now().After(deadline) {
 			return
@@ -1586,6 +1606,13 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 				if g == nil {
 					return
 				}
+				// Don't strike a Witch who is no longer alive: she may
+				// have left or been killed mid-window, in which case she
+				// didn't ignore the prompt, she stopped being able to
+				// answer it.
+				if p, ok := g.Players[witch.UserID]; !ok || !p.Alive {
+					return
+				}
 				if g.WitchDidSomethingThisRound {
 					g.AFKStrikes[witch.UserID] = 0
 				} else {
@@ -1733,10 +1760,10 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			}
 			entry.CursedWolfConverted = cursedWolfConverted
 			if len(hunterRevenged) > 0 {
-				entry.HunterRevengeLabel = hunterRevenged[0].Label
+				entry.HunterRevengeLabels = append(entry.HunterRevengeLabels, labelsOf(hunterRevenged)...)
 			}
 			if len(loverDeaths) > 0 {
-				entry.LoverDeathLabel = loverDeaths[0].Label
+				entry.LoverDeathLabels = append(entry.LoverDeathLabels, labelsOf(loverDeaths)...)
 			}
 			if bonusBite {
 				entry.WolfBiteOutcomeLines = append([]string(nil), biteOutcomeLines...)
@@ -1746,18 +1773,30 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 	if !gameFound {
 		return
 	}
+	var deadNow []string
 	for _, p := range killedPlayers {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)
+		deadNow = append(deadNow, p.UserID)
 	}
 	if poisonedPlayer != nil {
 		removeFromAliveThread(s, aliveThreadID, poisonedPlayer.UserID)
+		deadNow = append(deadNow, poisonedPlayer.UserID)
 	}
 	for _, p := range hunterRevenged {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)
+		deadNow = append(deadNow, p.UserID)
 	}
 	for _, p := range loverDeaths {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)
+		deadNow = append(deadNow, p.UserID)
 	}
+	// Evict any wolf among tonight's dead from the wolf thread now. The
+	// thread is still UNLOCKED at this point — runDayDiscuss doesn't lock
+	// it until a moment later — so a wolf killed by poison, a Hunter's
+	// revenge or a lover chain would otherwise linger in a live thread the
+	// surviving pack can still post in. startWolfThread's sweep would
+	// catch them next night, but that's a whole day too late.
+	cmd.evictFromWolfThread(s, channelID, seq, deadNow)
 
 	var resultMsg string
 	switch {

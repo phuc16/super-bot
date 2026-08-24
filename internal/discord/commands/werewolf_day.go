@@ -231,12 +231,23 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 	}
 
 	deadline := time.Now().Add(dayVoteWindow)
-	cmd.waitForVotes(s, channelID, deadline, len(alive), seq)
+	cmd.waitForVotes(s, channelID, deadline, seq)
 
 	cmd.resolveVote(s, channelID, seq)
 }
 
-func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string, deadline time.Time, aliveCount int, seq uint64) {
+// waitForVotes blocks until every still-alive player has voted, or the
+// deadline passes.
+//
+// The alive count is RECOMPUTED each tick rather than taken as a snapshot
+// parameter. A player who leaves mid-vote without having voted would
+// otherwise make the early-exit unreachable — the survivors can only ever
+// produce (aliveAtStart - 1) entries — so the round would sit out the full
+// window in dead air even though everyone still in the game had voted.
+// Votes from players who have since died are also discounted here, for the
+// same reason: they can't be part of "everyone still playing has voted".
+// (validDayVotes independently drops those votes from the tally itself.)
+func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string, deadline time.Time, seq uint64) {
 	for {
 		var gameFound, done bool
 		func() {
@@ -247,7 +258,21 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 				return
 			}
 			gameFound = true
-			done = len(game.Votes) >= aliveCount
+
+			aliveNow, votedAndAlive := 0, 0
+			for id, p := range game.Players {
+				if !p.Alive {
+					continue
+				}
+				aliveNow++
+				if _, voted := game.Votes[id]; voted {
+					votedAndAlive++
+				}
+			}
+			// aliveNow == 0 can't happen while the game is running, but
+			// guard anyway so an empty roster ends the wait instead of
+			// spinning to the deadline.
+			done = aliveNow == 0 || votedAndAlive >= aliveNow
 		}()
 		if !gameFound || done || time.Now().After(deadline) {
 			return
@@ -365,10 +390,10 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 				entry.LynchedLabel = lynchedPlayer.Label
 			}
 			if len(hunterRevenged) > 0 {
-				entry.HunterRevengeLabel = hunterRevenged[0].Label
+				entry.HunterRevengeLabels = append(entry.HunterRevengeLabels, labelsOf(hunterRevenged)...)
 			}
 			if len(loverDeaths) > 0 {
-				entry.LoverDeathLabel = loverDeaths[0].Label
+				entry.LoverDeathLabels = append(entry.LoverDeathLabels, labelsOf(loverDeaths)...)
 			}
 		}
 	}()
@@ -469,10 +494,10 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		traitorPromoted = promoteTraitorIfWolvesWiped(game)
 		if n := len(game.History); n > 0 {
 			if len(hunterRevenged) > 0 {
-				game.History[n-1].HunterRevengeLabel = hunterRevenged[0].Label
+				game.History[n-1].HunterRevengeLabels = append(game.History[n-1].HunterRevengeLabels, labelsOf(hunterRevenged)...)
 			}
 			if len(loverDeaths) > 0 {
-				game.History[n-1].LoverDeathLabel = loverDeaths[0].Label
+				game.History[n-1].LoverDeathLabels = append(game.History[n-1].LoverDeathLabels, labelsOf(loverDeaths)...)
 			}
 		}
 
@@ -752,11 +777,11 @@ func formatRoundBlock(r roundLog) string {
 	if r.SeerTargetLabel != "" {
 		fmt.Fprintf(&b, "\n🔮 Tiên tri xem: %s → %s", r.SeerTargetLabel, r.SeerResult.label())
 	}
-	if r.HunterRevengeLabel != "" {
-		fmt.Fprintf(&b, "\n🏹 Thợ săn kéo theo: %s", r.HunterRevengeLabel)
+	if len(r.HunterRevengeLabels) > 0 {
+		fmt.Fprintf(&b, "\n🏹 Thợ săn kéo theo: %s", strings.Join(r.HunterRevengeLabels, ", "))
 	}
-	if r.LoverDeathLabel != "" {
-		fmt.Fprintf(&b, "\n💔 Người yêu qua đời theo: %s", r.LoverDeathLabel)
+	if len(r.LoverDeathLabels) > 0 {
+		fmt.Fprintf(&b, "\n💔 Người yêu qua đời theo: %s", strings.Join(r.LoverDeathLabels, ", "))
 	}
 	if r.DisruptorMutedLabel != "" {
 		fmt.Fprintf(&b, "\n🤫 Kẻ phá hoại làm câm lặng: %s", r.DisruptorMutedLabel)
@@ -782,26 +807,108 @@ func formatRoundBlock(r roundLog) string {
 	return b.String()
 }
 
-// chunkRecapMessages splits the full round-by-round recap into one or more
-// message bodies, each within limit characters, splitting only on whole
-// round boundaries (never mid-round). Always returns at least one string
-// when history is non-empty.
+// maxRecapMessages caps how many messages the end-of-game recap posts in
+// one burst. game.History grows one entry per round with no upper bound, so
+// a long game (many ties, saves and conversions, especially a custom-roles
+// game where every special role fires every round) can otherwise produce
+// 25+ back-to-back messages. Discord throttles a channel to roughly 5
+// messages per 5 seconds, so discordgo would spend ~25s rate-limited while
+// burying the channel. A realistic game produces 2-10 messages and never
+// reaches this cap; it exists for the pathological tail.
+const maxRecapMessages = 15
+
+// chunkRecapMessages splits the full round-by-round recap into message
+// bodies, each at most limit CHARACTERS (runes, matching how Discord counts
+// a message), and never more than maxRecapMessages of them. Always returns
+// at least one string when history is non-empty.
+//
+// Splitting prefers whole-round boundaries, but will split WITHIN a round
+// on line boundaries when a single round doesn't fit. That matters: at 20
+// players a round whose votes spread across many targets renders close to
+// 2000 characters on its own (measured ~1945 with max-length display
+// names), and a round that overflows would otherwise be emitted as one
+// oversized chunk, rejected by Discord with 400/50035 — and since the send
+// error is only logged, that round would vanish from the recap with
+// nothing in the channel indicating anything was lost.
+//
+// Counting runes rather than bytes is deliberate. Vietnamese text runs 2-3
+// bytes per character, so byte-counting would both under-pack messages and,
+// worse, give a guarantee in the wrong unit from the one Discord enforces.
 func chunkRecapMessages(history []roundLog, limit int) []string {
 	if len(history) == 0 {
 		return nil
 	}
 	const header = "📜 **Lịch sử ván đấu**"
+	const continued = "📜 **Lịch sử ván đấu** (tiếp)"
+
 	var chunks []string
 	current := header
+	currentLen := len([]rune(header))
+	// startFresh closes the current chunk and begins a new one. Subsequent
+	// chunks use the "(tiếp)" header so a reader can tell a continuation
+	// from the start of the recap.
+	startFresh := func() {
+		chunks = append(chunks, current)
+		current = continued
+		currentLen = len([]rune(continued))
+	}
+
 	for _, r := range history {
 		block := formatRoundBlock(r)
-		if len(current)+len(block) > limit && current != header {
-			chunks = append(chunks, current)
-			current = header
+		blockLen := len([]rune(block))
+
+		// Fast path: the whole round fits in the current chunk, or fits in
+		// a fresh one. Keep rounds intact whenever possible.
+		if currentLen+blockLen <= limit {
+			current += block
+			currentLen += blockLen
+			continue
 		}
-		current += block
+		if blockLen+len([]rune(continued)) <= limit {
+			startFresh()
+			current += block
+			currentLen += blockLen
+			continue
+		}
+
+		// Slow path: this single round is too big for any chunk. Split it
+		// line by line. formatRoundBlock builds every line with a leading
+		// "\n", so splitting on "\n" and re-adding it preserves the text
+		// exactly.
+		for _, line := range strings.Split(block, "\n") {
+			if line == "" {
+				continue // leading empty piece from the block's own "\n\n"
+			}
+			piece := "\n" + line
+			pieceLen := len([]rune(piece))
+			if currentLen+pieceLen > limit {
+				startFresh()
+			}
+			// A single line longer than the whole limit would still
+			// overflow; that needs a display name far beyond Discord's
+			// 32-char cap, so accept it rather than splitting mid-word,
+			// but never silently — the guard below trims as a last resort.
+			if pieceLen > limit {
+				piece = string([]rune(piece)[:limit])
+				pieceLen = limit
+			}
+			current += piece
+			currentLen += pieceLen
+		}
 	}
-	return append(chunks, current)
+	chunks = append(chunks, current)
+
+	if len(chunks) <= maxRecapMessages {
+		return chunks
+	}
+	// Too long: keep the most recent rounds — the ones that decided the
+	// game — and replace the dropped prefix with a single notice, so the
+	// total stays exactly maxRecapMessages.
+	dropped := len(chunks) - (maxRecapMessages - 1)
+	notice := fmt.Sprintf(
+		"📜 **Lịch sử ván đấu** — ván này quá dài, đã lược bớt %d phần đầu để tránh spam kênh. Dưới đây là các vòng gần nhất:",
+		dropped)
+	return append([]string{notice}, chunks[dropped:]...)
 }
 
 func (cmd *WerewolfCommand) handleVote(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
