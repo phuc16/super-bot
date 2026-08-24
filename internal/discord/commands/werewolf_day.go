@@ -368,7 +368,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 	var resultMsg string
 	switch {
 	case lynchedPlayer != nil && revealOnDeath:
-		resultMsg = fmt.Sprintf("⚖️ **%s** bị treo cổ. Vai trò: %s.", lynchedPlayer.Label, lynchedPlayer.Role.label())
+		resultMsg = fmt.Sprintf("⚖️ **%s** bị treo cổ. Vai trò: %s.", lynchedPlayer.Label, displayRoleLabel(lynchedPlayer))
 	case lynchedPlayer != nil:
 		resultMsg = fmt.Sprintf("⚖️ **%s** bị treo cổ.", lynchedPlayer.Label)
 	default:
@@ -469,10 +469,15 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 	if !gameFound {
 		return true
 	}
-	for _, p := range traitorPromoted {
-		dmTraitorPromoted(s, p)
-	}
 	if !ended {
+		// Only DM the promotion when the game is actually continuing — if
+		// this same tick both promotes the Traitor and ends the game
+		// (their promotion was the last wolf standing), "you'll vote with
+		// the pack from now on" would be confusing noise for a game that's
+		// already over instead of the dramatic reveal it's meant to be.
+		for _, p := range traitorPromoted {
+			dmTraitorPromoted(s, p)
+		}
 		for _, id := range removedIDs {
 			removeFromAliveThread(s, aliveThreadID, id)
 		}

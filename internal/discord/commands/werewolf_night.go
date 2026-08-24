@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -84,10 +85,23 @@ func tallyWolfVotes(votes map[string][]string, topN int) (targets []string, ok b
 		slotsLeft := topN - len(targets)
 		if len(remaining) <= slotsLeft {
 			// Everyone left fits in the room left — no rivalry, take them
-			// all regardless of their relative counts.
+			// all regardless of their relative counts. Sorted (by count
+			// descending, target ID as a stable tiebreak) rather than
+			// ranged over directly — Go's map iteration order is random,
+			// and this result feeds the recap's target-label ordering and
+			// the Witch's heal-menu option order, both of which must be
+			// deterministic from one run to the next.
+			rest := make([]string, 0, len(remaining))
 			for target := range remaining {
-				targets = append(targets, target)
+				rest = append(rest, target)
 			}
+			sort.Slice(rest, func(a, b int) bool {
+				if remaining[rest[a]] != remaining[rest[b]] {
+					return remaining[rest[a]] > remaining[rest[b]]
+				}
+				return rest[a] < rest[b]
+			})
+			targets = append(targets, rest...)
 			break
 		}
 
@@ -103,6 +117,7 @@ func tallyWolfVotes(votes map[string][]string, topN int) (targets []string, ok b
 				tied = append(tied, target)
 			}
 		}
+		sort.Strings(tied) // deterministic order among equal-count candidates
 		if len(tied) > slotsLeft {
 			// More rivals than room for this pass: genuinely ambiguous,
 			// and no lower-count target can un-tie it, so stop entirely
@@ -776,6 +791,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.WitchSaveTarget = ""
 		game.WitchPoisonTarget = ""
 		game.WitchActedThisRound = false
+		game.WitchDidSomethingThisRound = false
 		game.WitchPromptedThisRound = false
 		game.NightBiteTargetIDs = nil
 		game.HunterActedThisRound = false
@@ -1150,13 +1166,6 @@ func (cmd *WerewolfCommand) dmDisruptorPrompt(s *discordgo.Session, channelID st
 	}
 }
 
-// witchActionComponents builds the Witch's action message: an optional
-// poison target-select row (omitted if she's already used it), and a heal
-// control (omitted if there's no valid bite target, or she's already used
-// it) plus an always-present skip button. The heal control is a plain
-// confirm button when there's exactly one bite target (she can only be
-// healing "the" bite target) and a target-select menu when there are two
-// (the Wolf-Cub bonus bite) — she has to pick which one to save.
 // witchHasChoiceLeft reports whether the Witch still has at least one real
 // action available: the poison row renders whenever that potion isn't used
 // yet, and the heal control only when there's a bite target to heal and
@@ -1170,6 +1179,31 @@ func witchHasChoiceLeft(poisonUsed, healUsed bool, biteTargetCount int) bool {
 	return !poisonUsed || (!healUsed && biteTargetCount > 0)
 }
 
+// resolveWitchHealTarget resolves WitchSaveTarget's two encodings into one
+// target ID: the "heal" sentinel (single-target button path) means "the
+// lone bite target", while any other non-empty value is an explicit ID
+// picked from the two-target select menu. Empty if she hasn't (yet) chosen
+// to heal this round. Shared by finalizeNightResolution (to apply the
+// save) and handleWitchPoison (to reject poisoning the exact target she
+// already chose to heal — see that handler's comment).
+func resolveWitchHealTarget(saveTarget string, biteTargetIDs []string) string {
+	switch {
+	case saveTarget == "heal" && len(biteTargetIDs) > 0:
+		return biteTargetIDs[0]
+	case saveTarget != "" && saveTarget != "heal":
+		return saveTarget
+	default:
+		return ""
+	}
+}
+
+// witchActionComponents builds the Witch's action message: an optional
+// poison target-select row (omitted if she's already used it), and a heal
+// control (omitted if there's no valid bite target, or she's already used
+// it) plus an always-present skip button. The heal control is a plain
+// confirm button when there's exactly one bite target (she can only be
+// healing "the" bite target) and a target-select menu when there are two
+// (the Wolf-Cub bonus bite) — she has to pick which one to save.
 func witchActionComponents(channelID string, biteTargets []*player, healUsed, poisonUsed bool, poisonTargets []*player) []discordgo.MessageComponent {
 	var rows []discordgo.MessageComponent
 	if !poisonUsed {
@@ -1473,7 +1507,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 				if g == nil {
 					return
 				}
-				if g.WitchActedThisRound {
+				if g.WitchDidSomethingThisRound {
 					g.AFKStrikes[witch.UserID] = 0
 				} else {
 					g.AFKStrikes[witch.UserID]++
@@ -1526,17 +1560,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		// closes the window completely.
 		game.WitchPromptedThisRound = false
 
-		// witchHealTarget resolves the two heal encodings into one target ID:
-		// the "heal" sentinel (single-target button path) means "the lone
-		// bite target", while any other non-empty value is an explicit ID
-		// picked from the two-target select menu.
-		var witchHealTarget string
-		switch {
-		case game.WitchSaveTarget == "heal" && len(resolvedTargets) > 0:
-			witchHealTarget = resolvedTargets[0]
-		case game.WitchSaveTarget != "" && game.WitchSaveTarget != "heal":
-			witchHealTarget = game.WitchSaveTarget
-		}
+		witchHealTarget := resolveWitchHealTarget(game.WitchSaveTarget, resolvedTargets)
 		// doctorSaved/witchHealed keep the exact meaning they had in the
 		// single-target implementation (computed from the picks alone, not
 		// from whether the bite actually resolved to a spare) so the
@@ -1677,7 +1701,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		var lines []string
 		for _, p := range killedPlayers {
 			if revealOnDeath {
-				lines = append(lines, fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", p.Label, p.Role.label()))
+				lines = append(lines, fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", p.Label, displayRoleLabel(p)))
 			} else {
 				lines = append(lines, fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", p.Label))
 			}
@@ -1699,7 +1723,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 	case bonusBite:
 		resultMsg = "😴 Không ai chết vì Sói cắn đêm qua."
 	case len(killedPlayers) == 1 && revealOnDeath:
-		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", killedPlayers[0].Label, killedPlayers[0].Role.label())
+		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", killedPlayers[0].Label, displayRoleLabel(killedPlayers[0]))
 	case len(killedPlayers) == 1:
 		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", killedPlayers[0].Label)
 	case doctorSaved && poisonedPlayer == nil:
@@ -1727,7 +1751,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 	}
 	if poisonedPlayer != nil {
 		if revealOnDeath {
-			resultMsg += fmt.Sprintf("\n☠️ **%s** trúng độc của Phù Thủy. Vai trò: %s.", poisonedPlayer.Label, poisonedPlayer.Role.label())
+			resultMsg += fmt.Sprintf("\n☠️ **%s** trúng độc của Phù Thủy. Vai trò: %s.", poisonedPlayer.Label, displayRoleLabel(poisonedPlayer))
 		} else {
 			resultMsg += fmt.Sprintf("\n☠️ **%s** trúng độc của Phù Thủy.", poisonedPlayer.Label)
 		}
@@ -2068,14 +2092,15 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 	// night, so using poison earlier this round must not block heal (or
 	// vice versa in handleWitchPoison) — only WitchActedThisRound (set
 	// below, once she has nothing left to choose) ends her turn.
+	var healTargetID string
 	if values := i.MessageComponentData().Values; len(values) > 0 {
 		// Two-target select-menu path (Wolf-Cub bonus bite): the option list
 		// was built from game.NightBiteTargetIDs, but re-validate against it
 		// directly rather than trusting the client payload.
-		targetID := values[0]
+		healTargetID = values[0]
 		valid := false
 		for _, id := range game.NightBiteTargetIDs {
-			if id == targetID {
+			if id == healTargetID {
 				valid = true
 				break
 			}
@@ -2085,7 +2110,6 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 			respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
 			return
 		}
-		game.WitchSaveTarget = targetID
 	} else {
 		// Single-target button path: sentinel resolved against the lone bite
 		// target at finalize time. The plain button is only ever rendered
@@ -2098,9 +2122,26 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 			respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
 			return
 		}
+		healTargetID = game.NightBiteTargetIDs[0]
+	}
+	// Reject healing the exact target she already poisoned this round: the
+	// two potions are independent, but pointing both at the same person
+	// wastes them to no effect (the poison kills anyway) and would print a
+	// self-contradicting public message ("saved" immediately followed by
+	// "died of poison"), leaking her full night's actions by construction.
+	if game.WitchPoisonUsed && game.WitchPoisonTarget == healTargetID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã đầu độc người này rồi, không thể vừa cứu vừa đầu độc cùng một người.")
+		return
+	}
+	if healTargetID == game.NightBiteTargetIDs[0] && len(game.NightBiteTargetIDs) == 1 {
 		game.WitchSaveTarget = "heal"
+	} else {
+		game.WitchSaveTarget = healTargetID
 	}
 	game.WitchHealUsed = true
+	firstActionThisRound := !game.WitchDidSomethingThisRound
+	game.WitchDidSomethingThisRound = true
 	// Only ends her turn if poison is also already spent (or was never a
 	// choice) — otherwise she still has a real action left this round and
 	// must be allowed to take it.
@@ -2108,7 +2149,9 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 	cmd.mu.Unlock()
 
 	respondComponentEphemeral(s, i, "✅ Bạn đã chọn cứu người bị cắn đêm nay.")
-	announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	}
 }
 
 func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -2152,8 +2195,17 @@ func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo
 		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
 		return
 	}
+	// Reject poisoning the exact target she already chose to heal this
+	// round — see handleWitchHeal's matching guard for why.
+	if game.WitchHealUsed && resolveWitchHealTarget(game.WitchSaveTarget, game.NightBiteTargetIDs) == targetID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã cứu người này rồi, không thể vừa cứu vừa đầu độc cùng một người.")
+		return
+	}
 	game.WitchPoisonTarget = targetID
 	game.WitchPoisonUsed = true
+	firstActionThisRound := !game.WitchDidSomethingThisRound
+	game.WitchDidSomethingThisRound = true
 	// Only ends her turn if heal is also already spent/unavailable —
 	// otherwise she still has a real action left this round (heal and
 	// poison are independent, both usable the same night).
@@ -2161,7 +2213,9 @@ func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("☠️ Bạn đã đầu độc: <@%s>.", targetID))
-	announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	}
 }
 
 func (cmd *WerewolfCommand) handleWitchSkip(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
@@ -2190,9 +2244,13 @@ func (cmd *WerewolfCommand) handleWitchSkip(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Bạn đã hành động đêm nay rồi.")
 		return
 	}
+	firstActionThisRound := !game.WitchDidSomethingThisRound
+	game.WitchDidSomethingThisRound = true
 	game.WitchActedThisRound = true
 	cmd.mu.Unlock()
 
 	respondComponentEphemeral(s, i, "✅ Bạn chọn không làm gì đêm nay.")
-	announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	}
 }

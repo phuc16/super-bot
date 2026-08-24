@@ -135,16 +135,54 @@ func roleCountConfirmValid(counts map[role]int, playerCount int) bool {
 	}
 	wolfVoteParticipants := counts[roleWerewolf] + counts[roleWolfCub]
 	// Faction balance floor: checkWinCondition declares a wolf win the
-	// instant aliveWolves >= aliveOthers, so a custom setup that already
-	// meets that bar at deal time is an instant, guaranteed loss for the
-	// village before night 1 even resolves — no day discussion or vote
-	// ever happens. Computed from wolf-FACTION membership (factionForRole),
-	// not the UI's wolfSide grouping above: Cursed Wolf is grouped into
-	// wolfSide for the editor's display, but deals as villager-faction
-	// until it actually converts, so it must NOT count toward this floor.
+	// instant aliveWolves >= aliveOthers. wolfFaction*2 < playerCount alone
+	// only rules out an instant loss AT DEAL TIME — it still admits a setup
+	// where the single worst-case night-1 event (a Cursed Wolf conversion,
+	// which swings the tally by 2: aliveWolves+1 and aliveOthers-1 at once)
+	// reaches parity and ends the game before any day phase ever happens.
+	// Using wolfFaction*2+2 < playerCount instead means the village can
+	// survive that one worst-case swing and still be ahead, which is what
+	// "at least one real day phase" actually requires. Computed from
+	// wolf-FACTION membership (factionForRole), not the UI's wolfSide
+	// grouping above: Cursed Wolf is grouped into wolfSide for the editor's
+	// display, but deals as villager-faction until it actually converts,
+	// so it must NOT count toward this floor directly — its danger is
+	// already captured by sizing the floor to survive one conversion.
 	wolfFaction := counts[roleWerewolf] + counts[roleWolfCub] + counts[roleTraitor]
 	return wolfSide+villagerSide == playerCount && wolfSide >= 1 && villagerSide >= 1 &&
-		wolfVoteParticipants >= 1 && wolfFaction*2 < playerCount
+		wolfVoteParticipants >= 1 && wolfFaction*2+2 < playerCount
+}
+
+// roleCountConfirmError returns a specific, accurate explanation of which
+// of roleCountConfirmValid's conditions the starter's current counts fail
+// — checked in the same order they're evaluated there. Without this, the
+// confirm button had one fixed message describing only the total/both-
+// sides conditions, which actively misdescribed a rejection caused by the
+// wolf-vote-participant rule or the wolf-faction balance floor (both added
+// after that message was first written), leaving the starter no way to
+// diagnose a setup that already looked correct on screen. Returns "" if
+// counts are actually valid (callers should not call this in that case).
+func roleCountConfirmError(counts map[role]int, playerCount int) string {
+	wolfSide, villagerSide := 0, 0
+	for _, r := range roleCountWolfSideRoles {
+		wolfSide += counts[r]
+	}
+	for _, r := range roleCountVillagerSideRoles {
+		villagerSide += counts[r]
+	}
+	total := wolfSide + villagerSide
+	switch {
+	case total != playerCount:
+		return fmt.Sprintf("Tổng số vai trò hiện tại là %d, cần đúng bằng %d người chơi.", total, playerCount)
+	case wolfSide < 1:
+		return "Cần ít nhất 1 vai phe Sói."
+	case villagerSide < 1:
+		return "Cần ít nhất 1 vai phe Dân."
+	case counts[roleWerewolf]+counts[roleWolfCub] < 1:
+		return "Cần ít nhất 1 Ma Sói hoặc Sói Con để bầy Sói có người bỏ phiếu cắn — Sói Nguyền và Kẻ Phản Bội một mình không đủ."
+	default:
+		return "Phe Sói hiện quá mạnh so với số người chơi: nếu bị cắn hụt hoặc Sói Nguyền biến hình chỉ 1 lần, phe Sói đã có thể thắng ngay trong đêm đầu, không kịp có ngày thảo luận nào. Hãy giảm bớt Ma Sói/Sói Con/Sói Nguyền/Kẻ Phản Bội hoặc tăng phe Dân."
+	}
 }
 
 // roleRatioFromCounts converts the editor's counts into a roleRatio for
@@ -419,8 +457,9 @@ func (cmd *WerewolfCommand) handleRoleCountConfirm(s *discordgo.Session, i *disc
 	}
 	playerCount := len(game.JoinOrder)
 	if !roleCountConfirmValid(game.PendingRoleCounts, playerCount) {
+		errMsg := roleCountConfirmError(game.PendingRoleCounts, playerCount)
 		cmd.mu.Unlock()
-		respondComponentEphemeral(s, i, "Tổng số vai trò phải bằng số người chơi, và cần ít nhất 1 vai phe Sói và 1 vai phe Dân.")
+		respondComponentEphemeral(s, i, errMsg)
 		return
 	}
 	ratio := roleRatioFromCounts(game.PendingRoleCounts)

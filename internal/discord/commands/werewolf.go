@@ -163,10 +163,15 @@ type player struct {
 	DealtRole role
 }
 
-// displayRoleLabel renders the role to show in end-of-game reveals and
-// recaps: p.Role.label() normally, but a promoted Traitor (DealtRole ==
-// roleTraitor, Role since mutated away from it) gets an annotated label
-// instead of silently reading as a plain Werewolf.
+// displayRoleLabel renders the role to show any time a player's role is
+// revealed to the channel — every reveal-on-death line (kill, poison,
+// lynch, voluntary leave) as well as the end-of-game reveal/recap: use this
+// everywhere p.Role.label() would otherwise be shown to players, never
+// p.Role.label() directly. Normally identical to p.Role.label(), but a
+// promoted Traitor (DealtRole == roleTraitor, Role since mutated away from
+// it) gets an annotated label instead of silently reading as a plain
+// Werewolf — including mid-game, where an un-annotated reveal would
+// directly contradict an earlier Seer check of that same player.
 func displayRoleLabel(p *player) string {
 	if p.DealtRole == roleTraitor && p.Role != roleTraitor {
 		return fmt.Sprintf("%s (từng là %s)", p.Role.label(), roleTraitor.label())
@@ -515,7 +520,8 @@ type werewolfGame struct {
 	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
 	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2+-target case, chosen via the select menu in handleWitchHeal)
 	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
-	WitchActedThisRound           bool                           // reset each round; true once she confirms any choice (heal/poison/skip)
+	WitchActedThisRound           bool                           // reset each round; true once her TURN IS OVER — she's skipped, or used a potion and has no remaining choice (see witchHasChoiceLeft). NOT true just because she did something this round — a Witch who uses only one of two available potions leaves this false so she can still take the second action. Gates re-entry into her handlers and waitForWitchAction's completion check.
+	WitchDidSomethingThisRound    bool                           // reset each round; true the moment she takes ANY action (heal, poison, or skip), even if WitchActedThisRound stays false because she still has a choice left. This is what the AFK-strike check and the one-time announceRoleDecided ping key off — using WitchActedThisRound for either would falsely AFK-strike (and never re-announce) a Witch who legitimately used only one of her two available potions this round.
 	WolfBonusBiteNextNight        int                            // extra kill target(s) armed for a FUTURE night's wolf vote, beyond the base 1 — incremented once per Wolf Cub death (any cause) so 2+ Wolf Cubs dying the same round compound correctly. Deliberately NOT read directly by the picker/tally — see WolfBonusBiteActiveThisRound, which snapshots this at night-open so a Wolf Cub death arriving mid-night (e.g. via /werewolf leave) can't retroactively change the bonus for the vote already in progress
 	WolfBonusBiteActiveThisRound  int                            // snapshot of WolfBonusBiteNextNight taken once at the start of runNightPhase, then immediately zeroing the live counter — this is what the picker's MaxValues and resolveNight's topN both read for the round, so they always agree with each other and can't be changed by an arming event mid-round; any new arming during the round accrues in WolfBonusBiteNextNight for the round after this one
 	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2+ if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a bonus-bite select-menu pick, reset each round in runNightPhase
@@ -972,6 +978,7 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 		// next /werewolf start in this channel would capture that leaked
 		// deny as ITS OWN "prior" state.
 		unlockChannel(s, i.GuildID, i.ChannelID, priorOverwrite)
+		respondError(s, i, "Ván này đã bị huỷ trước khi kịp bắt đầu, thử lại nhé.")
 		return
 	}
 
@@ -1131,7 +1138,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 
 	msg := fmt.Sprintf("💨 **%s** đã rời ván.", leftPlayer.Label)
 	if revealOnDeath {
-		msg = fmt.Sprintf("💨 **%s** đã rời ván. Vai trò: %s.", leftPlayer.Label, leftPlayer.Role.label())
+		msg = fmt.Sprintf("💨 **%s** đã rời ván. Vai trò: %s.", leftPlayer.Label, displayRoleLabel(leftPlayer))
 	}
 	for _, hp := range hunterRevenged {
 		msg += "\n" + hunterRevengeLine(hp, revealOnDeath)
@@ -1288,6 +1295,16 @@ func gameTeardownInfoFor(channelID string, game *werewolfGame) gameTeardownInfo 
 }
 
 func teardownGame(s *discordgo.Session, info gameTeardownInfo) {
+	// Unlock FIRST, before touching either thread: the channel lock is the
+	// one side effect that's actually harmful to leave behind (denies
+	// @everyone SEND_MESSAGES with no game left to fix it, and compounds
+	// via the next game's PriorOverwrite capture), whereas an orphaned
+	// thread is merely untidy. If the process is killed partway through
+	// teardown (e.g. Shutdown's grace period expiring mid-loop), this
+	// ordering guarantees the important step already landed.
+	if !info.channelUnlocked {
+		unlockChannel(s, info.guildID, info.channelID, info.priorOverwrite)
+	}
 	if info.threadID != "" {
 		if _, err := s.ChannelDelete(info.threadID); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to delete wolf thread during teardown")
@@ -1297,9 +1314,6 @@ func teardownGame(s *discordgo.Session, info gameTeardownInfo) {
 		if _, err := s.ChannelDelete(info.aliveThreadID); err != nil {
 			log.Error().Err(err).Msg("werewolf: failed to delete alive-discussion thread during teardown")
 		}
-	}
-	if !info.channelUnlocked {
-		unlockChannel(s, info.guildID, info.channelID, info.priorOverwrite)
 	}
 }
 
@@ -1321,15 +1335,29 @@ func (cmd *WerewolfCommand) Shutdown(s *discordgo.Session) {
 	cmd.games = make(map[string]*werewolfGame)
 	cmd.mu.Unlock()
 
+	// Fan every game's teardown out concurrently rather than looping
+	// serially: each game costs ~4 sequential REST calls, and a SIGTERM
+	// grace period (commonly ~10s) is a hard wall a large enough batch of
+	// games could exceed one at a time, risking a SIGKILL mid-loop that
+	// never reaches the later games' unlockChannel at all. teardownGame's
+	// own unlock-before-delete ordering (see its comment) means even a
+	// goroutine that gets killed mid-flight has already done the one step
+	// that matters for whichever game it was handling.
+	var wg sync.WaitGroup
 	for _, info := range infos {
-		teardownGame(s, info)
-		if _, err := s.ChannelMessageSendComplex(info.channelID, &discordgo.MessageSend{
-			Content:         "🛑 Bot khởi động lại — ván Ma Sói đang chạy trong kênh này đã bị huỷ, kênh đã được mở khoá.",
-			AllowedMentions: &discordgo.MessageAllowedMentions{},
-		}); err != nil {
-			log.Error().Err(err).Str("channel_id", info.channelID).Msg("werewolf: failed to announce shutdown teardown")
-		}
+		wg.Add(1)
+		go func(info gameTeardownInfo) {
+			defer wg.Done()
+			teardownGame(s, info)
+			if _, err := s.ChannelMessageSendComplex(info.channelID, &discordgo.MessageSend{
+				Content:         "🛑 Bot khởi động lại — ván Ma Sói đang chạy trong kênh này đã bị huỷ, kênh đã được mở khoá.",
+				AllowedMentions: &discordgo.MessageAllowedMentions{},
+			}); err != nil {
+				log.Error().Err(err).Str("channel_id", info.channelID).Msg("werewolf: failed to announce shutdown teardown")
+			}
+		}(info)
 	}
+	wg.Wait()
 }
 
 func (cmd *WerewolfCommand) handleForceStop(s *discordgo.Session, i *discordgo.InteractionCreate) {

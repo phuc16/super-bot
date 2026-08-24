@@ -772,6 +772,27 @@ func TestWitchHasChoiceLeftAllowsBothPotionsSameNight(t *testing.T) {
 	}
 }
 
+func TestResolveWitchHealTarget(t *testing.T) {
+	cases := []struct {
+		name        string
+		saveTarget  string
+		biteTargets []string
+		want        string
+	}{
+		{"no heal chosen", "", []string{"v1"}, ""},
+		{"single-target sentinel resolves to the lone bite target", "heal", []string{"v1"}, "v1"},
+		{"sentinel with no bite targets resolves to nothing", "heal", nil, ""},
+		{"explicit 2-target pick passes through as-is", "v2", []string{"v1", "v2"}, "v2"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveWitchHealTarget(c.saveTarget, c.biteTargets); got != c.want {
+				t.Errorf("resolveWitchHealTarget(%q, %v) = %q, want %q", c.saveTarget, c.biteTargets, got, c.want)
+			}
+		})
+	}
+}
+
 func TestChunkRecapMessagesSingleChunkWhenSmall(t *testing.T) {
 	history := []roundLog{{Round: 1, WolfTargetLabel: "A"}, {Round: 2, WolfTargetLabel: "B"}}
 	chunks := chunkRecapMessages(history, 2000)
@@ -964,6 +985,22 @@ func TestTallyWolfVotesTwoWolvesUnanimousMultiPick(t *testing.T) {
 	}
 	if len(targets) != 2 || !got["x"] || !got["y"] {
 		t.Errorf("expected both x and y from a unanimous 2-wolf 2-pick vote, got %v", targets)
+	}
+}
+
+func TestTallyWolfVotesEveryoneFitsShortcutIsDeterministic(t *testing.T) {
+	// Regression: the "everyone left fits in the room left" shortcut used
+	// to range over a Go map directly, giving random order run to run —
+	// this fed the recap's target-label ordering and the Witch's
+	// heal-menu option order nondeterministically. Run many times to
+	// catch any reintroduced map-iteration dependency.
+	votes := map[string][]string{"w1": {"x"}, "w2": {"x"}, "w3": {"y"}}
+	want := []string{"x", "y"} // x:2 sorts before y:1 by count descending
+	for i := 0; i < 50; i++ {
+		got, ok := tallyWolfVotes(votes, 2)
+		if !ok || len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("run %d: tallyWolfVotes(...) = %v, %v, want %v, true (stable order every run)", i, got, ok, want)
+		}
 	}
 }
 
@@ -1869,14 +1906,46 @@ func TestRoleCountConfirmValid(t *testing.T) {
 		{"cursed wolf alone is not enough — no wolf-vote-participant", map[role]int{roleCursedWolf: 1, roleVillager: 6}, 7, false},
 		{"werewolf plus cursed wolf is valid", map[role]int{roleWerewolf: 1, roleCursedWolf: 1, roleVillager: 5}, 7, true},
 		{"wolf faction at half the roster is an instant loss, rejected", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5, false},
-		{"wolf faction just under half is valid", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5, true},
+		{"wolf faction that reaches parity after just ONE plain kill is rejected", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5, false},
+		{"wolf faction with margin to survive one kill is valid", map[role]int{roleWerewolf: 3, roleVillager: 6}, 9, true},
+		{"wolf faction one over that margin is rejected", map[role]int{roleWerewolf: 4, roleVillager: 5}, 9, false},
 		{"traitor counts toward the wolf-faction floor too", map[role]int{roleWerewolf: 2, roleTraitor: 1, roleVillager: 2}, 5, false},
-		{"cursed wolf does NOT count toward the wolf-faction floor (deals villager-faction)", map[role]int{roleWerewolf: 2, roleCursedWolf: 2, roleVillager: 1}, 5, true},
+		{"cursed wolf's conversion swing means it still can't be excluded for free — this config is an instant loss after one bite", map[role]int{roleWerewolf: 2, roleCursedWolf: 2, roleVillager: 1}, 5, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if got := roleCountConfirmValid(c.counts, c.playerCount); got != c.want {
 				t.Errorf("roleCountConfirmValid(%v, %d) = %v, want %v", c.counts, c.playerCount, got, c.want)
+			}
+		})
+	}
+}
+
+func TestRoleCountConfirmErrorMatchesActualFailure(t *testing.T) {
+	// Regression: the confirm-rejection message used to be one fixed string
+	// describing only the total/both-sides conditions, actively misleading
+	// a starter whose rejection was actually caused by the wolf-vote-
+	// participant rule or the balance floor (both added later).
+	cases := []struct {
+		name        string
+		counts      map[role]int
+		playerCount int
+		wantSubstr  string
+	}{
+		{"wrong total", map[role]int{roleWerewolf: 1, roleVillager: 6}, 5, "Tổng số vai trò hiện tại"},
+		{"no wolf side", map[role]int{roleVillager: 5}, 5, "phe Sói"},
+		{"no villager side", map[role]int{roleWerewolf: 5}, 5, "phe Dân"},
+		{"no wolf-vote-participant", map[role]int{roleTraitor: 1, roleCursedWolf: 1, roleVillager: 6}, 8, "Ma Sói hoặc Sói Con"},
+		{"balance floor", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5, "quá mạnh"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if roleCountConfirmValid(c.counts, c.playerCount) {
+				t.Fatalf("test setup bug: %v at %d players is actually valid", c.counts, c.playerCount)
+			}
+			got := roleCountConfirmError(c.counts, c.playerCount)
+			if !strings.Contains(got, c.wantSubstr) {
+				t.Errorf("roleCountConfirmError(%v, %d) = %q, want it to mention %q", c.counts, c.playerCount, got, c.wantSubstr)
 			}
 		})
 	}
