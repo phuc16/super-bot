@@ -549,7 +549,7 @@ type werewolfGame struct {
 	WitchDidSomethingThisRound    bool                           // reset each round; true the moment she takes ANY action (heal, poison, or skip), even if WitchActedThisRound stays false because she still has a choice left. This is what the AFK-strike check and the one-time announceRoleDecided ping key off — using WitchActedThisRound for either would falsely AFK-strike (and never re-announce) a Witch who legitimately used only one of her two available potions this round.
 	WolfBonusBiteNextNight        int                            // extra kill target(s) armed for a FUTURE night's wolf vote, beyond the base 1 — incremented once per Wolf Cub death (any cause) so 2+ Wolf Cubs dying the same round compound correctly. Deliberately NOT read directly by the picker/tally — see WolfBonusBiteActiveThisRound, which snapshots this at night-open so a Wolf Cub death arriving mid-night (e.g. via /werewolf leave) can't retroactively change the bonus for the vote already in progress
 	WolfBonusBiteActiveThisRound  int                            // snapshot of WolfBonusBiteNextNight taken once at the start of runNightPhase, then immediately zeroing the live counter — this is what the picker's MaxValues and resolveNight's topN both read for the round, so they always agree with each other and can't be changed by an arming event mid-round; any new arming during the round accrues in WolfBonusBiteNextNight for the round after this one
-	NightBiteTargetIDs            []string                       // this round's resolved wolf-vote target(s) — 1 normally, 2+ if the bonus bite fired — set in resolveNight, read by handleWitchHeal to validate a bonus-bite select-menu pick, reset each round in runNightPhase
+	WitchHealableTargetIDs        []string                       // this round's bite target(s) the Witch could still meaningfully heal: the resolved wolf-vote targets MINUS anyone the Doctor already protected — set in resolveNight, read by handleWitchHeal to validate a pick, reset each round in runNightPhase
 	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
 	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor/disruptor/hunter handlers against a late click landing during the Witch's stage-2 window. Does NOT gate the Witch's own handlers, which have their own WitchActedThisRound/WitchPromptedThisRound gating for that same window.
 	DayVoteClosed                 bool                           // reset false at the start of each day-vote round (runDayVote); set true once resolveVote's locked block has tallied and applied the lynch — gates handleVote against a late click landing during resolveVote's post-unlock cleanup/messaging/win-check work, mirroring NightActionsClosed for the day-vote side
@@ -655,6 +655,16 @@ func werewolfLobbyContent(game *werewolfGame) string {
 // appended to phase-transition announcements so players don't have to run
 // /werewolf status to check who's still in. Must be called with cmd.mu
 // held — it reads game.Players/game.JoinOrder directly.
+// The alive list renders as <@id> mentions rather than plain labels, so
+// living players are visually distinct from dead ones at a glance. Whether
+// those mentions actually NOTIFY is the caller's choice, made by what it
+// passes as AllowedMentions: the day phases ping (see aliveMentionsFor),
+// pulling players out of their DMs and back into the channel, while the
+// night announcements render the same highlighted names silently — night
+// action happens in DMs, so a notification there would be noise.
+//
+// Dead players stay as plain labels: mentioning them would ping people who
+// are out of the game every time the summary is posted.
 func aliveDeadSummary(game *werewolfGame) string {
 	var alive, dead []string
 	for _, id := range game.JoinOrder {
@@ -663,7 +673,7 @@ func aliveDeadSummary(game *werewolfGame) string {
 			continue
 		}
 		if p.Alive {
-			alive = append(alive, p.Label)
+			alive = append(alive, nameTag(p.UserID))
 		} else {
 			dead = append(dead, p.Label)
 		}
@@ -673,6 +683,20 @@ func aliveDeadSummary(game *werewolfGame) string {
 		summary += fmt.Sprintf("\n💀 Đã chết: %s", strings.Join(dead, ", "))
 	}
 	return summary
+}
+
+// aliveMentionsFor returns AllowedMentions scoped to exactly the players
+// still alive, authorizing the mentions aliveDeadSummary renders. Scoped to
+// Users only — never a role or @everyone — so nobody outside the game is
+// notified. Must be called with cmd.mu held.
+func aliveMentionsFor(game *werewolfGame) *discordgo.MessageAllowedMentions {
+	var ids []string
+	for _, id := range game.JoinOrder {
+		if p, ok := game.Players[id]; ok && p.Alive {
+			ids = append(ids, p.UserID)
+		}
+	}
+	return &discordgo.MessageAllowedMentions{Users: ids}
 }
 
 // nightRoleEmoji is the icon shown next to a role in player-facing text.

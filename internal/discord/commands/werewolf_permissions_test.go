@@ -792,3 +792,196 @@ func TestAnsiLineCannotBreakOutOfItsFence(t *testing.T) {
 		t.Errorf("expected exactly one opening and one closing fence: %q", got)
 	}
 }
+
+// TestWitchIsNotOfferedADoctorProtectedTarget covers the trap the Witch
+// used to face: the wolves bite someone the Doctor already protected, she
+// is shown that name, and spending her single once-per-game heal on it
+// consumes the potion to buy an outcome that was already guaranteed. She
+// cannot tell the difference from her side, so it was never a real choice.
+func TestWitchIsNotOfferedADoctorProtectedTarget(t *testing.T) {
+	cases := []struct {
+		name          string
+		bites         []string
+		doctorProtect string
+		want          []string
+	}{
+		{"lone bite, doctor covered it", []string{"a"}, "a", nil},
+		{"lone bite, doctor elsewhere", []string{"a"}, "b", []string{"a"}},
+		{"lone bite, no doctor in play", []string{"a"}, "", []string{"a"}},
+		{"bonus bite, doctor covered the first", []string{"a", "b"}, "a", []string{"b"}},
+		{"bonus bite, doctor covered the second", []string{"a", "b"}, "b", []string{"a"}},
+		{"bonus bite, doctor covered neither", []string{"a", "b"}, "c", []string{"a", "b"}},
+		{"no bite at all", nil, "a", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := healableBiteTargetIDs(c.bites, c.doctorProtect)
+			if !sameStrings(got, c.want) {
+				t.Errorf("healableBiteTargetIDs(%v, %q) = %v, want %v", c.bites, c.doctorProtect, got, c.want)
+			}
+		})
+	}
+
+	t.Run("a fully-protected night offers no heal control", func(t *testing.T) {
+		// The heal button/menu must disappear, not just be pointless — and
+		// with poison already spent she has nothing left to do, so
+		// witchHasChoiceLeft must report false rather than stalling the
+		// night on a prompt she cannot answer.
+		healable := healableBiteTargetIDs([]string{"a"}, "a")
+		if n := healableBiteTargetCount(healable, ""); n != 0 {
+			t.Errorf("healable count = %d, want 0", n)
+		}
+		if witchHasChoiceLeft(true, false, healableBiteTargetCount(healable, "")) {
+			t.Error("witchHasChoiceLeft = true with poison spent and every bite protected — the night would wait on a prompt with nothing to click")
+		}
+		if !witchHasChoiceLeft(false, false, 0) {
+			t.Error("witchHasChoiceLeft = false while poison is still available — she should still be prompted to poison")
+		}
+	})
+
+	t.Run("the single-target heal sentinel resolves within the healable list", func(t *testing.T) {
+		// Two bites, the Doctor covered the first. The "heal" sentinel means
+		// "the one target she was shown" — resolving it against the raw bite
+		// list would heal the already-protected player and waste the potion
+		// on exactly the case this change exists to prevent.
+		healable := healableBiteTargetIDs([]string{"a", "b"}, "a")
+		if got := resolveWitchHealTarget("heal", healable); got != "b" {
+			t.Errorf("resolveWitchHealTarget = %q, want \"b\"", got)
+		}
+	})
+}
+
+// TestWitchPromptHidesTheDoctorsSave pins the secrecy property. A night
+// whose only bite was protected must read to the Witch exactly like a night
+// with no bite, or the message becomes a reliable tell that the Doctor
+// saved someone.
+func TestWitchPromptHidesTheDoctorsSave(t *testing.T) {
+	src, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	body, ok := funcBody(string(src), ") dmWitchPrompt(")
+	if !ok {
+		t.Fatal("could not locate dmWitchPrompt")
+	}
+	// One no-target phrase, used for both situations. Two distinct phrases
+	// would be exactly the leak.
+	if strings.Contains(body, "Bác Sĩ") || strings.Contains(body, "bác sĩ") {
+		t.Error("the Witch's prompt mentions the Doctor — that reveals a save she should not be able to see")
+	}
+	if !strings.Contains(body, "không có ai cần cứu") {
+		t.Error("dmWitchPrompt lost its no-healable-target wording")
+	}
+}
+
+// TestAliveSummaryMentionsTheLivingOnly guards the alive-list ping added so
+// players notice the day phase and come back from their DMs.
+func TestAliveSummaryMentionsTheLivingOnly(t *testing.T) {
+	game := &werewolfGame{Players: map[string]*player{}}
+	for n := 0; n < 6; n++ {
+		id := fmt.Sprintf("%d", 100000000000000000+n)
+		game.Players[id] = &player{UserID: id, Label: fmt.Sprintf("Player%d", n), Alive: n%2 == 0}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+
+	summary := aliveDeadSummary(game)
+	allowed := aliveMentionsFor(game)
+
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		mentioned := strings.Contains(summary, nameTag(id))
+		if p.Alive != mentioned {
+			t.Errorf("player %s alive=%v but mentioned=%v", id, p.Alive, mentioned)
+		}
+		authorized := false
+		for _, u := range allowed.Users {
+			if u == id {
+				authorized = true
+			}
+		}
+		if p.Alive != authorized {
+			t.Errorf("player %s alive=%v but ping-authorized=%v", id, p.Alive, authorized)
+		}
+	}
+
+	if len(allowed.Roles) != 0 || len(allowed.Parse) != 0 {
+		t.Errorf("allowed = %+v, want Users-only — a role or everyone ping would reach non-players", allowed)
+	}
+
+	t.Run("the dead are never pinged", func(t *testing.T) {
+		// Dead players stay plain labels: they are out of the game and
+		// would otherwise be notified on every phase for the rest of it.
+		dead := game.Players[game.JoinOrder[1]]
+		if strings.Contains(summary, nameTag(dead.UserID)) {
+			t.Errorf("dead player %s is mentioned: %q", dead.UserID, summary)
+		}
+		if !strings.Contains(summary, dead.Label) {
+			t.Errorf("dead player %s lost their name from the summary: %q", dead.Label, summary)
+		}
+	})
+}
+
+// TestOnlyDayPhasesPingTheAliveList pins where the ping fires. Night
+// announcements carry the same mention text but must not notify: night
+// action happens in DMs, and pinging every phase would be ~4 notifications
+// per player per round.
+func TestOnlyDayPhasesPingTheAliveList(t *testing.T) {
+	src, err := os.ReadFile("werewolf_day.go")
+	if err != nil {
+		t.Fatalf("read werewolf_day.go: %v", err)
+	}
+	for _, fn := range []string{") runDayDiscuss(", ") runDayVote("} {
+		body, ok := funcBody(string(src), fn)
+		if !ok {
+			t.Fatalf("could not locate %s", fn)
+		}
+		if !strings.Contains(body, "AllowedMentions: aliveMentions") {
+			t.Errorf("%s does not ping the alive list — players stay in their DMs through the day phase", fn)
+		}
+	}
+
+	night, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	if strings.Contains(string(night), "aliveMentionsFor(") {
+		t.Error("a night path pings the alive list — night action is in DMs, so this is pure notification noise")
+	}
+}
+
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for idx := range got {
+		if got[idx] != want[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestResolveNightFiltersTheWitchsHealTargets guards the WIRING, not the
+// helper. healableBiteTargetIDs being correct is worthless if resolveNight
+// goes back to handing the Witch the raw bite list — and reverting exactly
+// that passed every other test in this file.
+func TestResolveNightFiltersTheWitchsHealTargets(t *testing.T) {
+	src, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	text := string(src)
+
+	if !strings.Contains(text, "healableBiteTargetIDs(resolvedTargets, game.DoctorProtect)") {
+		t.Error("resolveNight no longer filters the Witch's heal targets by the Doctor's pick — she can waste her one heal on an already-protected player")
+	}
+	// The menu and the stored validation list must come from the same
+	// filtered source; building the menu from resolvedTargets would show
+	// her a target handleWitchHeal then rejects.
+	if strings.Contains(text, "copyPlayers(playersByIDs(game, resolvedTargets))") {
+		t.Error("the Witch's heal menu is built from the raw bite list instead of WitchHealableTargetIDs")
+	}
+	if !strings.Contains(text, "resolveWitchHealTarget(game.WitchSaveTarget, game.WitchHealableTargetIDs)") {
+		t.Error("finalizeNightResolution resolves the heal sentinel against the raw bite list — with a bonus bite this heals the wrong player")
+	}
+}

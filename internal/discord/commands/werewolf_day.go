@@ -85,6 +85,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	var round int
 	var aliveCount int
 	var summary string
+	var aliveMentions *discordgo.MessageAllowedMentions
 	var aliveThreadID string
 	var wolfThreadID string
 	var mutedUserID string
@@ -104,6 +105,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 			}
 		}
 		summary = aliveDeadSummary(game)
+		aliveMentions = aliveMentionsFor(game)
 		aliveThreadID = game.AliveThreadID
 		wolfThreadID = game.WolfThreadID
 		mutedUserID = game.DisruptorTarget
@@ -172,9 +174,12 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	if aliveThreadID != "" {
 		content += fmt.Sprintf("\n\n💬 Thảo luận tại <#%s>", aliveThreadID)
 	}
+	// Ping the living here: this is the moment play moves out of DMs and
+	// back into the channel, and a player still watching their DM window
+	// would otherwise miss the whole discussion.
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content:         content,
-		AllowedMentions: &discordgo.MessageAllowedMentions{},
+		AllowedMentions: aliveMentions,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post day-discuss announcement")
 	}
@@ -197,6 +202,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 	var gameFound bool
 	var alive []*player
 	var summary string
+	var aliveMentions *discordgo.MessageAllowedMentions
 	var aliveThreadID string
 	var mutedUserID string
 	func() {
@@ -216,6 +222,7 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 			}
 		}
 		summary = aliveDeadSummary(game)
+		aliveMentions = aliveMentionsFor(game)
 		aliveThreadID = game.AliveThreadID
 		// Read exactly who runDayDiscuss actually muted, rather than
 		// re-deriving it from DisruptorTarget + current aliveness. Those
@@ -234,9 +241,15 @@ func (cmd *WerewolfCommand) runDayVote(s *discordgo.Session, channelID string, s
 		removeDisruptorMute(s, channelID, mutedUserID)
 	}
 
+	// Explicit AllowedMentions, not the zero value and not omitted: this
+	// message carries the alive list, which is now rendered as mentions, and
+	// a nil AllowedMentions lets Discord parse and fire everything it finds
+	// in the content. Scoping to the living is also what makes the ping
+	// useful here — a distracted player gets pulled back in time to vote.
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:    fmt.Sprintf("🗳️ **Bỏ phiếu treo cổ.** Chọn người bạn nghi ngờ, hoặc bỏ qua.\n\n%s", summary),
-		Components: voteSelectMenu(werewolfVoteID+channelID, "Chọn người để treo cổ", alive),
+		Content:         fmt.Sprintf("🗳️ **Bỏ phiếu treo cổ.** Chọn người bạn nghi ngờ, hoặc bỏ qua.\n\n%s", summary),
+		Components:      voteSelectMenu(werewolfVoteID+channelID, "Chọn người để treo cổ", alive),
+		AllowedMentions: aliveMentions,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post vote select")
 	}

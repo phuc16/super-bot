@@ -800,7 +800,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		game.WitchActedThisRound = false
 		game.WitchDidSomethingThisRound = false
 		game.WitchPromptedThisRound = false
-		game.NightBiteTargetIDs = nil
+		game.WitchHealableTargetIDs = nil
 		game.HunterActedThisRound = false
 		game.DisruptorTarget = ""
 		game.DisruptorActedThisRound = false
@@ -1251,6 +1251,28 @@ func witchHasChoiceLeft(poisonUsed, healUsed bool, healableBiteTargets int) bool
 // still choose to heal — i.e. every one except a target she has already
 // poisoned this round, which handleWitchHeal refuses to also heal. Pass ""
 // for poisonTargetID when she hasn't poisoned anyone yet.
+// healableBiteTargetIDs narrows this round's bite targets to the ones the
+// Witch could still meaningfully save — everyone the Doctor did NOT already
+// protect.
+//
+// Without this the Witch was offered a target the Doctor had already
+// covered, and spending her single once-per-game heal there consumed the
+// potion to produce an outcome that was going to happen anyway. She has no
+// way to tell the difference, so the choice was a pure trap.
+//
+// Filtering here also keeps the Doctor's pick secret rather than leaking
+// it: a night where the only bite was protected now looks identical, from
+// the Witch's side, to a night with no bite at all.
+func healableBiteTargetIDs(biteTargetIDs []string, doctorProtectID string) []string {
+	var result []string
+	for _, id := range biteTargetIDs {
+		if doctorProtectID == "" || id != doctorProtectID {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
 func healableBiteTargetCount(biteTargetIDs []string, poisonTargetID string) int {
 	n := 0
 	for _, id := range biteTargetIDs {
@@ -1321,7 +1343,10 @@ func (cmd *WerewolfCommand) dmWitchPrompt(s *discordgo.Session, channelID string
 		log.Error().Err(err).Msg("werewolf: failed to open DM for witch")
 		return
 	}
-	bittenText := "Không ai bị cắn đêm nay."
+	// Covers both "the wolves killed nobody" and "the only bite was already
+	// protected by the Doctor" — deliberately the same wording, so this
+	// message never reveals that the Doctor made a save.
+	bittenText := "Đêm nay không có ai cần cứu."
 	if len(biteTargets) > 0 {
 		labels := make([]string, len(biteTargets))
 		for idx, p := range biteTargets {
@@ -1454,6 +1479,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 		wolfVoteTied       bool
 		aliveThreadID      string
 		witch              *player
+		witchHealable      []string
 		witchPoisonTargets []*player
 		biteTargetPlayers  []*player
 	)
@@ -1541,8 +1567,9 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			witchPoisonTargets = copyPlayers(aliveExcept(game, witch.UserID))
 		}
 
-		biteTargetPlayers = copyPlayers(playersByIDs(game, resolvedTargets))
-		game.NightBiteTargetIDs = append([]string(nil), resolvedTargets...)
+		game.WitchHealableTargetIDs = healableBiteTargetIDs(resolvedTargets, game.DoctorProtect)
+		biteTargetPlayers = copyPlayers(playersByIDs(game, game.WitchHealableTargetIDs))
+		witchHealable = append([]string(nil), game.WitchHealableTargetIDs...)
 
 		if n := len(game.History); n > 0 {
 			entry := &game.History[n-1]
@@ -1579,7 +1606,7 @@ func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string,
 			// runNightPhase, and only settable once WitchPromptedThisRound
 			// goes true a few lines below), but pass it rather than assume,
 			// so this stays correct if the prompt flow ever changes.
-			hasChoice = witchHasChoiceLeft(poisonUsed, healUsed, healableBiteTargetCount(resolvedTargets, g.WitchPoisonTarget))
+			hasChoice = witchHasChoiceLeft(poisonUsed, healUsed, healableBiteTargetCount(witchHealable, g.WitchPoisonTarget))
 			if hasChoice {
 				g.WitchPromptedThisRound = true
 			}
@@ -1662,7 +1689,11 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		// closes the window completely.
 		game.WitchPromptedThisRound = false
 
-		witchHealTarget := resolveWitchHealTarget(game.WitchSaveTarget, resolvedTargets)
+		// Resolve against the healable list, the same one her menu was built
+		// from: with two bite targets where the Doctor covered the first,
+		// the single-target "heal" sentinel must mean the target she was
+		// actually shown, not resolvedTargets[0].
+		witchHealTarget := resolveWitchHealTarget(game.WitchSaveTarget, game.WitchHealableTargetIDs)
 		// doctorSaved/witchHealed keep the exact meaning they had in the
 		// single-target implementation (computed from the picks alone, not
 		// from whether the bite actually resolved to a spare) so the
@@ -1672,7 +1703,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 				doctorSaved = true
 			}
 		}
-		witchHealed = len(resolvedTargets) > 0 && game.WitchSaveTarget == "heal"
+		witchHealed = len(game.WitchHealableTargetIDs) > 0 && game.WitchSaveTarget == "heal"
 
 		var killedIDs []string
 		for _, targetID := range resolvedTargets {
@@ -2218,11 +2249,11 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 	var healTargetID string
 	if values := i.MessageComponentData().Values; len(values) > 0 {
 		// Two-target select-menu path (Wolf-Cub bonus bite): the option list
-		// was built from game.NightBiteTargetIDs, but re-validate against it
+		// was built from game.WitchHealableTargetIDs, but re-validate against it
 		// directly rather than trusting the client payload.
 		healTargetID = values[0]
 		valid := false
-		for _, id := range game.NightBiteTargetIDs {
+		for _, id := range game.WitchHealableTargetIDs {
 			if id == healTargetID {
 				valid = true
 				break
@@ -2240,12 +2271,12 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 		// rounds — so a stale button from an earlier 1-target round could
 		// otherwise be clicked during a 2-target bonus-bite round and
 		// silently save resolvedTargets[0], a target she never picked.
-		if len(game.NightBiteTargetIDs) != 1 {
+		if len(game.WitchHealableTargetIDs) != 1 {
 			cmd.mu.Unlock()
 			respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
 			return
 		}
-		healTargetID = game.NightBiteTargetIDs[0]
+		healTargetID = game.WitchHealableTargetIDs[0]
 	}
 	// Reject healing the exact target she already poisoned this round: the
 	// two potions are independent, but pointing both at the same person
@@ -2257,7 +2288,7 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 		respondComponentEphemeral(s, i, "Bạn đã đầu độc người này rồi, không thể vừa cứu vừa đầu độc cùng một người.")
 		return
 	}
-	if len(game.NightBiteTargetIDs) == 1 && healTargetID == game.NightBiteTargetIDs[0] {
+	if len(game.WitchHealableTargetIDs) == 1 && healTargetID == game.WitchHealableTargetIDs[0] {
 		game.WitchSaveTarget = "heal"
 	} else {
 		game.WitchSaveTarget = healTargetID
@@ -2269,7 +2300,7 @@ func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.I
 	// choice) — otherwise she still has a real action left this round and
 	// must be allowed to take it.
 	game.WitchActedThisRound = !witchHasChoiceLeft(game.WitchPoisonUsed, game.WitchHealUsed,
-		healableBiteTargetCount(game.NightBiteTargetIDs, game.WitchPoisonTarget))
+		healableBiteTargetCount(game.WitchHealableTargetIDs, game.WitchPoisonTarget))
 	cmd.mu.Unlock()
 
 	respondComponentEphemeral(s, i, "✅ Bạn đã chọn cứu người bị cắn đêm nay.")
@@ -2321,7 +2352,7 @@ func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo
 	}
 	// Reject poisoning the exact target she already chose to heal this
 	// round — see handleWitchHeal's matching guard for why.
-	if game.WitchHealUsed && resolveWitchHealTarget(game.WitchSaveTarget, game.NightBiteTargetIDs) == targetID {
+	if game.WitchHealUsed && resolveWitchHealTarget(game.WitchSaveTarget, game.WitchHealableTargetIDs) == targetID {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Bạn đã cứu người này rồi, không thể vừa cứu vừa đầu độc cùng một người.")
 		return
@@ -2337,7 +2368,7 @@ func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo
 	// only bite target, the heal she'd now be refused is correctly counted
 	// as unavailable and her turn closes instead of stalling the night.
 	game.WitchActedThisRound = !witchHasChoiceLeft(game.WitchPoisonUsed, game.WitchHealUsed,
-		healableBiteTargetCount(game.NightBiteTargetIDs, game.WitchPoisonTarget))
+		healableBiteTargetCount(game.WitchHealableTargetIDs, game.WitchPoisonTarget))
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("☠️ Bạn đã đầu độc: <@%s>.", targetID))
