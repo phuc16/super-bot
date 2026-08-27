@@ -675,6 +675,90 @@ func aliveDeadSummary(game *werewolfGame) string {
 	return summary
 }
 
+// nightRoleEmoji is the icon shown next to a role in player-facing text.
+// Kept in one place because these were previously inline literals that had
+// already drifted — the Doctor appeared as 🩺 in the night-progress line but
+// 💉 in /help, for the same role.
+func nightRoleEmoji(r role) string {
+	switch r {
+	case roleWerewolf:
+		return "🐺"
+	case roleSeer:
+		return "🔮"
+	case roleDoctor:
+		return "💉"
+	case roleWitch:
+		return "🧙"
+	case roleHunter:
+		return "🏹"
+	case roleDisruptor:
+		return "🤫"
+	case roleCupid:
+		return "💘"
+	default:
+		return ""
+	}
+}
+
+// nightActingRoles returns the roles to name in the night-start
+// announcement: the night-acting roles actually DEALT in this game, in a
+// fixed display order.
+//
+// Two deliberate properties:
+//
+// It reads DealtRole, not Role, and ignores whether the holder is still
+// alive. The list is therefore identical on every night of a given game, so
+// it can never signal that a special role has died — which would be a
+// reliable death-reveal in the main channel, defeating reveal-on-death
+// entirely. The previous version was a hardcoded string naming Seer/Doctor/
+// Hunter/Disruptor whether or not they were in play, while omitting Witch
+// and Cupid, which do act.
+//
+// Wolf-pack roles collapse into a single "Ma Sói" entry: Wolf Cub and a
+// converted Cursed Wolf act inside the pack's own vote, so naming them
+// separately would leak the setup's composition beyond what the pack itself
+// reveals. Traitor has no night action and is never listed.
+//
+// Cupid is included only on round 1, the only round it acts. That depends
+// solely on the round number, not on who is alive, so it leaks nothing.
+//
+// Must be called with cmd.mu held.
+func nightActingRoles(game *werewolfGame, round int) []role {
+	dealt := make(map[role]bool, len(game.Players))
+	for _, p := range game.Players {
+		dealt[p.DealtRole] = true
+	}
+
+	var result []role
+	if dealt[roleWerewolf] || dealt[roleWolfCub] || dealt[roleCursedWolf] {
+		result = append(result, roleWerewolf)
+	}
+	for _, r := range []role{roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor} {
+		if dealt[r] {
+			result = append(result, r)
+		}
+	}
+	if dealt[roleCupid] && round == 1 {
+		result = append(result, roleCupid)
+	}
+	return result
+}
+
+// nightActingRolesPhrase renders nightActingRoles as the sentence fragment
+// the night announcement uses. Falls back to a generic phrase when no
+// special role is in play (an all-Villager-plus-wolves game), rather than
+// producing a dangling "đang hành động".
+func nightActingRolesPhrase(roles []role) string {
+	if len(roles) == 0 {
+		return "Các vai trò đặc biệt đang hành động trong tin nhắn riêng..."
+	}
+	names := make([]string, 0, len(roles))
+	for _, r := range roles {
+		names = append(names, strings.TrimSpace(nightRoleEmoji(r)+" "+r.label()))
+	}
+	return strings.Join(names, ", ") + " đang hành động trong tin nhắn riêng..."
+}
+
 // announceRoleDecided posts a short, identity-free progress line to the
 // main channel the moment a night-role finishes deciding, so players can
 // watch night progress without waiting blindly — it never names the

@@ -737,6 +737,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 		gameFound        bool
 		round            int
 		summary          string
+		actingRolesLine  string
 		aliveThreadID    string
 		wolves           []*player
 		nonWolfTargets   []*player
@@ -789,6 +790,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 
 		round = game.Round
 		summary = aliveDeadSummary(game)
+		actingRolesLine = nightActingRolesPhrase(nightActingRoles(game, round))
 		aliveThreadID = game.AliveThreadID
 		wolves = copyPlayers(aliveWolfVoters(game))
 		nonWolfTargets = copyPlayers(aliveWolfBiteTargets(game))
@@ -845,7 +847,7 @@ func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string
 	cmd.sendTraitorRosterDM(s, traitorDM)
 
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** Ma Sói, Tiên Tri, Bác Sĩ, Thợ Săn, Kẻ Phá Hoại đang hành động trong tin nhắn riêng...\n\n%s", round, summary),
+		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** %s\n\n%s", round, actingRolesLine, summary),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post night announcement")
@@ -2081,7 +2083,7 @@ func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discord
 	cmd.mu.Unlock()
 
 	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chọn bảo vệ: <@%s>.", targetID))
-	announceRoleDecided(s, channelID, "🩺 Bác Sĩ")
+	announceRoleDecided(s, channelID, "💉 Bác Sĩ")
 }
 
 func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {

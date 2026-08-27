@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -307,4 +308,177 @@ func TestEmptyLobbyTeardownAnswersTheClickFirst(t *testing.T) {
 			t.Errorf("%s calls teardownGame before answering the interaction — a slow unlock will blow the 3s deadline", fn)
 		}
 	}
+}
+
+// gameWithDealtRoles builds a game whose roster holds exactly the given
+// dealt roles, one player each, all alive.
+func gameWithDealtRoles(roles ...role) *werewolfGame {
+	game := &werewolfGame{Players: map[string]*player{}}
+	for idx, r := range roles {
+		id := fmt.Sprintf("u%d", idx)
+		game.Players[id] = &player{UserID: id, Label: id, Role: r, DealtRole: r, Alive: true}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+	return game
+}
+
+// TestNightActingRolesNamesOnlyRolesInPlay covers the reported bug: the
+// night-start line was a hardcoded string that named Seer/Doctor/Hunter/
+// Disruptor whether or not they had been dealt, and omitted Witch and Cupid,
+// which do act.
+func TestNightActingRolesNamesOnlyRolesInPlay(t *testing.T) {
+	t.Run("omits roles that were never dealt", func(t *testing.T) {
+		game := gameWithDealtRoles(roleWerewolf, roleSeer, roleVillager, roleVillager)
+		got := nightActingRoles(game, 1)
+		want := []role{roleWerewolf, roleSeer}
+		if !sameRoles(got, want) {
+			t.Errorf("nightActingRoles = %v, want %v", labelsOfRoles(got), labelsOfRoles(want))
+		}
+		for _, absent := range []role{roleDoctor, roleWitch, roleHunter, roleDisruptor, roleCupid} {
+			if containsRole(got, absent) {
+				t.Errorf("named %s, which was never dealt", absent.label())
+			}
+		}
+	})
+
+	t.Run("includes Witch and Cupid, which the old string omitted", func(t *testing.T) {
+		game := gameWithDealtRoles(roleWerewolf, roleWitch, roleCupid)
+		got := nightActingRoles(game, 1)
+		for _, want := range []role{roleWitch, roleCupid} {
+			if !containsRole(got, want) {
+				t.Errorf("%s acts at night but was not named", want.label())
+			}
+		}
+	})
+
+	t.Run("Traitor is never named", func(t *testing.T) {
+		// The Traitor has no night action — naming them would advertise a
+		// role whose whole point is passing as an ordinary villager.
+		game := gameWithDealtRoles(roleWerewolf, roleTraitor, roleVillager)
+		if got := nightActingRoles(game, 1); containsRole(got, roleTraitor) {
+			t.Errorf("nightActingRoles named the Traitor: %v", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("wolf-pack roles collapse into one Ma Soi entry", func(t *testing.T) {
+		// Wolf Cub and a converted Cursed Wolf act inside the pack's own
+		// vote; listing them separately would leak the setup.
+		game := gameWithDealtRoles(roleWerewolf, roleWolfCub, roleCursedWolf, roleVillager)
+		got := nightActingRoles(game, 1)
+		if !sameRoles(got, []role{roleWerewolf}) {
+			t.Errorf("nightActingRoles = %v, want just [Ma Sói]", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("a pack of only Wolf Cubs still lists Ma Soi", func(t *testing.T) {
+		game := gameWithDealtRoles(roleWolfCub, roleVillager, roleVillager)
+		if got := nightActingRoles(game, 1); !containsRole(got, roleWerewolf) {
+			t.Errorf("nightActingRoles = %v, want Ma Sói present", labelsOfRoles(got))
+		}
+	})
+}
+
+// TestNightActingRolesNeverSignalsDeaths is the property that makes this
+// list safe to show at all. It is derived from DealtRole and ignores
+// aliveness, so it is byte-identical on every night of a game — a role
+// dropping off the list would otherwise be a reliable public death-reveal
+// in the main channel, defeating reveal-on-death.
+func TestNightActingRolesNeverSignalsDeaths(t *testing.T) {
+	game := gameWithDealtRoles(roleWerewolf, roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor, roleVillager)
+	night1 := nightActingRolesPhrase(nightActingRoles(game, 2))
+
+	// Kill every special role and convert the survivors' Role fields, the
+	// way a real game mutates them.
+	for _, p := range game.Players {
+		if p.DealtRole != roleWerewolf && p.DealtRole != roleVillager {
+			p.Alive = false
+		}
+		if p.DealtRole == roleCursedWolf {
+			p.Role = roleWerewolf
+		}
+	}
+	night5 := nightActingRolesPhrase(nightActingRoles(game, 5))
+
+	if night1 != night5 {
+		t.Errorf("the night line changed after deaths — this publicly reveals who died:\n night2: %s\n night5: %s", night1, night5)
+	}
+}
+
+// TestCupidIsNamedOnlyOnTheNightItActs keeps the one round-dependent entry
+// honest. Cupid acts on round 1 only, and that depends on the round number
+// alone, never on who is alive — so it leaks nothing.
+func TestCupidIsNamedOnlyOnTheNightItActs(t *testing.T) {
+	game := gameWithDealtRoles(roleWerewolf, roleCupid, roleVillager)
+	if got := nightActingRoles(game, 1); !containsRole(got, roleCupid) {
+		t.Errorf("round 1: Cupid acts but was not named: %v", labelsOfRoles(got))
+	}
+	for _, round := range []int{2, 3, 7} {
+		if got := nightActingRoles(game, round); containsRole(got, roleCupid) {
+			t.Errorf("round %d: Cupid does not act but was named: %v", round, labelsOfRoles(got))
+		}
+	}
+}
+
+// TestNightActingRolesPhraseIsWellFormed guards the rendered sentence,
+// including the all-villager setup that would otherwise emit a dangling
+// "đang hành động" with nothing in front of it.
+func TestNightActingRolesPhraseIsWellFormed(t *testing.T) {
+	if phrase := nightActingRolesPhrase(nil); !strings.HasPrefix(phrase, "Các vai trò đặc biệt") {
+		t.Errorf("empty role list produced %q, want the generic fallback", phrase)
+	}
+	phrase := nightActingRolesPhrase([]role{roleWerewolf, roleSeer})
+	for _, want := range []string{"🐺 Ma Sói", "🔮 Tiên Tri", "đang hành động"} {
+		if !strings.Contains(phrase, want) {
+			t.Errorf("phrase %q missing %q", phrase, want)
+		}
+	}
+	if strings.Contains(phrase, "  ") || strings.Contains(phrase, ", ,") {
+		t.Errorf("phrase has malformed spacing: %q", phrase)
+	}
+}
+
+// TestNightRoleEmojiMatchesTheProgressLine keeps the two places a role's
+// icon is shown in agreement. They had already drifted once: the Doctor was
+// 🩺 in the night-progress line and 💉 in /help, for the same role.
+func TestNightRoleEmojiMatchesTheProgressLine(t *testing.T) {
+	src, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	text := string(src)
+	for _, r := range []role{roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor, roleCupid} {
+		want := fmt.Sprintf("%s %s", nightRoleEmoji(r), r.label())
+		if !strings.Contains(text, `announceRoleDecided(s, channelID, "`+want+`")`) {
+			t.Errorf("announceRoleDecided does not use %q — the night-start list and the progress line disagree on %s's icon", want, r.label())
+		}
+	}
+}
+
+func containsRole(roles []role, want role) bool {
+	for _, r := range roles {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sameRoles(got, want []role) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for idx := range got {
+		if got[idx] != want[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+func labelsOfRoles(roles []role) []string {
+	out := make([]string, 0, len(roles))
+	for _, r := range roles {
+		out = append(out, r.label())
+	}
+	return out
 }
