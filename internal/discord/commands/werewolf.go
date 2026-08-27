@@ -771,36 +771,52 @@ func nightRoleEmoji(r role) string {
 }
 
 // nightActingRoles returns the roles to name in the night-start
-// announcement: the night-acting roles actually DEALT in this game, in a
-// fixed display order.
+// announcement, in a fixed display order. Which roles qualify depends on
+// the game's reveal-on-death setting, because that is exactly what decides
+// whether "this role is gone" is already public knowledge:
 //
-// Two deliberate properties:
+//   - reveal-on-death ON: only roles still ALIVE. Every death already
+//     announces its role, so the village knows what has been lost — listing
+//     five special roles on a night with three players left is simply
+//     wrong, and correcting it gives away nothing.
 //
-// It reads DealtRole, not Role, and ignores whether the holder is still
-// alive. The list is therefore identical on every night of a given game, so
-// it can never signal that a special role has died — which would be a
-// reliable death-reveal in the main channel, defeating reveal-on-death
-// entirely. The previous version was a hardcoded string naming Seer/Doctor/
-// Hunter/Disruptor whether or not they were in play, while omitting Witch
-// and Cupid, which do act.
+//   - reveal-on-death OFF: every role DEALT, alive or not, fixed for the
+//     whole game. Here the list is the only signal available, so narrowing
+//     it to the living would turn the main channel into a reliable
+//     death-reveal and defeat the setting outright.
+//
+// Roles are identified by DealtRole so a converted Cursed Wolf or promoted
+// Traitor doesn't change how the line reads mid-game — conversions are
+// private, and neither is announced.
 //
 // Wolf-pack roles collapse into a single "Ma Sói" entry: Wolf Cub and a
 // converted Cursed Wolf act inside the pack's own vote, so naming them
 // separately would leak the setup's composition beyond what the pack itself
-// reveals. Traitor has no night action and is never listed.
+// reveals. A promoted Traitor counts toward that entry via
+// wolfVoteParticipant, so the pack never silently vanishes from the line
+// once the last dealt wolf dies. An unpromoted Traitor has no night action
+// and is never listed.
 //
 // Cupid is included only on round 1, the only round it acts. That depends
-// solely on the round number, not on who is alive, so it leaks nothing.
+// solely on the round number, never on who is alive, so it leaks nothing
+// under either setting.
 //
 // Must be called with cmd.mu held.
 func nightActingRoles(game *werewolfGame, round int) []role {
 	dealt := make(map[role]bool, len(game.Players))
+	wolfPack := false
 	for _, p := range game.Players {
+		if game.RevealOnDeath && !p.Alive {
+			continue
+		}
 		dealt[p.DealtRole] = true
+		if p.wolfVoteParticipant() {
+			wolfPack = true
+		}
 	}
 
 	var result []role
-	if dealt[roleWerewolf] || dealt[roleWolfCub] || dealt[roleCursedWolf] {
+	if wolfPack || dealt[roleWerewolf] || dealt[roleWolfCub] || dealt[roleCursedWolf] {
 		result = append(result, roleWerewolf)
 	}
 	for _, r := range []role{roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor} {

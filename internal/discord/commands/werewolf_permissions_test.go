@@ -1143,3 +1143,106 @@ func TestLastCallWarnings(t *testing.T) {
 		}
 	})
 }
+
+// TestNightActingRolesFollowsRevealOnDeath covers the fork that decides
+// whether the night line may narrow to the living. The reported symptom was
+// a 3-player endgame still announcing five special roles.
+func TestNightActingRolesFollowsRevealOnDeath(t *testing.T) {
+	// A mid-game state: Doctor, Hunter and Disruptor are dead; a wolf, the
+	// Seer and a villager remain.
+	build := func(revealOnDeath bool) *werewolfGame {
+		game := &werewolfGame{RevealOnDeath: revealOnDeath, Players: map[string]*player{}}
+		roles := []struct {
+			r     role
+			alive bool
+		}{
+			{roleWerewolf, true}, {roleSeer, true}, {roleVillager, true},
+			{roleDoctor, false}, {roleHunter, false}, {roleDisruptor, false},
+		}
+		for idx, e := range roles {
+			id := fmt.Sprintf("u%d", idx)
+			game.Players[id] = &player{
+				UserID: id, Label: id, Role: e.r, DealtRole: e.r,
+				Faction: factionForRole(e.r), Alive: e.alive,
+			}
+			game.JoinOrder = append(game.JoinOrder, id)
+		}
+		return game
+	}
+
+	t.Run("reveal-on-death ON narrows to the living", func(t *testing.T) {
+		// Each death already announced its role, so the village knows the
+		// Doctor/Hunter/Disruptor are gone. Naming them anyway is just wrong.
+		got := nightActingRoles(build(true), 3)
+		if !sameRoles(got, []role{roleWerewolf, roleSeer}) {
+			t.Errorf("nightActingRoles = %v, want [Ma Sói, Tiên Tri]", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("reveal-on-death OFF keeps every dealt role", func(t *testing.T) {
+		// Here the list is the only signal, so narrowing it would turn the
+		// main channel into a reliable death-reveal.
+		got := nightActingRoles(build(false), 3)
+		want := []role{roleWerewolf, roleSeer, roleDoctor, roleHunter, roleDisruptor}
+		if !sameRoles(got, want) {
+			t.Errorf("nightActingRoles = %v, want %v", labelsOfRoles(got), labelsOfRoles(want))
+		}
+	})
+
+	t.Run("with reveal OFF the line never changes as players die", func(t *testing.T) {
+		early := nightActingRolesPhrase(nightActingRoles(build(false), 2))
+		late := build(false)
+		for _, p := range late.Players {
+			if p.DealtRole != roleWerewolf {
+				p.Alive = false
+			}
+		}
+		if got := nightActingRolesPhrase(nightActingRoles(late, 5)); got != early {
+			t.Errorf("the line changed after deaths, revealing them:\n early: %s\n late:  %s", early, got)
+		}
+	})
+
+	t.Run("a promoted Traitor keeps the pack on the line", func(t *testing.T) {
+		// Every dealt wolf is dead and the Traitor has been promoted to a
+		// full Werewolf. With reveal ON, dropping "Ma Sói" here would be
+		// both wrong (a wolf still acts) and a tell that the promotion
+		// happened — the promotion is deliberately private.
+		game := &werewolfGame{RevealOnDeath: true, Players: map[string]*player{}}
+		add := func(id string, dealt, now role, alive bool) {
+			game.Players[id] = &player{
+				UserID: id, Label: id, Role: now, DealtRole: dealt,
+				Faction: factionForRole(now), Alive: alive,
+			}
+			game.JoinOrder = append(game.JoinOrder, id)
+		}
+		add("w", roleWerewolf, roleWerewolf, false)
+		add("t", roleTraitor, roleWerewolf, true)
+		add("v", roleVillager, roleVillager, true)
+
+		got := nightActingRoles(game, 4)
+		if !containsRole(got, roleWerewolf) {
+			t.Errorf("nightActingRoles = %v, want Ma Sói present via the promoted Traitor", labelsOfRoles(got))
+		}
+		if containsRole(got, roleTraitor) {
+			t.Errorf("nightActingRoles named the Traitor: %v", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("an unpromoted Traitor is never listed", func(t *testing.T) {
+		game := &werewolfGame{RevealOnDeath: true, Players: map[string]*player{}}
+		for idx, e := range []struct {
+			r     role
+			alive bool
+		}{{roleWerewolf, true}, {roleTraitor, true}, {roleVillager, true}} {
+			id := fmt.Sprintf("u%d", idx)
+			game.Players[id] = &player{
+				UserID: id, Label: id, Role: e.r, DealtRole: e.r,
+				Faction: factionForRole(e.r), Alive: e.alive,
+			}
+			game.JoinOrder = append(game.JoinOrder, id)
+		}
+		if got := nightActingRoles(game, 2); !sameRoles(got, []role{roleWerewolf}) {
+			t.Errorf("nightActingRoles = %v, want just [Ma Sói]", labelsOfRoles(got))
+		}
+	})
+}
