@@ -525,42 +525,52 @@ type werewolfGame struct {
 	PendingRoleCounts             map[role]int // the manual-pick editor's live counts, nil until phaseRoleEdit starts; read once at confirm/timeout, then no longer meaningful
 	Phase                         gamePhase
 	Round                         int
-	Players                       map[string]*player             // userID -> player
-	JoinOrder                     []string                       // frozen once the game leaves phaseLobby
-	WolfThreadID                  string                         // the wolf-coordination thread, persists across the whole game once created (see startWolfThread) — "" only before the first night or after the game truly ends
-	WolfTargetMessageID           string                         // the target-select message in the wolf thread, live-edited as votes come in
-	WolfVotes                     map[string][]string            // wolfUserID -> target(s) this round, locked once cast — no re-voting. Normally 1 target; during a Wolf-Cub bonus-bite round each wolf may pick up to 1+WolfBonusBiteActiveThisRound targets in one select, each counting as a separate vote toward that target in tallyWolfVotes
-	SeerActed                     bool                           // whether the seer has acted this round
-	SeerTarget                    string                         // who the seer checked this round, "" if SeerActed is false
-	SeerResult                    role                           // that check's result — meaningless if SeerTarget == ""
-	DoctorProtect                 string                         // doctor's pick this round
-	DoctorLastPick                string                         // last round's pick — can't repeat back-to-back
-	HunterTarget                  string                         // persists across rounds until Hunter explicitly changes it — deliberate deviation from canonical Ultimate Werewolf, where the Hunter instead picks reactively, only at the moment they die, with full information at that instant; this project intentionally uses a standing pre-committed pick instead (an earlier design decision, not an oversight — see dmHunterPrompt)
-	HunterActedThisRound          bool                           // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
-	DisruptorTarget               string                         // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss phase transition to decide who to mute
-	DisruptorMutedUserID          string                         // who currently has a live per-member mute overwrite on the alive thread, "" if nobody. Set by runDayDiscuss only after the overwrite is actually applied, and cleared by runDayVote after removing it. Deliberately NOT re-derived from DisruptorTarget at removal time: the apply and remove gates would then be the same predicate evaluated at two different instants, so a target who died mid-discussion would get the overwrite applied and never removed, orphaning it on the thread forever
-	DisruptorActedThisRound       bool                           // reset each round; true once the Disruptor has made at least one pick this round — gates the progress announcement to the first pick only, mirroring Hunter's pre-AFK-exemption shape
-	LoverIDs                      [2]string                      // set once by Cupid on round 1; ["", ""] means no pairing was made
-	WitchHealUsed                 bool                           // lifetime flag — the heal potion is single-use per game
-	WitchPoisonUsed               bool                           // lifetime flag — the poison potion is single-use per game
-	WitchSaveTarget               string                         // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2+-target case, chosen via the select menu in handleWitchHeal)
-	WitchPoisonTarget             string                         // this round's poison pick, "" if not poisoning; reset each round
-	WitchActedThisRound           bool                           // reset each round; true once her TURN IS OVER — she's skipped, or used a potion and has no remaining choice (see witchHasChoiceLeft). NOT true just because she did something this round — a Witch who uses only one of two available potions leaves this false so she can still take the second action. Gates re-entry into her handlers and waitForWitchAction's completion check.
-	WitchDidSomethingThisRound    bool                           // reset each round; true the moment she takes ANY action (heal, poison, or skip), even if WitchActedThisRound stays false because she still has a choice left. This is what the AFK-strike check and the one-time announceRoleDecided ping key off — using WitchActedThisRound for either would falsely AFK-strike (and never re-announce) a Witch who legitimately used only one of her two available potions this round.
-	WolfBonusBiteNextNight        int                            // extra kill target(s) armed for a FUTURE night's wolf vote, beyond the base 1 — incremented once per Wolf Cub death (any cause) so 2+ Wolf Cubs dying the same round compound correctly. Deliberately NOT read directly by the picker/tally — see WolfBonusBiteActiveThisRound, which snapshots this at night-open so a Wolf Cub death arriving mid-night (e.g. via /werewolf leave) can't retroactively change the bonus for the vote already in progress
-	WolfBonusBiteActiveThisRound  int                            // snapshot of WolfBonusBiteNextNight taken once at the start of runNightPhase, then immediately zeroing the live counter — this is what the picker's MaxValues and resolveNight's topN both read for the round, so they always agree with each other and can't be changed by an arming event mid-round; any new arming during the round accrues in WolfBonusBiteNextNight for the round after this one
-	WitchHealableTargetIDs        []string                       // this round's bite target(s) the Witch could still meaningfully heal: the resolved wolf-vote targets MINUS anyone the Doctor already protected — set in resolveNight, read by handleWitchHeal to validate a pick, reset each round in runNightPhase
-	WitchPromptedThisRound        bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
-	NightActionsClosed            bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor/disruptor/hunter handlers against a late click landing during the Witch's stage-2 window. Does NOT gate the Witch's own handlers, which have their own WitchActedThisRound/WitchPromptedThisRound gating for that same window.
-	DayVoteClosed                 bool                           // reset false at the start of each day-vote round (runDayVote); set true once resolveVote's locked block has tallied and applied the lynch — gates handleVote against a late click landing during resolveVote's post-unlock cleanup/messaging/win-check work, mirroring NightActionsClosed for the day-vote side
-	Votes                         map[string]string              // voterID -> targetID, reset each day
-	AFKStrikes                    map[string]int                 // resets to 0 on any successful action, +1 on a miss
-	History                       []roundLog                     // one entry per completed round, for the end-of-game recap
-	PriorOverwrite                *discordgo.PermissionOverwrite // @everyone's channel overwrite before this game locked it; nil if there was none
-	AliveThreadID                 string                         // private thread all players use for day-discussion chat; "" before it's created
-	ChannelUnlocked               bool                           // true once unlockChannel has already run for this game (e.g. the alive-thread-creation fallback below) — terminal cleanup paths must check this before calling unlockChannel again
-	WolfThreadMemberIDs           map[string]bool                // user IDs successfully ThreadMemberAdd'd to the persistent wolf thread. The per-night dead-wolf sweep only considers these: a wolf-FACTION player who was never actually a member (the Traitor, who deliberately never joins; a Cursed Wolf that converted and died before its first wolf night) would otherwise be "removed" from a thread they were never in, every remaining night of the game
-	WolfThreadRemovedIDs          map[string]bool                // user IDs already ThreadMemberRemove'd from the persistent wolf thread — startWolfThread's per-night dead-wolf sweep checks this so it doesn't retry (and re-log an error for) a removal that already succeeded on an earlier night
+	Players                       map[string]*player  // userID -> player
+	JoinOrder                     []string            // frozen once the game leaves phaseLobby
+	WolfThreadID                  string              // the wolf-coordination thread, persists across the whole game once created (see startWolfThread) — "" only before the first night or after the game truly ends
+	WolfTargetMessageID           string              // the target-select message in the wolf thread, live-edited as votes come in
+	WolfVotes                     map[string][]string // wolfUserID -> target(s) this round, locked once cast — no re-voting. Normally 1 target; during a Wolf-Cub bonus-bite round each wolf may pick up to 1+WolfBonusBiteActiveThisRound targets in one select, each counting as a separate vote toward that target in tallyWolfVotes
+	SeerActed                     bool                // whether the seer has acted this round
+	SeerTarget                    string              // who the seer checked this round, "" if SeerActed is false
+	SeerResult                    role                // that check's result — meaningless if SeerTarget == ""
+	DoctorProtect                 string              // doctor's pick this round
+	DoctorLastPick                string              // last round's pick — can't repeat back-to-back
+	HunterTarget                  string              // persists across rounds until Hunter explicitly changes it — deliberate deviation from canonical Ultimate Werewolf, where the Hunter instead picks reactively, only at the moment they die, with full information at that instant; this project intentionally uses a standing pre-committed pick instead (an earlier design decision, not an oversight — see dmHunterPrompt)
+	HunterActedThisRound          bool                // reset each round; true once Hunter has made at least one pick this round — gates the progress announcement to the first pick only
+	DisruptorTarget               string              // this round's mute pick, "" if none — reset each night before the new pick, and read again unchanged by the FOLLOWING day-discuss phase transition to decide who to mute
+	DisruptorMutedUserID          string              // who currently has a live per-member mute overwrite on the alive thread, "" if nobody. Set by runDayDiscuss only after the overwrite is actually applied, and cleared by runDayVote after removing it. Deliberately NOT re-derived from DisruptorTarget at removal time: the apply and remove gates would then be the same predicate evaluated at two different instants, so a target who died mid-discussion would get the overwrite applied and never removed, orphaning it on the thread forever
+	DisruptorActedThisRound       bool                // reset each round; true once the Disruptor has made at least one pick this round — gates the progress announcement to the first pick only, mirroring Hunter's pre-AFK-exemption shape
+	LoverIDs                      [2]string           // set once by Cupid on round 1; ["", ""] means no pairing was made
+	WitchHealUsed                 bool                // lifetime flag — the heal potion is single-use per game
+	WitchPoisonUsed               bool                // lifetime flag — the poison potion is single-use per game
+	WitchSaveTarget               string              // this round's heal pick, "" if not saving; reset each round. Two encodings: the literal sentinel "heal" (1-target case, resolved against the lone bite target at finalize time), or an explicit target user ID (2+-target case, chosen via the select menu in handleWitchHeal)
+	WitchPoisonTarget             string              // this round's poison pick, "" if not poisoning; reset each round
+	WitchActedThisRound           bool                // reset each round; true once her TURN IS OVER — she's skipped, or used a potion and has no remaining choice (see witchHasChoiceLeft). NOT true just because she did something this round — a Witch who uses only one of two available potions leaves this false so she can still take the second action. Gates re-entry into her handlers and waitForWitchAction's completion check.
+	WitchDidSomethingThisRound    bool                // reset each round; true the moment she takes ANY action (heal, poison, or skip), even if WitchActedThisRound stays false because she still has a choice left. This is what the AFK-strike check and the one-time announceRoleDecided ping key off — using WitchActedThisRound for either would falsely AFK-strike (and never re-announce) a Witch who legitimately used only one of her two available potions this round.
+	WolfBonusBiteNextNight        int                 // extra kill target(s) armed for a FUTURE night's wolf vote, beyond the base 1 — incremented once per Wolf Cub death (any cause) so 2+ Wolf Cubs dying the same round compound correctly. Deliberately NOT read directly by the picker/tally — see WolfBonusBiteActiveThisRound, which snapshots this at night-open so a Wolf Cub death arriving mid-night (e.g. via /werewolf leave) can't retroactively change the bonus for the vote already in progress
+	WolfBonusBiteActiveThisRound  int                 // snapshot of WolfBonusBiteNextNight taken once at the start of runNightPhase, then immediately zeroing the live counter — this is what the picker's MaxValues and resolveNight's topN both read for the round, so they always agree with each other and can't be changed by an arming event mid-round; any new arming during the round accrues in WolfBonusBiteNextNight for the round after this one
+	// DisruptorSilencedUserID is who the Disruptor silenced for the CURRENT
+	// day — barred from both chatting and voting. Distinct from
+	// DisruptorMutedUserID, which tracks only whether the Discord permission
+	// overwrite actually landed and so must be cleared the moment it is
+	// removed: this one has to outlive that removal, because the vote ban
+	// still applies during runDayVote, which lifts the overwrite before the
+	// ballot even opens. Set in runDayDiscuss, cleared at the start of each
+	// night alongside DisruptorTarget.
+	DisruptorSilencedUserID string
+
+	WitchHealableTargetIDs []string                       // this round's bite target(s) the Witch could still meaningfully heal: the resolved wolf-vote targets MINUS anyone the Doctor already protected — set in resolveNight, read by handleWitchHeal to validate a pick, reset each round in runNightPhase
+	WitchPromptedThisRound bool                           // reset each round; true once THIS round's bite-outcome DM has been sent — gates against a stale prior-round DM being actionable
+	NightActionsClosed     bool                           // reset each round; set true once resolveNight's stage 1 (wolf tally, AFK strikes, DoctorLastPick) has finished — gates wolf/seer/doctor/disruptor/hunter handlers against a late click landing during the Witch's stage-2 window. Does NOT gate the Witch's own handlers, which have their own WitchActedThisRound/WitchPromptedThisRound gating for that same window.
+	DayVoteClosed          bool                           // reset false at the start of each day-vote round (runDayVote); set true once resolveVote's locked block has tallied and applied the lynch — gates handleVote against a late click landing during resolveVote's post-unlock cleanup/messaging/win-check work, mirroring NightActionsClosed for the day-vote side
+	Votes                  map[string]string              // voterID -> targetID, reset each day
+	AFKStrikes             map[string]int                 // resets to 0 on any successful action, +1 on a miss
+	History                []roundLog                     // one entry per completed round, for the end-of-game recap
+	PriorOverwrite         *discordgo.PermissionOverwrite // @everyone's channel overwrite before this game locked it; nil if there was none
+	AliveThreadID          string                         // private thread all players use for day-discussion chat; "" before it's created
+	ChannelUnlocked        bool                           // true once unlockChannel has already run for this game (e.g. the alive-thread-creation fallback below) — terminal cleanup paths must check this before calling unlockChannel again
+	WolfThreadMemberIDs    map[string]bool                // user IDs successfully ThreadMemberAdd'd to the persistent wolf thread. The per-night dead-wolf sweep only considers these: a wolf-FACTION player who was never actually a member (the Traitor, who deliberately never joins; a Cursed Wolf that converted and died before its first wolf night) would otherwise be "removed" from a thread they were never in, every remaining night of the game
+	WolfThreadRemovedIDs   map[string]bool                // user IDs already ThreadMemberRemove'd from the persistent wolf thread — startWolfThread's per-night dead-wolf sweep checks this so it doesn't retry (and re-log an error for) a removal that already succeeded on an earlier night
 }
 
 // WerewolfCommand handles /werewolf and all its button/select interactions.
@@ -697,6 +707,42 @@ func aliveMentionsFor(game *werewolfGame) *discordgo.MessageAllowedMentions {
 		}
 	}
 	return &discordgo.MessageAllowedMentions{Users: ids}
+}
+
+// lastCallWindow is how long before a timed window closes that players get
+// a final warning, posted into the room where the conversation is actually
+// happening: the alive-players thread by day, the pack's thread at night.
+// The main channel's existing halfway reminder is deliberately left alone,
+// so the two never fire into the same room.
+const lastCallWindow = 30 * time.Second
+
+// postLastCall warns a thread that its window is nearly up. Best-effort and
+// silent on failure: this is a courtesy, and a game must never stall or
+// abort because a reminder could not be delivered.
+func postLastCall(s *discordgo.Session, threadID, text string) {
+	if threadID == "" {
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(threadID, &discordgo.MessageSend{
+		Content:         text,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Str("thread_id", threadID).Msg("werewolf: failed to post last-call warning")
+	}
+}
+
+// sleepWithLastCall waits out window, posting a last-call warning into
+// threadID lastCallWindow before the end. A window at or under
+// lastCallWindow just sleeps: warning that 30 seconds remain at the moment
+// a 30-second window opens is noise, not a warning.
+func sleepWithLastCall(s *discordgo.Session, threadID string, window time.Duration, text string) {
+	if threadID == "" || window <= lastCallWindow {
+		time.Sleep(window)
+		return
+	}
+	time.Sleep(window - lastCallWindow)
+	postLastCall(s, threadID, text)
+	time.Sleep(lastCallWindow)
 }
 
 // nightRoleEmoji is the icon shown next to a role in player-facing text.

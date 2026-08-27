@@ -394,7 +394,7 @@ func TestValidDayVotesDropsVotesFromDeadOrGoneVoters(t *testing.T) {
 		"a": "c",
 		"b": "c", // stale — b is no longer alive, must not count
 	}
-	got := validDayVotes(votes, players)
+	got := validDayVotes(votes, players, "")
 	want := map[string]string{"a": "c"}
 	if len(got) != len(want) || got["a"] != want["a"] {
 		t.Errorf("validDayVotes() = %v, want %v — b's vote must be dropped since b is no longer alive", got, want)
@@ -406,7 +406,7 @@ func TestValidDayVotesDropsVoteFromUnknownVoter(t *testing.T) {
 		"a": {UserID: "a", Alive: true},
 	}
 	votes := map[string]string{"a": "a", "ghost": "a"}
-	got := validDayVotes(votes, players)
+	got := validDayVotes(votes, players, "")
 	if len(got) != 1 || got["a"] != "a" {
 		t.Errorf("validDayVotes() = %v, want only a's vote to survive", got)
 	}
@@ -424,7 +424,7 @@ func TestValidDayVotesStaleVoteCannotFlipLynchOutcome(t *testing.T) {
 		"c": {UserID: "c", Alive: true},
 	}
 	votes := map[string]string{"a": "b", "c": "b"}
-	top, tie := tallyVotes(validDayVotes(votes, players))
+	top, tie := tallyVotes(validDayVotes(votes, players, ""))
 	if tie || len(top) != 1 || top[0] != "b" {
 		t.Errorf("tallyVotes(validDayVotes(...)) = %v, %v — want b alone with 1 valid vote", top, tie)
 	}
@@ -432,7 +432,7 @@ func TestValidDayVotesStaleVoteCannotFlipLynchOutcome(t *testing.T) {
 	// Sanity check: without the filter, the stale vote would double b's
 	// count but the result target is the same here — the important
 	// assertion is that only 1 valid vote reaches the tally, not 2.
-	if got := len(validDayVotes(votes, players)); got != 1 {
+	if got := len(validDayVotes(votes, players, "")); got != 1 {
 		t.Errorf("validDayVotes(...) returned %d votes, want exactly 1 (a's stale vote must be dropped)", got)
 	}
 }
@@ -456,7 +456,7 @@ func TestValidDayVotesFallsThroughToRunnerUpWhenLeaderLeaves(t *testing.T) {
 		"bob": "bob",
 		// a 5th voter's ballot is irrelevant here; 3 votes for alice vs 1 for bob
 	}
-	top, tie := tallyVotes(validDayVotes(votes, players))
+	top, tie := tallyVotes(validDayVotes(votes, players, ""))
 	if tie || len(top) != 1 || top[0] != "bob" {
 		t.Errorf("tallyVotes(validDayVotes(...)) = %v, %v — want bob alone once alice's votes are dropped as a dead target", top, tie)
 	}
@@ -470,7 +470,7 @@ func TestValidDayVotesDropsVoteForDeadTargetKeepsSkipUntouched(t *testing.T) {
 		"v1": {UserID: "v1", Alive: true},
 	}
 	votes := map[string]string{"v1": voteSkipValue}
-	got := validDayVotes(votes, players)
+	got := validDayVotes(votes, players, "")
 	if len(got) != 1 || got["v1"] != voteSkipValue {
 		t.Errorf("validDayVotes(...) = %v, want the skip vote preserved", got)
 	}

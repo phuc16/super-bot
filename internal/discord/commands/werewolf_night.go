@@ -1398,8 +1398,10 @@ func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
 // the night is still waiting on someone.
 func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID string, deadline time.Time, totalWindow time.Duration, seq uint64) {
 	reminded := false
+	lastCalled := false
 	for {
 		var gameFound, done bool
+		var wolfThreadID string
 		func() {
 			cmd.mu.Lock()
 			defer cmd.mu.Unlock()
@@ -1409,6 +1411,10 @@ func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID 
 			}
 			gameFound = true
 			done = cmd.nightActionsComplete(game)
+			// Read each tick rather than taking it as a parameter: the wolf
+			// thread is created concurrently by startWolfThread, so it may
+			// not exist yet when this loop starts.
+			wolfThreadID = game.WolfThreadID
 		}()
 		if !gameFound || done || time.Now().After(deadline) {
 			return
@@ -1423,6 +1429,13 @@ func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID 
 			}); err != nil {
 				log.Error().Err(err).Msg("werewolf: failed to post night reminder")
 			}
+		}
+		// Last call goes into the pack's own thread, where they are actually
+		// deliberating — the halfway reminder above already covers the main
+		// channel, so this does not double up there.
+		if !lastCalled && remaining <= lastCallWindow {
+			lastCalled = true
+			postLastCall(s, wolfThreadID, "⏳ **Còn 30 giây** — chốt mục tiêu cắn đi, hết giờ là phiếu hiện tại được tính.")
 		}
 
 		time.Sleep(2 * time.Second)

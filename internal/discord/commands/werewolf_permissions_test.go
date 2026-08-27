@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -986,44 +987,159 @@ func TestResolveNightFiltersTheWitchsHealTargets(t *testing.T) {
 	}
 }
 
-// TestMutedPlayerIsNamedOnlyWhenTheMuteLanded guards the Disruptor
-// announcement. A silenced player otherwise just goes quiet and reads as
-// AFK — the village misjudges them and they cannot say why. But the claim
-// has to be true: announcing a mute that failed to apply would have the
-// channel accusing someone who can still type.
-func TestMutedPlayerIsNamedOnlyWhenTheMuteLanded(t *testing.T) {
+// TestSilencedPlayerIsBarredFromChatAndVote pins the Disruptor's full
+// effect. The chat half is a Discord permission overwrite and can fail; the
+// vote half is enforced internally and always holds. The announcement is
+// therefore gated on a validated target, NOT on the overwrite landing — a
+// failed overwrite degrades the silence to vote-only rather than cancelling
+// it.
+func TestSilencedPlayerIsBarredFromChatAndVote(t *testing.T) {
 	src, err := os.ReadFile("werewolf_day.go")
 	if err != nil {
 		t.Fatalf("read werewolf_day.go: %v", err)
 	}
-	body, ok := funcBody(string(src), ") runDayDiscuss(")
-	if !ok {
-		t.Fatal("could not locate runDayDiscuss")
-	}
+	text := string(src)
 
-	if !strings.Contains(body, "Bị câm lặng hôm nay") {
-		t.Fatal("runDayDiscuss no longer names the silenced player")
-	}
-	if !strings.Contains(body, "if muteApplied {") {
-		t.Error("the mute announcement is not gated on muteApplied — a failed ChannelPermissionSet would still announce a mute that never happened")
-	}
-	// muteApplied must be set in the SUCCESS arm of the apply, not next to
-	// the target lookup: mutedUserID being non-empty only means a target was
-	// chosen, not that Discord accepted the overwrite.
-	apply := strings.Index(body, "ChannelPermissionSet(channelID, mutedUserID")
-	set := strings.Index(body, "muteApplied = true")
-	if apply < 0 || set < 0 || set < apply {
-		t.Error("muteApplied is set before the overwrite is applied — it no longer means what its name says")
-	}
+	t.Run("the day announcement names them and says what is blocked", func(t *testing.T) {
+		body, ok := funcBody(text, ") runDayDiscuss(")
+		if !ok {
+			t.Fatal("could not locate runDayDiscuss")
+		}
+		if !strings.Contains(body, "làm câm lặng hôm nay") {
+			t.Fatal("runDayDiscuss no longer names the silenced player")
+		}
+		// Naming them without saying what they lost is what prompted this:
+		// a reader could not tell whether the ban covered chat, voting or
+		// both, and the silenced player may assume they cannot vote when
+		// they can (or the reverse).
+		for _, want := range []string{"không chat", "không bỏ phiếu"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the mute line does not spell out %q — players cannot tell what is actually blocked", want)
+			}
+		}
+		if !strings.Contains(body, "game.DisruptorSilencedUserID = mutedUserID") {
+			t.Error("runDayDiscuss does not record DisruptorSilencedUserID — the vote ban has nothing to read")
+		}
+	})
 
-	// The announcement names the target. It must never name the Disruptor:
-	// who was silenced is already inferable from who cannot speak, but who
-	// chose them is the role's entire protection.
-	announce := body[strings.Index(body, "if muteApplied {"):]
-	if idx := strings.Index(announce, "\n\t}"); idx > 0 {
-		announce = announce[:idx]
-	}
-	if strings.Contains(announce, "Disruptor") || strings.Contains(announce, "disruptor") {
-		t.Errorf("the mute line references the Disruptor themself: %q", announce)
-	}
+	t.Run("every vote path honours the ban", func(t *testing.T) {
+		for _, fn := range []string{") handleVote(", ") waitForVotes("} {
+			body, ok := funcBody(text, fn)
+			if !ok {
+				t.Fatalf("could not locate %s", fn)
+			}
+			if !strings.Contains(body, "DisruptorSilencedUserID") {
+				t.Errorf("%s ignores DisruptorSilencedUserID", fn)
+			}
+		}
+		// waitForVotes must EXCLUDE them from the expected-voter count, or
+		// every day-vote burns its full deadline waiting on a ballot that
+		// can never arrive.
+		body, _ := funcBody(text, ") waitForVotes(")
+		if !strings.Contains(body, "continue") {
+			t.Error("waitForVotes counts the silenced player as an expected voter — the vote window will never end early")
+		}
+	})
+
+	t.Run("a ballot cast before the silence is still dropped", func(t *testing.T) {
+		players := map[string]*player{
+			"a": {UserID: "a", Alive: true},
+			"b": {UserID: "b", Alive: true},
+		}
+		votes := map[string]string{"a": "b", "b": "a"}
+		got := validDayVotes(votes, players, "a")
+		if _, present := got["a"]; present {
+			t.Error("the silenced player's vote survived validDayVotes — the ban is bypassed by voting early in the day")
+		}
+		if _, present := got["b"]; !present {
+			t.Error("an unsilenced player's vote was dropped")
+		}
+	})
+
+	t.Run("no silenced id bans nobody", func(t *testing.T) {
+		players := map[string]*player{"a": {UserID: "a", Alive: true}}
+		if got := validDayVotes(map[string]string{"a": voteSkipValue}, players, ""); len(got) != 1 {
+			t.Errorf("validDayVotes with no silenced player returned %v, want the vote kept", got)
+		}
+	})
+
+	t.Run("the silenced player is not struck for the vote they could not cast", func(t *testing.T) {
+		body, ok := funcBody(text, ") resolveVote(")
+		if !ok {
+			t.Fatal("could not locate resolveVote")
+		}
+		strike := strings.Index(body, "AFKStrikes[p.UserID]++")
+		guard := strings.Index(body, "DisruptorSilencedUserID")
+		if strike >= 0 && (guard < 0 || guard > strike) {
+			t.Error("resolveVote strikes the silenced player for not voting — the Disruptor could farm strikes to get their target auto-removed")
+		}
+	})
+}
+
+// TestLastCallWarnings covers the 30-second warning posted into whichever
+// room is actually deliberating.
+func TestLastCallWarnings(t *testing.T) {
+	t.Run("fires 30s before a long window closes", func(t *testing.T) {
+		// Timing is asserted through the arithmetic rather than by
+		// sleeping: the real windows run minutes.
+		for _, window := range []time.Duration{dayDiscussMax, wolfDiscussMax, 60 * time.Second} {
+			if window <= lastCallWindow {
+				t.Errorf("window %v is not longer than lastCallWindow %v, so players would never be warned", window, lastCallWindow)
+			}
+			if got := window - lastCallWindow; got <= 0 {
+				t.Errorf("pre-warning sleep for %v is %v, want positive", window, got)
+			}
+		}
+	})
+
+	t.Run("a window at or under 30s does not warn", func(t *testing.T) {
+		// Announcing "30 seconds left" the instant a 30-second window opens
+		// is noise. sleepWithLastCall must fall through to a plain sleep,
+		// and must not post to an empty thread id either.
+		start := time.Now()
+		sleepWithLastCall(nil, "", 10*time.Millisecond, "unused")
+		if elapsed := time.Since(start); elapsed < 10*time.Millisecond {
+			t.Errorf("returned after %v, want at least the full window", elapsed)
+		}
+		// A nil session would panic if it tried to send; reaching here
+		// proves the short-window and empty-thread paths send nothing.
+		sleepWithLastCall(nil, "thread", 10*time.Millisecond, "unused")
+		postLastCall(nil, "", "unused")
+	})
+
+	t.Run("day warns in the alive thread, night in the wolf thread", func(t *testing.T) {
+		// Each warning must land where that phase's conversation is
+		// happening. The main channel already gets waitForNightActions'
+		// halfway reminder, so routing either of these there too would
+		// double up in the one room that is not the discussion.
+		day, err := os.ReadFile("werewolf_day.go")
+		if err != nil {
+			t.Fatalf("read werewolf_day.go: %v", err)
+		}
+		body, ok := funcBody(string(day), ") runDayDiscuss(")
+		if !ok {
+			t.Fatal("could not locate runDayDiscuss")
+		}
+		if !strings.Contains(body, "sleepWithLastCall(s, aliveThreadID,") {
+			t.Error("day discussion does not warn in the alive-players thread")
+		}
+		if strings.Contains(body, "time.Sleep(discussWindow)") {
+			t.Error("runDayDiscuss still sleeps the window straight through, so no warning can fire")
+		}
+
+		night, err := os.ReadFile("werewolf_night.go")
+		if err != nil {
+			t.Fatalf("read werewolf_night.go: %v", err)
+		}
+		body, ok = funcBody(string(night), ") waitForNightActions(")
+		if !ok {
+			t.Fatal("could not locate waitForNightActions")
+		}
+		if !strings.Contains(body, "postLastCall(s, wolfThreadID,") {
+			t.Error("the night last call does not reach the wolf thread")
+		}
+		if !strings.Contains(body, "lastCalled = true") {
+			t.Error("the night last call is not latched — it would repeat every 2s poll until the deadline")
+		}
+	})
 }

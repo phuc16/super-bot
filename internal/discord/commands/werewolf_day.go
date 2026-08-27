@@ -89,11 +89,6 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	var aliveThreadID string
 	var wolfThreadID string
 	var mutedUserID string
-	// muteApplied, not just mutedUserID: the announcement must only claim
-	// someone is silenced if the overwrite actually landed. Saying so after
-	// a failed apply would have the channel accusing a player of being
-	// muted while they can still type.
-	muteApplied := false
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -125,6 +120,12 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 			if n := len(game.History); n > 0 {
 				game.History[n-1].DisruptorMutedLabel = target.Label
 			}
+			// Recorded here, from the validated target, rather than after
+			// the overwrite call: the VOTE half of the ban is enforced
+			// internally and always works, so it must not be contingent on
+			// Discord accepting the chat overwrite. A failed overwrite
+			// degrades the silence to vote-only; it does not cancel it.
+			game.DisruptorSilencedUserID = mutedUserID
 		} else {
 			mutedUserID = ""
 		}
@@ -163,7 +164,6 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 			// silently skipped the removal whenever the target died during
 			// the discussion window, leaving the overwrite orphaned.
 			// Recorded only on success: a failed apply has nothing to undo.
-			muteApplied = true
 			func() {
 				cmd.mu.Lock()
 				defer cmd.mu.Unlock()
@@ -183,8 +183,8 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	// This reveals the Disruptor's TARGET, never the Disruptor: the pick is
 	// already inferable from who cannot speak, whereas who made it is not.
 	// Stated only here, since the mute is lifted again at the vote.
-	if muteApplied {
-		content += fmt.Sprintf("\n🤫 Bị câm lặng hôm nay: %s", nameTag(mutedUserID))
+	if mutedUserID != "" {
+		content += fmt.Sprintf("\n🤫 Bị Kẻ Phá Hoại làm câm lặng hôm nay: %s — không chat và không bỏ phiếu được cho tới hết ngày.", nameTag(mutedUserID))
 	}
 	if aliveThreadID != "" {
 		content += fmt.Sprintf("\n\n💬 Thảo luận tại <#%s>", aliveThreadID)
@@ -199,7 +199,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 		log.Error().Err(err).Msg("werewolf: failed to post day-discuss announcement")
 	}
 
-	time.Sleep(discussWindow)
+	sleepWithLastCall(s, aliveThreadID, discussWindow, "⏳ **Còn 30 giây** thảo luận — chốt nghi ngờ của bạn đi, sắp tới lượt bỏ phiếu.")
 
 	stillGoing := func() bool {
 		cmd.mu.Lock()
@@ -315,6 +315,12 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 				if !p.Alive {
 					continue
 				}
+				// The silenced player cannot vote, so counting them as an
+				// expected voter would run every day-vote to the full
+				// deadline even once everyone able to vote already had.
+				if game.DisruptorSilencedUserID != "" && id == game.DisruptorSilencedUserID {
+					continue
+				}
 				aliveNow++
 				if _, voted := game.Votes[id]; voted {
 					votedAndAlive++
@@ -346,11 +352,18 @@ func (cmd *WerewolfCommand) waitForVotes(s *discordgo.Session, channelID string,
 // VoteBreakdown recap (which intentionally shows every vote actually cast,
 // for a transparent public record) — only the tally that decides who gets
 // lynched.
-func validDayVotes(votes map[string]string, players map[string]*player) map[string]string {
+func validDayVotes(votes map[string]string, players map[string]*player, silencedID string) map[string]string {
 	valid := make(map[string]string, len(votes))
 	for voterID, targetID := range votes {
 		voter, exists := players[voterID]
 		if !exists || !voter.Alive {
+			continue
+		}
+		// The Disruptor's target is barred from voting. handleVote already
+		// rejects them, so a vote from them here means it was cast before
+		// the silence took effect this day — it must still be dropped, or
+		// the ban is bypassed by voting early.
+		if silencedID != "" && voterID == silencedID {
 			continue
 		}
 		if targetID != voteSkipValue {
@@ -391,6 +404,13 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 			}
 		}
 		for _, p := range alive {
+			// Never strike the silenced player: they were barred from
+			// voting, so their missing ballot is the Disruptor's doing, not
+			// negligence. Without this the Disruptor could farm AFK strikes
+			// to have their target auto-removed outright.
+			if game.DisruptorSilencedUserID != "" && p.UserID == game.DisruptorSilencedUserID {
+				continue
+			}
 			if _, voted := game.Votes[p.UserID]; voted {
 				game.AFKStrikes[p.UserID] = 0
 			} else {
@@ -399,7 +419,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		}
 		game.DayVoteClosed = true
 
-		top, tie := tallyVotes(validDayVotes(game.Votes, game.Players))
+		top, tie := tallyVotes(validDayVotes(game.Votes, game.Players, game.DisruptorSilencedUserID))
 		if !tie && len(top) == 1 {
 			if target, exists := game.Players[top[0]]; exists && target.Alive {
 				target.Alive = false
@@ -1104,6 +1124,11 @@ func (cmd *WerewolfCommand) handleVote(s *discordgo.Session, i *discordgo.Intera
 	if !isPlayer || !voter.Alive {
 		cmd.mu.Unlock()
 		respondComponentEphemeral(s, i, "Chỉ người chơi còn sống mới được bỏ phiếu.")
+		return
+	}
+	if game.DisruptorSilencedUserID != "" && voterID == game.DisruptorSilencedUserID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "🤫 Bạn đang bị Kẻ Phá Hoại làm câm lặng hôm nay nên không bỏ phiếu được. Sang ngày mai bạn sẽ bỏ phiếu lại bình thường.")
 		return
 	}
 	if targetID != voteSkipValue {
