@@ -711,3 +711,84 @@ func TestLopsidedCustomSetupsAreAccepted(t *testing.T) {
 		})
 	}
 }
+
+// TestGameEndSeparator covers the closing line that visually divides one
+// game's output from the next in the channel.
+func TestGameEndSeparator(t *testing.T) {
+	const esc = "\u001b"
+
+	results := map[gameResult]struct {
+		color int
+		word  string
+	}{
+		resultWerewolvesWin: {ansiRed, "SÓI"},
+		resultVillagersWin:  {ansiGreen, "DÂN"},
+		resultLoversWin:     {ansiPink, "CẶP ĐÔI"},
+	}
+	for result, want := range results {
+		got := gameEndSeparator(result)
+
+		if !strings.HasPrefix(got, "```ansi\n") || !strings.HasSuffix(got, "\n```") {
+			t.Errorf("result %v: not a well-formed ansi block: %q", result, got)
+		}
+		// Discord colours text only inside a fence tagged exactly "ansi",
+		// and a real ESC byte must reach the wire or the codes render as
+		// literal text in the middle of the line.
+		if !strings.Contains(got, esc+fmt.Sprintf("[1;%dm", want.color)) {
+			t.Errorf("result %v: missing bold colour %d: %q", result, want.color, got)
+		}
+		if !strings.Contains(got, esc+"[0m") {
+			t.Errorf("result %v: colour is never reset, which can bleed into later text: %q", result, got)
+		}
+		if !strings.Contains(got, want.word) {
+			t.Errorf("result %v: does not name the winner (%q): %q", result, want.word, got)
+		}
+
+		// One line inside the fence — that is what makes it read as a rule
+		// between games rather than another block of output.
+		inner := strings.TrimSuffix(strings.TrimPrefix(got, "```ansi\n"), "\n```")
+		if strings.Contains(inner, "\n") {
+			t.Errorf("result %v: separator spans multiple lines: %q", result, inner)
+		}
+		if n := len([]rune(got)); n > werewolfMessageLimit {
+			t.Errorf("result %v: %d runes, over the %d limit", result, n, werewolfMessageLimit)
+		}
+	}
+
+	t.Run("each result gets a distinct colour", func(t *testing.T) {
+		seen := map[string]gameResult{}
+		for result := range results {
+			line := gameEndSeparator(result)
+			if prev, dup := seen[line]; dup {
+				t.Errorf("results %v and %v render identically — the colour cue carries no information", prev, result)
+			}
+			seen[line] = result
+		}
+	})
+
+	t.Run("an unknown result still renders a valid block", func(t *testing.T) {
+		// resultOngoing should never reach here, but a malformed fence
+		// would corrupt the rest of the channel's rendering.
+		got := gameEndSeparator(resultOngoing)
+		if !strings.HasPrefix(got, "```ansi\n") || !strings.HasSuffix(got, "\n```") {
+			t.Errorf("malformed block for an unexpected result: %q", got)
+		}
+	})
+}
+
+// TestAnsiLineCannotBreakOutOfItsFence guards the two characters that would
+// let text escape the code block and corrupt every message after it.
+func TestAnsiLineCannotBreakOutOfItsFence(t *testing.T) {
+	got := ansiLine(ansiRed, "line one\nline two ``` still inside")
+
+	inner := strings.TrimSuffix(strings.TrimPrefix(got, "```ansi\n"), "\n```")
+	if strings.Contains(inner, "\n") {
+		t.Errorf("newline survived into the block, splitting the separator: %q", inner)
+	}
+	if strings.Contains(inner, "`") {
+		t.Errorf("backtick survived into the block and can close the fence early: %q", inner)
+	}
+	if strings.Count(got, "```") != 2 {
+		t.Errorf("expected exactly one opening and one closing fence: %q", got)
+	}
+}

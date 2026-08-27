@@ -816,7 +816,7 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 		}
 	}
 
-	for _, chunk := range chunkRecapMessages(game.History, 1900) {
+	for _, chunk := range chunkRecapMessages(game.History, werewolfMessageLimit) {
 		if _, err := s.ChannelMessageSendComplex(game.ChannelID, &discordgo.MessageSend{
 			Content:         chunk,
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
@@ -824,6 +824,55 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 			log.Error().Err(err).Msg("werewolf: failed to post game recap")
 		}
 	}
+
+	// Closing separator, sent last so it sits between this game's output and
+	// whatever the channel does next.
+	if _, err := s.ChannelMessageSendComplex(game.ChannelID, &discordgo.MessageSend{
+		Content:         gameEndSeparator(result),
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to post game-end separator")
+	}
+}
+
+// ansiColor codes for Discord's ```ansi code blocks. Discord renders SGR
+// sequences inside a fenced block tagged "ansi" and nowhere else, so these
+// are only meaningful via ansiLine.
+const (
+	ansiRed   = 31
+	ansiGreen = 32
+	ansiPink  = 35
+)
+
+// ansiLine wraps text in a bold-coloured Discord ANSI code block.
+//
+// A coloured EMBED would be the other way to do this, but embeds require
+// the Embed Links permission, and adding a new requirement to
+// werewolfRequiredPermissions would refuse to start games in servers that
+// run fine today. An ansi block is plain message content, so it needs
+// nothing extra.
+//
+// Newlines are stripped: the block must stay a single line to read as a
+// separator, and a stray newline in text would also let caller-supplied
+// content break out of the fence.
+func ansiLine(color int, text string) string {
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "\n", " "), "`", "'")
+	return fmt.Sprintf("```ansi\n\u001b[1;%dm%s\u001b[0m\n```", color, text)
+}
+
+// gameEndSeparator renders the single coloured line that closes a game, so
+// scrolling the channel makes it obvious where one game stopped and the
+// next began. Colour tracks who won: red wolves, green village, pink
+// lovers.
+func gameEndSeparator(result gameResult) string {
+	color, text := ansiRed, "🐺 VÁN MA SÓI KẾT THÚC — PHE SÓI THẮNG"
+	switch result {
+	case resultVillagersWin:
+		color, text = ansiGreen, "🏡 VÁN MA SÓI KẾT THÚC — PHE DÂN THẮNG"
+	case resultLoversWin:
+		color, text = ansiPink, "💘 VÁN MA SÓI KẾT THÚC — CẶP ĐÔI THẮNG"
+	}
+	return ansiLine(color, "━━━━━  "+text+"  ━━━━━")
 }
 
 // formatRoundBlock renders one round's recap section. Any field left at its
