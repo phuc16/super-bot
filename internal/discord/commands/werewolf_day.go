@@ -12,10 +12,15 @@ import (
 
 const (
 	werewolfVoteID = "ww:vote:"
-	dayVoteWindow  = 30 * time.Second
+	dayVoteWindow  = 60 * time.Second
 
-	dayDiscussBase     = 45 * time.Second
-	dayDiscussPerAlive = 15 * time.Second
+	dayDiscussBase     = 90 * time.Second
+	dayDiscussPerAlive = 18 * time.Second
+
+	// dayDiscussMax caps the discussion window for the same reason
+	// wolfDiscussMax caps the night one: it keeps the worst-case night+day
+	// cycle bounded regardless of roster size.
+	dayDiscussMax = 450 * time.Second
 )
 
 // dayDiscussWindowFor returns the day-discussion window for a given number
@@ -23,7 +28,11 @@ const (
 // and bigger games have more people to accuse/defend, so the window scales
 // with the lobby size instead of staying flat.
 func dayDiscussWindowFor(aliveCount int) time.Duration {
-	return dayDiscussBase + dayDiscussPerAlive*time.Duration(aliveCount)
+	window := dayDiscussBase + dayDiscussPerAlive*time.Duration(aliveCount)
+	if window > dayDiscussMax {
+		return dayDiscussMax
+	}
+	return window
 }
 
 const (

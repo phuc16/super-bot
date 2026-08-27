@@ -94,9 +94,9 @@ var (
 // plan's Global Constraints for why (each is only ever actually acted on
 // via the first alive player of that role in the engine today, so a
 // second one dealt would silently do nothing). Every other countable role
-// is capped only by the total player count, which the confirm-time
-// wolf-side/villager-side balance check (roleCountConfirmValid) further
-// constrains in practice.
+// is capped only by the total player count — roleCountConfirmValid checks
+// the structural rules at confirm time, but does not constrain how wolf-
+// heavy a setup may be.
 func roleCountMax(r role, playerCount int) int {
 	switch r {
 	case roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor, roleCupid, roleTraitor:
@@ -117,14 +117,22 @@ func balanceScore(counts map[role]int) int {
 	return score
 }
 
-// roleCountConfirmValid mirrors the reference's setupValid: the total
-// count must exactly match playerCount, and both the wolf-side and
-// villager-side groupings must have at least one role counted. It also
-// requires at least one actual wolf-vote-participant (Werewolf or Wolf
-// Cub) — Cursed Wolf and Traitor both count toward the wolf-side grouping
-// above but neither one ever votes in the wolf kill, so a wolf side made
-// up of only those two would leave the game with no wolf thread and no
-// possible kill, instantly resolving as a villager win.
+// roleCountConfirmValid checks only what the game needs in order to RUN:
+// the total must exactly match playerCount, both the wolf-side and
+// villager-side groupings must have at least one role, and there must be
+// at least one actual wolf-vote-participant (Werewolf or Wolf Cub) —
+// Cursed Wolf and Traitor both count toward the wolf-side grouping above
+// but neither ever votes in the wolf kill, so a wolf side made up of only
+// those two would leave the game with no wolf thread and no possible kill,
+// instantly resolving as a villager win.
+//
+// It deliberately does NOT check balance. Custom roles exist so a group can
+// deal whatever setup they want, including a deliberately lopsided one; an
+// earlier wolf-faction floor rejected such setups at confirm time. The cost
+// is that a wolf-heavy custom setup can satisfy checkWinCondition on night
+// 1 and end the game immediately — that is now the starter's call to make,
+// not the bot's to prevent. The fixed default table (used when custom-roles
+// is off) remains balanced.
 func roleCountConfirmValid(counts map[role]int, playerCount int) bool {
 	wolfSide, villagerSide := 0, 0
 	for _, r := range roleCountWolfSideRoles {
@@ -135,41 +143,7 @@ func roleCountConfirmValid(counts map[role]int, playerCount int) bool {
 	}
 	wolfVoteParticipants := counts[roleWerewolf] + counts[roleWolfCub]
 	return wolfSide+villagerSide == playerCount && wolfSide >= 1 && villagerSide >= 1 &&
-		wolfVoteParticipants >= 1 && wolfFactionBalanceOK(counts, playerCount)
-}
-
-// wolfFactionBalanceOK enforces the balance floor: checkWinCondition
-// declares a wolf win the instant aliveWolves >= aliveOthers, so a setup
-// that can reach that bar before the village ever gets a day phase is an
-// unplayable instant loss and must be rejected at confirm time.
-//
-// The required margin depends on the worst single night-1 event the setup
-// actually allows:
-//
-//   - With no Cursed Wolf, the worst case is one plain kill: aliveOthers
-//     drops by 1, a 1-point swing. Surviving it needs wolfFaction*2+1 <
-//     playerCount.
-//   - With at least one Cursed Wolf, a bite can instead CONVERT, which
-//     moves a player from aliveOthers to aliveWolves — a 2-point swing in
-//     one step. Surviving that needs wolfFaction*2+2 < playerCount.
-//
-// Applying the +2 margin unconditionally (as an earlier revision did)
-// wrongly rejected ordinary no-Cursed-Wolf setups such as 2 wolves at 6
-// players, which are perfectly playable: night 1 leaves 2 vs 3 with a full
-// day of discussion and a vote.
-//
-// wolfFaction counts wolf-FACTION membership (matching factionForRole),
-// not the editor's wolfSide grouping: Cursed Wolf is displayed on the wolf
-// side but deals as villager-faction until it converts, so it must not be
-// counted as a wolf here — its danger is expressed through the larger
-// margin instead.
-func wolfFactionBalanceOK(counts map[role]int, playerCount int) bool {
-	wolfFaction := counts[roleWerewolf] + counts[roleWolfCub] + counts[roleTraitor]
-	margin := 1
-	if counts[roleCursedWolf] > 0 {
-		margin = 2
-	}
-	return wolfFaction*2+margin < playerCount
+		wolfVoteParticipants >= 1
 }
 
 // roleCountConfirmError returns a specific, accurate explanation of which
@@ -177,9 +151,9 @@ func wolfFactionBalanceOK(counts map[role]int, playerCount int) bool {
 // — checked in the same order they're evaluated there. Without this, the
 // confirm button had one fixed message describing only the total/both-
 // sides conditions, which actively misdescribed a rejection caused by the
-// wolf-vote-participant rule or the wolf-faction balance floor (both added
-// after that message was first written), leaving the starter no way to
-// diagnose a setup that already looked correct on screen.
+// wolf-vote-participant rule, added after that message was first written,
+// leaving the starter no way to diagnose a setup that already looked
+// correct on screen.
 //
 // Returns "" when counts are in fact valid, so the empty string is a safe
 // validity test on its own — the leading case below makes that true rather
@@ -206,19 +180,13 @@ func roleCountConfirmError(counts map[role]int, playerCount int) string {
 	case counts[roleWerewolf]+counts[roleWolfCub] < 1:
 		return "Cần ít nhất 1 Ma Sói hoặc Sói Con để bầy Sói có người bỏ phiếu cắn — Sói Nguyền và Kẻ Phản Bội một mình không đủ."
 	default:
-		// Deliberately does NOT suggest reducing Sói Nguyền: Cursed Wolf
-		// is excluded from the wolfFaction count in wolfFactionBalanceOK,
-		// so cutting it can never clear this rejection — naming it here
-		// would send the starter into a loop applying a remedy that does
-		// nothing, the same defect class this whole function exists to fix.
-		// (Removing every Cursed Wolf does shrink the required margin from
-		// 2 to 1, which can help at the boundary, so it's mentioned as a
-		// distinct secondary option rather than as a count to reduce.)
-		msg := "Phe Sói hiện quá mạnh so với số người chơi: chỉ cần 1 đêm là phe Sói đã có thể thắng ngay, không kịp có ngày thảo luận nào. Hãy giảm bớt Ma Sói/Sói Con/Kẻ Phản Bội, hoặc tăng số người phe Dân."
-		if counts[roleCursedWolf] > 0 {
-			msg += " (Bỏ hết Sói Nguyền cũng nới được yêu cầu này một chút, vì khi đó không còn nguy cơ bị biến hình ngay đêm đầu.)"
-		}
-		return msg
+		// Unreachable in practice: the cases above cover every condition
+		// roleCountConfirmValid checks, and this function returns "" up
+		// front when they all hold. Kept so a future condition added to
+		// roleCountConfirmValid without a matching case here produces a
+		// vague message rather than a silently-empty one, which the
+		// caller would read as "valid".
+		return "Cấu hình vai trò chưa hợp lệ, kiểm tra lại số lượng từng vai."
 	}
 }
 

@@ -516,14 +516,22 @@ func TestDayDiscussWindowFor(t *testing.T) {
 		alive int
 		want  time.Duration
 	}{
-		{5, 45*time.Second + 15*5*time.Second},
-		{8, 45*time.Second + 15*8*time.Second},
-		{12, 45*time.Second + 15*12*time.Second},
+		{5, dayDiscussBase + dayDiscussPerAlive*5},
+		{8, dayDiscussBase + dayDiscussPerAlive*8},
+		{12, dayDiscussBase + dayDiscussPerAlive*12},
+		// The cap binds at the top of the range, so a huge roster (or a
+		// future bump to werewolfMaxPlayers) can't stretch the day without
+		// bound and break the cycle ceiling.
+		{werewolfMaxPlayers, dayDiscussMax},
+		{500, dayDiscussMax},
 	}
 	for _, c := range cases {
 		if got := dayDiscussWindowFor(c.alive); got != c.want {
 			t.Errorf("dayDiscussWindowFor(%d) = %v, want %v", c.alive, got, c.want)
 		}
+	}
+	if dayDiscussWindowFor(0) <= 0 {
+		t.Error("an empty roster must still yield a positive window")
 	}
 }
 
@@ -532,14 +540,22 @@ func TestWolfDiscussWindowFor(t *testing.T) {
 		wolves int
 		want   time.Duration
 	}{
-		{1, 60*time.Second + 20*time.Second},
-		{2, 60*time.Second + 40*time.Second},
-		{4, 60*time.Second + 80*time.Second},
+		{1, wolfDiscussBase + wolfDiscussPerWolf*1},
+		{2, wolfDiscussBase + wolfDiscussPerWolf*2},
+		{4, wolfDiscussBase + wolfDiscussPerWolf*4},
+		// Custom roles no longer enforce a wolf-faction floor, so the wolf
+		// count can approach the whole lobby — the cap is what keeps the
+		// night bounded in that case.
+		{werewolfMaxPlayers, wolfDiscussMax},
+		{500, wolfDiscussMax},
 	}
 	for _, c := range cases {
 		if got := wolfDiscussWindowFor(c.wolves); got != c.want {
 			t.Errorf("wolfDiscussWindowFor(%d) = %v, want %v", c.wolves, got, c.want)
 		}
+	}
+	if wolfDiscussWindowFor(0) <= 0 {
+		t.Error("a zero wolf count must still yield a positive window")
 	}
 }
 
@@ -1742,10 +1758,11 @@ func TestOneFullCycleFitsWellInsideAnInteractionTokenLifetime(t *testing.T) {
 	// measured rather than assumed.
 	const discordInteractionTokenLifetime = 15 * time.Minute
 
-	// Night: the wolf discussion window is the long pole, and the balance
-	// floor caps wolf-faction at 9 in a 20-player game (9*2+1 < 20).
-	const maxWolves = 9
-	nightWindow := wolfDiscussWindowFor(maxWolves)
+	// Night: the wolf discussion window is the long pole. Custom roles no
+	// longer enforce a wolf-faction floor, so the wolf count can run to the
+	// whole lobby — wolfDiscussMax, not the old balance rule, is what bounds
+	// this now.
+	nightWindow := wolfDiscussWindowFor(werewolfMaxPlayers)
 	if nightActionWindow > nightWindow {
 		nightWindow = nightActionWindow
 	}
@@ -2861,20 +2878,19 @@ func TestRoleCountConfirmValid(t *testing.T) {
 		{"no villager side", map[role]int{roleWerewolf: 7}, 7, false},
 		{"cursed wolf alone is not enough — no wolf-vote-participant", map[role]int{roleCursedWolf: 1, roleVillager: 6}, 7, false},
 		{"werewolf plus cursed wolf is valid", map[role]int{roleWerewolf: 1, roleCursedWolf: 1, roleVillager: 5}, 7, true},
-		{"wolf faction at half the roster is an instant loss, rejected", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5, false},
-		{"wolf faction that reaches parity after just ONE plain kill is rejected", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5, false},
-		{"wolf faction with margin to survive one kill is valid", map[role]int{roleWerewolf: 3, roleVillager: 6}, 9, true},
-		{"wolf faction one over that margin is rejected", map[role]int{roleWerewolf: 4, roleVillager: 5}, 9, false},
-		// Regression: an earlier revision applied the Cursed-Wolf-sized
-		// (+2) margin unconditionally, wrongly rejecting ordinary setups
-		// with no Cursed Wolf at all. 2 wolves at 6 players is a standard,
-		// perfectly playable config — night 1 leaves 2 vs 3 with a full
-		// day of discussion and a vote.
-		{"standard 2-wolf 6-player setup with no cursed wolf is valid", map[role]int{roleWerewolf: 2, roleSeer: 1, roleVillager: 3}, 6, true},
-		{"same size but WITH a cursed wolf needs the bigger margin, rejected", map[role]int{roleWerewolf: 2, roleCursedWolf: 1, roleVillager: 3}, 6, false},
-		{"cursed wolf present but wolf faction small enough for the bigger margin", map[role]int{roleWerewolf: 2, roleCursedWolf: 1, roleVillager: 4}, 7, true},
-		{"traitor counts toward the wolf-faction floor too", map[role]int{roleWerewolf: 2, roleTraitor: 1, roleVillager: 2}, 5, false},
-		{"cursed wolf's conversion swing means it still can't be excluded for free — this config is an instant loss after one bite", map[role]int{roleWerewolf: 2, roleCursedWolf: 2, roleVillager: 1}, 5, false},
+		// Balance is deliberately NOT enforced for custom roles: the point
+		// of the editor is to let a group deal whatever setup they want.
+		// Every config below is lopsided or outright an instant win for
+		// the wolves, and all of them must be ACCEPTED — an earlier
+		// wolf-faction floor rejected them at confirm time.
+		{"wolf faction at half the roster is accepted", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5, true},
+		{"wolf faction reaching parity after one kill is accepted", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5, true},
+		{"lopsided setup with a cursed wolf is accepted", map[role]int{roleWerewolf: 2, roleCursedWolf: 1, roleVillager: 3}, 6, true},
+		{"traitor-heavy wolf faction is accepted", map[role]int{roleWerewolf: 2, roleTraitor: 1, roleVillager: 2}, 5, true},
+		{"all-but-one wolf is accepted", map[role]int{roleWerewolf: 4, roleVillager: 1}, 5, true},
+		// The structural rules still hold: they are what the game needs to
+		// RUN at all, not balance judgments.
+		{"standard 2-wolf 6-player setup stays valid", map[role]int{roleWerewolf: 2, roleSeer: 1, roleVillager: 3}, 6, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2955,31 +2971,15 @@ func TestRoleCountConfirmErrorReturnsEmptyForValidCounts(t *testing.T) {
 	}
 }
 
-func TestRoleCountConfirmErrorNeverSuggestsAnIneffectiveRemedy(t *testing.T) {
-	// The balance-floor message must not tell the starter to reduce a role
-	// that isn't counted toward the floor — following that advice would
-	// loop forever with no progress. Cursed Wolf is excluded from
-	// wolfFaction, so it must not appear in the "reduce these" list.
-	counts := map[role]int{roleWerewolf: 4, roleCursedWolf: 1, roleVillager: 4}
-	const playerCount = 9
-	if roleCountConfirmValid(counts, playerCount) {
-		t.Fatalf("test setup bug: %v at %d players should be rejected", counts, playerCount)
-	}
-	msg := roleCountConfirmError(counts, playerCount)
-	reduceList, _, found := strings.Cut(msg, "hoặc tăng số người phe Dân")
-	if !found {
-		t.Fatalf("balance-floor message shape changed, update this test: %q", msg)
-	}
-	if strings.Contains(reduceList, "Sói Nguyền") {
-		t.Errorf("balance-floor message tells the starter to reduce Sói Nguyền, which is excluded from the wolf-faction count and can never clear the rejection: %q", msg)
-	}
-}
-
 func TestRoleCountConfirmErrorMatchesActualFailure(t *testing.T) {
 	// Regression: the confirm-rejection message used to be one fixed string
 	// describing only the total/both-sides conditions, actively misleading
 	// a starter whose rejection was actually caused by the wolf-vote-
-	// participant rule or the balance floor (both added later).
+	// participant rule.
+	//
+	// Every remaining rejection is structural — something the game needs in
+	// order to run. Balance is no longer among them; see
+	// TestLopsidedCustomSetupsAreAccepted.
 	cases := []struct {
 		name        string
 		counts      map[role]int
@@ -2990,7 +2990,6 @@ func TestRoleCountConfirmErrorMatchesActualFailure(t *testing.T) {
 		{"no wolf side", map[role]int{roleVillager: 5}, 5, "phe Sói"},
 		{"no villager side", map[role]int{roleWerewolf: 5}, 5, "phe Dân"},
 		{"no wolf-vote-participant", map[role]int{roleTraitor: 1, roleCursedWolf: 1, roleVillager: 6}, 8, "Ma Sói hoặc Sói Con"},
-		{"balance floor", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5, "quá mạnh"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -659,3 +659,55 @@ func TestSplitIntoMessages(t *testing.T) {
 		}
 	})
 }
+
+// TestLopsidedCustomSetupsAreAccepted pins the deliberate removal of the
+// wolf-faction balance floor from the custom-role editor. The editor exists
+// so a group can deal whatever setup they want, including one that hands
+// the wolves an immediate win; that is the starter's call, not the bot's to
+// veto. Only structural rules — the ones without which the game cannot run
+// at all — still reject.
+func TestLopsidedCustomSetupsAreAccepted(t *testing.T) {
+	accepted := []struct {
+		name        string
+		counts      map[role]int
+		playerCount int
+	}{
+		{"wolves at parity", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5},
+		{"wolves already past parity", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5},
+		{"everyone but one is a wolf", map[role]int{roleWerewolf: 4, roleVillager: 1}, 5},
+		{"cursed wolf on a thin roster", map[role]int{roleWerewolf: 2, roleCursedWolf: 1, roleVillager: 3}, 6},
+		{"traitor pushing the wolf faction over", map[role]int{roleWerewolf: 2, roleTraitor: 1, roleVillager: 2}, 5},
+	}
+	for _, c := range accepted {
+		t.Run(c.name, func(t *testing.T) {
+			if !roleCountConfirmValid(c.counts, c.playerCount) {
+				t.Errorf("roleCountConfirmValid(%v, %d) = false, want true — balance must not be enforced for custom roles", c.counts, c.playerCount)
+			}
+			if msg := roleCountConfirmError(c.counts, c.playerCount); msg != "" {
+				t.Errorf("roleCountConfirmError(%v, %d) = %q, want \"\"", c.counts, c.playerCount, msg)
+			}
+		})
+	}
+
+	rejected := []struct {
+		name        string
+		counts      map[role]int
+		playerCount int
+		why         string
+	}{
+		{"total does not match the roster", map[role]int{roleWerewolf: 2, roleVillager: 2}, 7, "Tổng số vai trò"},
+		{"no wolf side at all", map[role]int{roleVillager: 5}, 5, "phe Sói"},
+		{"no villager side at all", map[role]int{roleWerewolf: 5}, 5, "phe Dân"},
+		{"wolf side cannot vote to bite", map[role]int{roleTraitor: 1, roleCursedWolf: 1, roleVillager: 6}, 8, "Ma Sói hoặc Sói Con"},
+	}
+	for _, c := range rejected {
+		t.Run(c.name, func(t *testing.T) {
+			if roleCountConfirmValid(c.counts, c.playerCount) {
+				t.Errorf("roleCountConfirmValid(%v, %d) = true, want false — %s is structural, not a balance judgment", c.counts, c.playerCount, c.name)
+			}
+			if msg := roleCountConfirmError(c.counts, c.playerCount); !strings.Contains(msg, c.why) {
+				t.Errorf("roleCountConfirmError(%v, %d) = %q, want it to mention %q", c.counts, c.playerCount, msg, c.why)
+			}
+		})
+	}
+}

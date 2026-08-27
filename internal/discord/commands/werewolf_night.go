@@ -21,19 +21,28 @@ const (
 	werewolfDisruptorTargetID = "ww:disruptortarget:"
 	werewolfCupidPairID       = "ww:cupidpair:"
 
-	// nightActionWindow is the solo window for the Seer and Doctor, who each
-	// act alone. Wolves get their own, longer window — see
-	// wolfDiscussWindowFor — since they coordinate as a group in a shared
-	// thread and benefit from more time as their numbers grow.
-	nightActionWindow = 60 * time.Second
+	// nightActionWindow is the solo window shared by every non-wolf night
+	// role that acts alone — Seer, Doctor, Hunter, Disruptor, and round-1
+	// Cupid. Wolves get their own, longer window (see wolfDiscussWindowFor)
+	// since they coordinate as a group in a shared thread.
+	nightActionWindow = 120 * time.Second
 
-	// witchActionWindow is deliberately short — she's making one fast
-	// decision after already knowing who was bitten, not coordinating with
-	// anyone else the way the wolf pack does.
-	witchActionWindow = 30 * time.Second
+	// witchActionWindow is shorter than the others: she makes one decision
+	// after already knowing who was bitten, rather than coordinating with
+	// anyone. It still has to be long enough to read the bite result and
+	// choose, so it is not merely a formality.
+	witchActionWindow = 60 * time.Second
 
-	wolfDiscussBase    = 60 * time.Second
+	wolfDiscussBase    = 90 * time.Second
 	wolfDiscussPerWolf = 20 * time.Second
+
+	// wolfDiscussMax caps the pack's window. Without a cap the window grows
+	// with the wolf count, and since custom roles no longer enforce a
+	// wolf-faction balance floor, that count can run to nearly the whole
+	// lobby — which would push a single night+day cycle past the ceilings
+	// pinned by TestWolfThreadIdleGapStaysUnderAutoArchive and
+	// TestOneFullCycleFitsWellInsideAnInteractionTokenLifetime.
+	wolfDiscussMax = 240 * time.Second
 
 	// wolfThreadAutoArchiveMinutes is the AutoArchiveDuration Discord
 	// applies to the wolf thread (Discord only accepts 60, 1440, 4320 or
@@ -48,9 +57,15 @@ const (
 )
 
 // wolfDiscussWindowFor returns the night-discussion window for the wolves'
-// private thread, given how many wolves are alive this round.
+// private thread, given how many wolves are alive this round, capped at
+// wolfDiscussMax so an unusually wolf-heavy custom setup can't stretch the
+// night without bound.
 func wolfDiscussWindowFor(wolfCount int) time.Duration {
-	return wolfDiscussBase + wolfDiscussPerWolf*time.Duration(wolfCount)
+	window := wolfDiscussBase + wolfDiscussPerWolf*time.Duration(wolfCount)
+	if window > wolfDiscussMax {
+		return wolfDiscussMax
+	}
+	return window
 }
 
 // tallyWolfVotes resolves the wolf pack's plurality vote into up to topN
