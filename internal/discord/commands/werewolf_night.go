@@ -23,9 +23,13 @@ const (
 
 	// nightActionWindow is the solo window shared by every non-wolf night
 	// role that acts alone — Seer, Doctor, Hunter, Disruptor, and round-1
-	// Cupid. Wolves get their own, longer window (see wolfDiscussWindowFor)
-	// since they coordinate as a group in a shared thread.
-	nightActionWindow = 120 * time.Second
+	// Cupid. Each is a single pick from a menu with no one to consult, so
+	// it stays tighter than the pack's window (see wolfDiscussWindowFor)
+	// and tighter than day discussion, which is where the time is better
+	// spent. Note this is not the night's total length: the night runs for
+	// the longer of this and the wolf window, so trimming it does not
+	// shorten a night in which the pack is still deliberating.
+	nightActionWindow = 90 * time.Second
 
 	// witchActionWindow is shorter than the others: she makes one decision
 	// after already knowing who was bitten, rather than coordinating with

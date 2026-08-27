@@ -12,15 +12,22 @@ import (
 
 const (
 	werewolfVoteID = "ww:vote:"
-	dayVoteWindow  = 60 * time.Second
+	// dayVoteWindow is short on purpose: by the time voting opens the
+	// arguments have already been made during discussion, and every voter
+	// is picking one name from a menu. Time given back here goes to
+	// discussion instead.
+	dayVoteWindow = 45 * time.Second
 
-	dayDiscussBase     = 90 * time.Second
-	dayDiscussPerAlive = 18 * time.Second
+	dayDiscussBase     = 120 * time.Second
+	dayDiscussPerAlive = 25 * time.Second
 
 	// dayDiscussMax caps the discussion window for the same reason
 	// wolfDiscussMax caps the night one: it keeps the worst-case night+day
-	// cycle bounded regardless of roster size.
-	dayDiscussMax = 450 * time.Second
+	// cycle bounded regardless of roster size. This cap is the binding
+	// constraint on the whole cycle — see
+	// TestOneFullCycleFitsWellInsideAnInteractionTokenLifetime — so raising
+	// it means taking the time from another window.
+	dayDiscussMax = 480 * time.Second
 )
 
 // dayDiscussWindowFor returns the day-discussion window for a given number
