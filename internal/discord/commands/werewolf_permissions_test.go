@@ -1365,3 +1365,75 @@ func TestEveryDeathSiteClearsAStaleHunterPick(t *testing.T) {
 		}
 	}
 }
+
+// TestRoleEditTimeoutsStayInsideTheirCeilings pins the extended editor
+// window against the two limits that bound it. Both are satisfied with room
+// to spare today; the point is that raising roleEditTimeout further has to
+// be a deliberate act, not a number bumped in isolation.
+func TestRoleEditTimeoutsStayInsideTheirCeilings(t *testing.T) {
+	const discordInteractionTokenLifetime = 15 * time.Minute
+
+	if roleEditTimeout <= 0 {
+		t.Fatal("roleEditTimeout is disabled — an editor nobody confirms would hold the channel forever")
+	}
+	if roleEditTimeout >= lobbyTimeout {
+		t.Errorf("roleEditTimeout (%v) reaches lobbyTimeout (%v) — the two watchdogs could disagree about the same game",
+			roleEditTimeout, lobbyTimeout)
+	}
+	if roleEditTimeout >= discordInteractionTokenLifetime {
+		t.Errorf("roleEditTimeout (%v) reaches Discord's %v interaction-token lifetime",
+			roleEditTimeout, discordInteractionTokenLifetime)
+	}
+
+	// The undeliverable-editor fallback is not a pacing choice, so it must
+	// stay far shorter: the starter is looking at nothing and does not know
+	// the game is waiting on them.
+	if roleEditorUnavailableTimeout <= 0 {
+		t.Fatal("roleEditorUnavailableTimeout is disabled — a game whose editor failed to send would never leave phaseRoleEdit")
+	}
+	if roleEditorUnavailableTimeout >= roleEditTimeout {
+		t.Errorf("roleEditorUnavailableTimeout (%v) is not shorter than roleEditTimeout (%v) — a starter with no editor waits as long as one who has it",
+			roleEditorUnavailableTimeout, roleEditTimeout)
+	}
+}
+
+// TestUndeliverableEditorStillLeavesRoleEdit guards the stuck state that
+// made the role-edit watchdog load-bearing in the first place: if BOTH
+// ephemeral editor messages fail to send, the starter has no way to confirm
+// and no idea the game is waiting, so nothing but this fallback ever moves
+// it out of phaseRoleEdit.
+func TestUndeliverableEditorStillLeavesRoleEdit(t *testing.T) {
+	src, err := os.ReadFile("werewolf_rolepick.go")
+	if err != nil {
+		t.Fatalf("read werewolf_rolepick.go: %v", err)
+	}
+	text := string(src)
+
+	body, ok := funcBody(text, ") sendRoleCountEditor(")
+	if !ok {
+		t.Fatal("could not locate sendRoleCountEditor")
+	}
+	// Launched unconditionally — especially when nothing was delivered.
+	if !strings.Contains(body, "go cmd.waitForRoleCountConfirm(s, channelID, seq, delivered)") {
+		t.Error("sendRoleCountEditor no longer reports delivery to the watchdog, so an undeliverable editor cannot be distinguished from a slow starter")
+	}
+	if strings.Count(body, "delivered = true") != 2 {
+		t.Error("delivery is not tracked per editor message — one surviving message still means the starter can confirm")
+	}
+
+	body, ok = funcBody(text, ") waitForRoleCountConfirm(")
+	if !ok {
+		t.Fatal("could not locate waitForRoleCountConfirm")
+	}
+	if !strings.Contains(body, "roleEditorUnavailableTimeout") {
+		t.Error("waitForRoleCountConfirm ignores the undeliverable-editor case")
+	}
+	// The poll must exit on phase change even with no deadline set, or a
+	// disabled timeout would leak a goroutine per game.
+	if !strings.Contains(body, "if !stillEditing {") {
+		t.Error("the poll no longer exits on phase change — with a zero timeout it would never terminate")
+	}
+	if !strings.Contains(body, "deadline.IsZero()") {
+		t.Error("a zero timeout is no longer treated as 'no deadline' — setting roleEditTimeout to 0 would fire the fallback immediately")
+	}
+}

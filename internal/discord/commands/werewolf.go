@@ -1449,7 +1449,7 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 			stillCurrent = true
 		}
 	}()
-	if stillCurrent {
+	if stillCurrent && lobbyTimeout > 0 {
 		go cmd.waitForLobbyExpiry(s, i.ChannelID, game.Seq)
 	}
 }
@@ -1460,6 +1460,11 @@ func (cmd *WerewolfCommand) handleStart(s *discordgo.Session, i *discordgo.Inter
 // the starter is not auto-added to the roster, so "everyone left" cleanup
 // alone doesn't cover a starter who opens a lobby, never joins, and goes
 // offline. This is the backstop for every abandonment shape.
+//
+// Zero disables the watchdog entirely, leaving only manual recovery (the
+// "Hủy" button, /werewolf force-stop, the last member leaving, or a bot
+// restart). Kept armed deliberately: a locked channel nobody can free is
+// worse than a lobby that closes early, and reopening one is cheap.
 const lobbyTimeout = 15 * time.Minute
 
 // waitForLobbyExpiry closes a lobby that nobody ever started, restoring the

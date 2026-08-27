@@ -73,9 +73,31 @@ const (
 	werewolfRoleCountConfirmID = "ww:rolecountconfirm:"
 
 	// roleEditTimeout is how long the starter has to confirm the manual
-	// role-count editor before the game falls back to the fixed table
-	// automatically.
-	roleEditTimeout = 5 * time.Minute
+	// role-count editor before the game falls back to the fixed table.
+	// Doubled from the original 5 minutes: picking counts for up to 20
+	// players, across eleven roles, two clicks at a time, is slower than
+	// that allowed for.
+	//
+	// Two ceilings bound any further increase, both currently satisfied
+	// with room to spare:
+	//   - it must stay under lobbyTimeout (15m), so the two watchdogs can
+	//     never disagree about the same game;
+	//   - the editor's ephemeral followups are created against the "Bắt
+	//     đầu" interaction token, which Discord expires after 15 minutes.
+	//     Only creation uses that token — every later redraw answers the
+	//     button's own fresh interaction via
+	//     InteractionResponseUpdateMessage — but staying inside it keeps a
+	//     future token-based edit possible.
+	// Going past either needs those guards revisited, not just this number.
+	roleEditTimeout time.Duration = 10 * time.Minute
+
+	// roleEditorUnavailableTimeout is the one case that still needs a
+	// deadline: BOTH ephemeral editor messages failed to send, so the
+	// starter is staring at a channel with no editor and no way to confirm,
+	// and does not know the game is waiting on them. Falling back to the
+	// fixed table beats sitting in phaseRoleEdit until an admin notices.
+	// Unlike roleEditTimeout this is not a pacing choice, so it stays short.
+	roleEditorUnavailableTimeout = 60 * time.Second
 )
 
 // roleCountWolfSideRoles and roleCountVillagerSideRoles are the manual-pick
@@ -322,12 +344,15 @@ func roleCountButtonRows(channelID string, seq uint64, roles []role, counts map[
 // starts the abandon-timeout watchdog.
 func (cmd *WerewolfCommand) sendRoleCountEditor(s *discordgo.Session, interaction *discordgo.Interaction, channelID string, playerCount int, seq uint64) {
 	counts := map[role]int{}
+	delivered := false
 	if _, err := s.FollowupMessageCreate(interaction, true, &discordgo.WebhookParams{
 		Content:    roleCountEditorContent("wolf", counts, playerCount),
 		Components: roleCountButtonRows(channelID, seq, roleCountWolfSideRoles, counts, playerCount),
 		Flags:      discordgo.MessageFlagsEphemeral,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to send wolf-side role-count editor")
+	} else {
+		delivered = true
 	}
 	if _, err := s.FollowupMessageCreate(interaction, true, &discordgo.WebhookParams{
 		Content:    roleCountEditorContent("villager", counts, playerCount),
@@ -335,17 +360,32 @@ func (cmd *WerewolfCommand) sendRoleCountEditor(s *discordgo.Session, interactio
 		Flags:      discordgo.MessageFlagsEphemeral,
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to send villager-side role-count editor")
+	} else {
+		delivered = true
 	}
 
-	go cmd.waitForRoleCountConfirm(s, channelID, seq)
+	// Launched even when nothing was delivered — especially then. With no
+	// editor on screen the starter cannot confirm, so this goroutine is the
+	// only thing that will ever move the game out of phaseRoleEdit.
+	go cmd.waitForRoleCountConfirm(s, channelID, seq, delivered)
 }
 
 // waitForRoleCountConfirm polls until the starter confirms (game.Phase
-// leaves phaseRoleEdit some other way) or roleEditTimeout elapses. On
-// timeout, it performs the same phaseRoleEdit -> phasePreflight handoff
-// handleRoleCountConfirm performs, atomically, so only one of the two
-// ever actually starts startPreflight.
-func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channelID string, seq uint64) {
+// leaves phaseRoleEdit some other way) or, if a deadline applies, until it
+// elapses. On timeout it performs the same phaseRoleEdit -> phasePreflight
+// handoff handleRoleCountConfirm performs, atomically, so only one of the
+// two ever actually starts startPreflight.
+//
+// editorDelivered decides whether there is a deadline at all. When the
+// editor is on screen the starter is trusted to take as long as they like
+// (roleEditTimeout is 0 by default). When BOTH editor messages failed to
+// send they have no way to confirm and no idea the game is waiting, so
+// roleEditorUnavailableTimeout applies regardless.
+//
+// With no deadline this still terminates: the poll exits as soon as the
+// phase changes or the game disappears (confirm, cancel, force-stop,
+// shutdown), so it cannot outlive its game.
+func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channelID string, seq uint64, editorDelivered bool) {
 	// This runs as its own goroutine (started with a bare `go`, not through
 	// startPreflight, which is the only other place in the game's phase
 	// chain that has its own recover). A panic anywhere in this polling
@@ -360,7 +400,14 @@ func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channe
 		}
 	}()
 
-	deadline := time.Now().Add(roleEditTimeout)
+	timeout := roleEditTimeout
+	if !editorDelivered {
+		timeout = roleEditorUnavailableTimeout
+	}
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
 	for {
 		var stillEditing bool
 		func() {
@@ -369,7 +416,10 @@ func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channe
 			game := cmd.gameIfCurrent(channelID, seq)
 			stillEditing = game != nil && game.Phase == phaseRoleEdit
 		}()
-		if !stillEditing || time.Now().After(deadline) {
+		if !stillEditing {
+			break
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Second)
@@ -397,8 +447,12 @@ func (cmd *WerewolfCommand) waitForRoleCountConfirm(s *discordgo.Session, channe
 		return
 	}
 
+	notice := "⏱️ Hết thời gian chọn vai trò tuỳ chỉnh, dùng bảng vai trò mặc định."
+	if !editorDelivered {
+		notice = "⚠️ Không mở được bảng chọn vai trò tuỳ chỉnh, dùng bảng vai trò mặc định."
+	}
 	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Content:         "⏱️ Hết thời gian chọn vai trò tuỳ chỉnh, dùng bảng vai trò mặc định.",
+		Content:         notice,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	}); err != nil {
 		log.Error().Err(err).Msg("werewolf: failed to post role-edit-timeout notice")
