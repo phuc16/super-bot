@@ -679,6 +679,45 @@ func winnerNamesWithRoles(game *werewolfGame, result gameResult) string {
 	return strings.Join(names, ", ")
 }
 
+// werewolfMessageLimit is the ceiling this package packs messages to. It
+// sits under Discord's hard 2000-character cap so a miscount can't turn a
+// long game's result into a dropped message.
+const werewolfMessageLimit = 1900
+
+// splitIntoMessages packs header followed by lines into as few messages as
+// possible, each at most limit runes. Runes, not bytes: Vietnamese display
+// names run 2-3 bytes per character and emoji 4, so a byte-based split both
+// truncates far too early and can cut a character in half.
+//
+// A line longer than the limit on its own is clamped rather than dropped —
+// losing part of one player's entry beats losing the whole message, which
+// is what Discord does with an over-length send.
+func splitIntoMessages(header string, lines []string, limit int) []string {
+	clamp := func(text string) string {
+		if r := []rune(text); len(r) > limit {
+			return string(r[:limit])
+		}
+		return text
+	}
+
+	var out []string
+	current := clamp(header)
+	for _, line := range lines {
+		line = clamp(line)
+		if len([]rune(current))+len([]rune(line)) > limit {
+			if strings.TrimSpace(current) != "" {
+				out = append(out, current)
+			}
+			current = ""
+		}
+		current += line
+	}
+	if strings.TrimSpace(current) != "" {
+		out = append(out, current)
+	}
+	return out
+}
+
 func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolfGame, result gameResult, afkRemoved []string) {
 	winner := "🐺 **Ma Sói thắng!**"
 	switch result {
@@ -706,8 +745,7 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 
 	winnersLine := winnerNamesWithRoles(game, result)
 
-	var roles strings.Builder
-	roles.WriteString("\n\n**Vai trò của mọi người:**\n")
+	roleLines := make([]string, 0, len(game.JoinOrder))
 	for _, id := range game.JoinOrder {
 		p := game.Players[id]
 		status := "còn sống"
@@ -718,7 +756,7 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 		// the one place a Cursed Wolf's conversion may be revealed, and it
 		// must be, so this list doesn't contradict the Faction-partitioned
 		// winner line printed just above it.
-		fmt.Fprintf(&roles, "• %s — %s (%s)\n", p.Label, finalRoleLabel(p), status)
+		roleLines = append(roleLines, fmt.Sprintf("• %s — %s (%s)\n", p.Label, finalRoleLabel(p), status))
 	}
 
 	afkNote := ""
@@ -726,11 +764,40 @@ func (cmd *WerewolfCommand) announceGameEnd(s *discordgo.Session, game *werewolf
 		afkNote = fmt.Sprintf("\n💤 %s bị loại vì AFK trước khi ván kết thúc.", strings.Join(afkRemoved, ", "))
 	}
 
-	if _, err := s.ChannelMessageSendComplex(game.ChannelID, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("🎉 Ván Ma Sói kết thúc! %s\n🏆 **Người thắng:** %s%s%s", winner, winnersLine, afkNote, roles.String()),
-		AllowedMentions: &discordgo.MessageAllowedMentions{},
-	}); err != nil {
-		log.Error().Err(err).Msg("werewolf: failed to announce game end")
+	// Ping every player who joined, winners and losers alike, so the result
+	// reaches people who tabbed away during a long game. pingOnce dedupes
+	// and returns AllowedMentions scoped to exactly these user IDs — never a
+	// role or @everyone ping, no matter what a display name contains.
+	pings, allowedMentions := pingOnce(game.JoinOrder)
+
+	// The result and the role roster go out as SEPARATE messages. Together
+	// they already reached 1936 runes for a 20-player game with 32-character
+	// display names, against Discord's 2000-character cap — and the mention
+	// list adds ~440 more. Over the cap the send fails outright and players
+	// get no result at all, so the roster is split off and chunked rather
+	// than appended.
+	header := fmt.Sprintf("🎉 Ván Ma Sói kết thúc! %s\n🏆 **Người thắng:** %s%s", winner, winnersLine, afkNote)
+	if pings != "" {
+		header += "\n\n" + pings
+	}
+	for idx, content := range splitIntoMessages(header, nil, werewolfMessageLimit) {
+		msg := &discordgo.MessageSend{Content: content, AllowedMentions: &discordgo.MessageAllowedMentions{}}
+		// Mentions resolve only in the chunk that actually carries the tags.
+		if idx == 0 {
+			msg.AllowedMentions = allowedMentions
+		}
+		if _, err := s.ChannelMessageSendComplex(game.ChannelID, msg); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to announce game end")
+		}
+	}
+
+	for _, content := range splitIntoMessages("**Vai trò của mọi người:**\n", roleLines, werewolfMessageLimit) {
+		if _, err := s.ChannelMessageSendComplex(game.ChannelID, &discordgo.MessageSend{
+			Content:         content,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to post end-of-game role list")
+		}
 	}
 
 	for _, chunk := range chunkRecapMessages(game.History, 1900) {

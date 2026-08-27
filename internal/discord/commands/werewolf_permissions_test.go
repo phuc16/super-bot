@@ -482,3 +482,180 @@ func labelsOfRoles(roles []role) []string {
 	}
 	return out
 }
+
+// maxLabelGame builds the worst realistic roster: a full lobby of players
+// whose display names are the longest Discord allows.
+func maxLabelGame() *werewolfGame {
+	game := &werewolfGame{ChannelID: "chan1", Players: map[string]*player{}}
+	for n := 0; n < werewolfMaxPlayers; n++ {
+		id := fmt.Sprintf("%d", 100000000000000000+n)
+		r := roleVillager
+		if n < 4 {
+			r = roleWerewolf
+		}
+		game.Players[id] = &player{
+			UserID:    id,
+			Label:     strings.Repeat("Ngưyễn", 5) + "ab",
+			Role:      r,
+			DealtRole: r,
+			Faction:   factionForRole(r),
+			Alive:     n%3 != 0,
+		}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+	return game
+}
+
+// TestEndOfGamePingIsScopedToPlayers is the safety property for pinging
+// everyone at game end. The mention list must resolve to exactly the
+// players who joined — never @everyone, never a role — regardless of what
+// their display names contain.
+func TestEndOfGamePingIsScopedToPlayers(t *testing.T) {
+	game := maxLabelGame()
+	pings, allowed := pingOnce(game.JoinOrder)
+
+	if allowed == nil {
+		t.Fatal("pingOnce returned nil AllowedMentions — Discord would then parse mentions out of the message text")
+	}
+	if len(allowed.Users) != len(game.JoinOrder) {
+		t.Errorf("AllowedMentions.Users has %d entries, want %d", len(allowed.Users), len(game.JoinOrder))
+	}
+	if len(allowed.Roles) != 0 {
+		t.Errorf("AllowedMentions.Roles = %v, want empty — a role ping would notify non-players", allowed.Roles)
+	}
+	for _, parse := range allowed.Parse {
+		if parse == discordgo.AllowedMentionTypeEveryone || parse == discordgo.AllowedMentionTypeRoles {
+			t.Errorf("AllowedMentions.Parse contains %q — this can mass-ping the whole server", parse)
+		}
+	}
+	for _, id := range game.JoinOrder {
+		if !strings.Contains(pings, id) {
+			t.Errorf("player %s was not pinged", id)
+		}
+	}
+
+	t.Run("a hostile display name cannot escalate the ping", func(t *testing.T) {
+		// AllowedMentions is what actually authorizes a mention, so even if
+		// "@everyone" reaches the message text via a display name, it must
+		// stay inert.
+		hostile := maxLabelGame()
+		for _, p := range hostile.Players {
+			p.Label = "@everyone @here <@&123456789012345678>"
+		}
+		_, allowed := pingOnce(hostile.JoinOrder)
+		if len(allowed.Roles) != 0 || len(allowed.Parse) != 0 {
+			t.Errorf("allowed = %+v, want Users-only scoping", allowed)
+		}
+	})
+
+	t.Run("duplicate and empty ids are dropped", func(t *testing.T) {
+		pings, allowed := pingOnce([]string{"111", "111", "", "222"})
+		if len(allowed.Users) != 2 {
+			t.Errorf("Users = %v, want 2 unique ids", allowed.Users)
+		}
+		if strings.Count(pings, "111") != 1 {
+			t.Errorf("duplicate id pinged twice: %q", pings)
+		}
+	})
+}
+
+// TestEndOfGameMessagesFitDiscordsLimit guards the overflow that adding
+// mentions would otherwise have caused. The result and roster together
+// already measured 1936 runes for a full lobby with maximum-length names,
+// against Discord's hard 2000-character cap; the ~440-rune mention list
+// pushed that to 2377, where the send fails outright and players get no
+// result at all.
+func TestEndOfGameMessagesFitDiscordsLimit(t *testing.T) {
+	game := maxLabelGame()
+	pings, _ := pingOnce(game.JoinOrder)
+
+	header := fmt.Sprintf("🎉 Ván Ma Sói kết thúc! %s\n🏆 **Người thắng:** %s%s",
+		"🏡 **Dân Làng thắng!**", winnerNamesWithRoles(game, resultVillagersWin),
+		"\n💤 someone bị loại vì AFK trước khi ván kết thúc.")
+	if pings != "" {
+		header += "\n\n" + pings
+	}
+
+	roleLines := make([]string, 0, len(game.JoinOrder))
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		roleLines = append(roleLines, fmt.Sprintf("• %s — %s (%s)\n", p.Label, finalRoleLabel(p), "còn sống"))
+	}
+
+	all := append(
+		splitIntoMessages(header, nil, werewolfMessageLimit),
+		splitIntoMessages("**Vai trò của mọi người:**\n", roleLines, werewolfMessageLimit)...,
+	)
+	if len(all) == 0 {
+		t.Fatal("no messages produced")
+	}
+	for idx, content := range all {
+		if n := len([]rune(content)); n > werewolfMessageLimit {
+			t.Errorf("message %d is %d runes, over the %d limit", idx, n, werewolfMessageLimit)
+		}
+	}
+	if werewolfMessageLimit > 2000 {
+		t.Errorf("werewolfMessageLimit = %d, above Discord's hard 2000-character cap", werewolfMessageLimit)
+	}
+
+	t.Run("every player appears in the role roster exactly once", func(t *testing.T) {
+		joined := strings.Join(all, "")
+		for _, id := range game.JoinOrder {
+			if n := strings.Count(joined, game.Players[id].Label); n < 1 {
+				t.Errorf("player %s missing from the end-of-game output", id)
+			}
+		}
+	})
+}
+
+// TestSplitIntoMessages covers the packer directly, including the inputs
+// that produced silent truncation elsewhere in this package.
+func TestSplitIntoMessages(t *testing.T) {
+	t.Run("a header that fits alone yields one message", func(t *testing.T) {
+		got := splitIntoMessages("hello", nil, 100)
+		if len(got) != 1 || got[0] != "hello" {
+			t.Errorf("got %q, want [hello]", got)
+		}
+	})
+	t.Run("empty input yields no messages", func(t *testing.T) {
+		if got := splitIntoMessages("", nil, 100); len(got) != 0 {
+			t.Errorf("got %q, want none", got)
+		}
+	})
+	t.Run("no message exceeds the limit and no line is lost", func(t *testing.T) {
+		lines := make([]string, 40)
+		for idx := range lines {
+			lines[idx] = fmt.Sprintf("• line %d ăâêôơư\n", idx)
+		}
+		for _, limit := range []int{20, 50, 100, 1900} {
+			got := splitIntoMessages("HEADER\n", lines, limit)
+			joined := strings.Join(got, "")
+			for idx, content := range got {
+				if n := len([]rune(content)); n > limit {
+					t.Errorf("limit %d: message %d is %d runes", limit, idx, n)
+				}
+			}
+			for idx := range lines {
+				if !strings.Contains(joined, fmt.Sprintf("• line %d", idx)) {
+					t.Errorf("limit %d: dropped line %d", limit, idx)
+				}
+			}
+		}
+	})
+	t.Run("an over-long single line is clamped, not dropped", func(t *testing.T) {
+		got := splitIntoMessages("", []string{strings.Repeat("ư", 500)}, 100)
+		if len(got) != 1 {
+			t.Fatalf("got %d messages, want 1", len(got))
+		}
+		if n := len([]rune(got[0])); n != 100 {
+			t.Errorf("clamped to %d runes, want 100", n)
+		}
+	})
+	t.Run("counts runes, not bytes", func(t *testing.T) {
+		// "ư" is 3 bytes; a byte-based splitter would break these up.
+		got := splitIntoMessages("", []string{strings.Repeat("ư", 30)}, 30)
+		if len(got) != 1 {
+			t.Errorf("got %d messages, want 1 — the packer is counting bytes", len(got))
+		}
+	})
+}
