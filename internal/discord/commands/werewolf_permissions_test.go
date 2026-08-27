@@ -985,3 +985,45 @@ func TestResolveNightFiltersTheWitchsHealTargets(t *testing.T) {
 		t.Error("finalizeNightResolution resolves the heal sentinel against the raw bite list — with a bonus bite this heals the wrong player")
 	}
 }
+
+// TestMutedPlayerIsNamedOnlyWhenTheMuteLanded guards the Disruptor
+// announcement. A silenced player otherwise just goes quiet and reads as
+// AFK — the village misjudges them and they cannot say why. But the claim
+// has to be true: announcing a mute that failed to apply would have the
+// channel accusing someone who can still type.
+func TestMutedPlayerIsNamedOnlyWhenTheMuteLanded(t *testing.T) {
+	src, err := os.ReadFile("werewolf_day.go")
+	if err != nil {
+		t.Fatalf("read werewolf_day.go: %v", err)
+	}
+	body, ok := funcBody(string(src), ") runDayDiscuss(")
+	if !ok {
+		t.Fatal("could not locate runDayDiscuss")
+	}
+
+	if !strings.Contains(body, "Bị câm lặng hôm nay") {
+		t.Fatal("runDayDiscuss no longer names the silenced player")
+	}
+	if !strings.Contains(body, "if muteApplied {") {
+		t.Error("the mute announcement is not gated on muteApplied — a failed ChannelPermissionSet would still announce a mute that never happened")
+	}
+	// muteApplied must be set in the SUCCESS arm of the apply, not next to
+	// the target lookup: mutedUserID being non-empty only means a target was
+	// chosen, not that Discord accepted the overwrite.
+	apply := strings.Index(body, "ChannelPermissionSet(channelID, mutedUserID")
+	set := strings.Index(body, "muteApplied = true")
+	if apply < 0 || set < 0 || set < apply {
+		t.Error("muteApplied is set before the overwrite is applied — it no longer means what its name says")
+	}
+
+	// The announcement names the target. It must never name the Disruptor:
+	// who was silenced is already inferable from who cannot speak, but who
+	// chose them is the role's entire protection.
+	announce := body[strings.Index(body, "if muteApplied {"):]
+	if idx := strings.Index(announce, "\n\t}"); idx > 0 {
+		announce = announce[:idx]
+	}
+	if strings.Contains(announce, "Disruptor") || strings.Contains(announce, "disruptor") {
+		t.Errorf("the mute line references the Disruptor themself: %q", announce)
+	}
+}

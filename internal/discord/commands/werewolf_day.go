@@ -89,6 +89,11 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	var aliveThreadID string
 	var wolfThreadID string
 	var mutedUserID string
+	// muteApplied, not just mutedUserID: the announcement must only claim
+	// someone is silenced if the overwrite actually landed. Saying so after
+	// a failed apply would have the channel accusing a player of being
+	// muted while they can still type.
+	muteApplied := false
 	func() {
 		cmd.mu.Lock()
 		defer cmd.mu.Unlock()
@@ -158,6 +163,7 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 			// silently skipped the removal whenever the target died during
 			// the discussion window, leaving the overwrite orphaned.
 			// Recorded only on success: a failed apply has nothing to undo.
+			muteApplied = true
 			func() {
 				cmd.mu.Lock()
 				defer cmd.mu.Unlock()
@@ -171,6 +177,15 @@ func (cmd *WerewolfCommand) runDayDiscuss(s *discordgo.Session, channelID string
 	discussWindow := dayDiscussWindowFor(aliveCount)
 
 	content := fmt.Sprintf("☀️ **Ngày %d.** Thảo luận trong %s trước khi bỏ phiếu.\n\n%s", round, formatRemaining(discussWindow), summary)
+	// Name who is silenced today, alongside the alive/dead lines. Without
+	// this the target simply goes quiet and reads as AFK — the village
+	// misreads their silence, and the muted player has no way to say why.
+	// This reveals the Disruptor's TARGET, never the Disruptor: the pick is
+	// already inferable from who cannot speak, whereas who made it is not.
+	// Stated only here, since the mute is lifted again at the vote.
+	if muteApplied {
+		content += fmt.Sprintf("\n🤫 Bị câm lặng hôm nay: %s", nameTag(mutedUserID))
+	}
 	if aliveThreadID != "" {
 		content += fmt.Sprintf("\n\n💬 Thảo luận tại <#%s>", aliveThreadID)
 	}
