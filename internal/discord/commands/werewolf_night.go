@@ -29,7 +29,7 @@ const (
 	// spent. Note this is not the night's total length: the night runs for
 	// the longer of this and the wolf window, so trimming it does not
 	// shorten a night in which the pack is still deliberating.
-	nightActionWindow = 90 * time.Second
+	nightActionWindow = 60 * time.Second
 
 	// witchActionWindow is shorter than the others: she makes one decision
 	// after already knowing who was bitten, rather than coordinating with
