@@ -358,6 +358,55 @@ func alivePlayers(game *werewolfGame) []*player {
 // second resolution a safe no-op rather than a mis-kill.
 //
 // Must be called with cmd.mu held.
+// clearStaleHunterTarget drops the Hunter's standing pick once that target
+// is no longer alive, returning a snapshot of the Hunter so the caller can
+// tell them to choose again (nil when there is nothing to say).
+//
+// The Hunter pre-commits a target and it persists across rounds, so a pick
+// made on night 2 can quietly become worthless the moment that player is
+// lynched on day 3 — hunterRevengeStep bails on a dead target, so the
+// Hunter dies later having effectively had no ability at all, and never
+// learns why. Clearing the pick here means their next night prompt starts
+// empty and the DM tells them the gun is unloaded.
+//
+// This does NOT recover the shot in every case: a Hunter killed before the
+// next night still gets no re-pick. Closing that gap needs a death-time
+// prompt, which would have to block the death chain (see HunterTarget).
+//
+// Returns nil when the Hunter is themself dead — including the ordinary
+// case where their own revenge kill is what just emptied the pick. Must be
+// called with cmd.mu held, AFTER the round's deaths have been applied.
+func clearStaleHunterTarget(game *werewolfGame) *player {
+	if game.HunterTarget == "" {
+		return nil
+	}
+	if target, ok := game.Players[game.HunterTarget]; ok && target.Alive {
+		return nil
+	}
+	game.HunterTarget = ""
+	hunters := alivePlayersOfRole(game, roleHunter)
+	if len(hunters) == 0 {
+		return nil
+	}
+	return copyPlayer(hunters[0])
+}
+
+// dmHunterTargetLost tells a living Hunter their standing pick is gone.
+// Called with a copyPlayer snapshot, after cmd.mu is released.
+func dmHunterTargetLost(s *discordgo.Session, p *player) {
+	if p == nil {
+		return
+	}
+	dm, err := s.UserChannelCreate(p.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to open DM for hunter target-lost notice")
+		return
+	}
+	if _, err := s.ChannelMessageSend(dm.ID, "🏹 Mục tiêu bạn đã chỉ định không còn sống, nên bạn đang **không có mục tiêu nào**. Hãy chọn lại trong đêm tới — nếu bạn chết trước khi chọn lại thì sẽ không có ai chết theo."); err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to DM hunter target-lost notice")
+	}
+}
+
 func hunterRevengeStep(game *werewolfGame, deadID string) *player {
 	dead, ok := game.Players[deadID]
 	if !ok || dead.Role != roleHunter {
@@ -1681,6 +1730,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 		hunterRevenged      []*player
 		loverDeaths         []*player
 		summary             string
+		hunterToWarn        *player
 	)
 	func() {
 		cmd.mu.Lock()
@@ -1771,6 +1821,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 			chained = append(chained, applyDeathChains(game, poisonedID)...)
 		}
 		hunterRevenged, loverDeaths = splitChainedDeaths(chained)
+		hunterToWarn = clearStaleHunterTarget(game)
 
 		deadThisResolution := append([]string(nil), killedIDs...)
 		if poisonedID != "" {
@@ -1813,6 +1864,7 @@ func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channe
 	if !gameFound {
 		return
 	}
+	dmHunterTargetLost(s, hunterToWarn)
 	var deadNow []string
 	for _, p := range killedPlayers {
 		removeFromAliveThread(s, aliveThreadID, p.UserID)

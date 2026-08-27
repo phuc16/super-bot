@@ -1691,6 +1691,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	leftPlayer := copyPlayer(p)
 	chained := applyDeathChains(game, userID)
 	hunterRevenged, loverDeaths := splitChainedDeaths(chained)
+	hunterToWarn := clearStaleHunterTarget(game)
 	applyWolfCubBonusBiteFlag(game, append(append([]string{userID}, idsOf(hunterRevenged)...), idsOf(loverDeaths)...))
 	if n := len(game.History); n > 0 {
 		if len(hunterRevenged) > 0 {
@@ -1707,6 +1708,7 @@ func (cmd *WerewolfCommand) handleLeave(s *discordgo.Session, i *discordgo.Inter
 	deadNow := append(append([]string{userID}, idsOf(hunterRevenged)...), idsOf(loverDeaths)...)
 	cmd.mu.Unlock()
 
+	dmHunterTargetLost(s, hunterToWarn)
 	removeFromAliveThread(s, aliveThreadID, userID)
 	for _, hp := range hunterRevenged {
 		removeFromAliveThread(s, aliveThreadID, hp.UserID)

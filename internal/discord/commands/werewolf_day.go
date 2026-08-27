@@ -386,6 +386,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		revealOnDeath  bool
 		summary        string
 		aliveThreadID  string
+		hunterToWarn   *player
 	)
 	func() {
 		cmd.mu.Lock()
@@ -429,6 +430,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 		if lynchedPlayer != nil {
 			hunterRevenged, loverDeaths = splitChainedDeaths(applyDeathChains(game, lynchedPlayer.UserID))
 		}
+		hunterToWarn = clearStaleHunterTarget(game)
 		var deadIDs []string
 		if lynchedPlayer != nil {
 			deadIDs = append(deadIDs, lynchedPlayer.UserID)
@@ -471,6 +473,7 @@ func (cmd *WerewolfCommand) resolveVote(s *discordgo.Session, channelID string, 
 	if !gameFound {
 		return
 	}
+	dmHunterTargetLost(s, hunterToWarn)
 	if lynchedPlayer != nil {
 		removeFromAliveThread(s, aliveThreadID, lynchedPlayer.UserID)
 	}
@@ -531,6 +534,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 		priorOverwrite  *discordgo.PermissionOverwrite
 		channelUnlocked bool
 		revealOnDeath   bool
+		hunterToWarn    *player
 	)
 	func() {
 		cmd.mu.Lock()
@@ -559,6 +563,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 			chained = append(chained, applyDeathChains(game, id)...)
 		}
 		hunterRevenged, loverDeaths = splitChainedDeaths(chained)
+		hunterToWarn = clearStaleHunterTarget(game)
 		chainDeadIDs := append(append([]string(nil), removedIDs...), idsOf(hunterRevenged)...)
 		chainDeadIDs = append(chainDeadIDs, idsOf(loverDeaths)...)
 		applyWolfCubBonusBiteFlag(game, chainDeadIDs)
@@ -585,6 +590,7 @@ func (cmd *WerewolfCommand) checkAndHandleGameEnd(s *discordgo.Session, channelI
 	if !gameFound {
 		return true
 	}
+	dmHunterTargetLost(s, hunterToWarn)
 	if !ended {
 		// Only DM the promotion when the game is actually continuing — if
 		// this same tick both promotes the Traitor and ends the game

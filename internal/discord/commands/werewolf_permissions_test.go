@@ -1246,3 +1246,122 @@ func TestNightActingRolesFollowsRevealOnDeath(t *testing.T) {
 		}
 	})
 }
+
+// hunterGame builds a game with a Hunter holding a standing pick.
+func hunterGame(targetAlive, hunterAlive bool) *werewolfGame {
+	game := &werewolfGame{Players: map[string]*player{}, HunterTarget: "victim"}
+	add := func(id string, r role, alive bool) {
+		game.Players[id] = &player{UserID: id, Label: id, Role: r, DealtRole: r, Faction: factionForRole(r), Alive: alive}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+	add("hunter", roleHunter, hunterAlive)
+	add("victim", roleVillager, targetAlive)
+	add("other", roleVillager, true)
+	return game
+}
+
+// TestClearStaleHunterTarget covers the silent dead-end the Hunter used to
+// walk into: a pick made on night 2 becomes worthless the moment that
+// player dies on day 3, hunterRevengeStep bails on a dead target, and the
+// Hunter dies later having effectively had no ability — never told why.
+func TestClearStaleHunterTarget(t *testing.T) {
+	t.Run("a live pick is left alone", func(t *testing.T) {
+		game := hunterGame(true, true)
+		if warn := clearStaleHunterTarget(game); warn != nil {
+			t.Errorf("warned about a still-valid pick: %+v", warn)
+		}
+		if game.HunterTarget != "victim" {
+			t.Errorf("HunterTarget = %q, want it untouched", game.HunterTarget)
+		}
+	})
+
+	t.Run("a dead pick is cleared and the Hunter is told", func(t *testing.T) {
+		game := hunterGame(false, true)
+		warn := clearStaleHunterTarget(game)
+		if warn == nil {
+			t.Fatal("no warning returned — the Hunter would never learn their gun is empty")
+		}
+		if warn.UserID != "hunter" {
+			t.Errorf("warned %q, want the hunter", warn.UserID)
+		}
+		if game.HunterTarget != "" {
+			t.Errorf("HunterTarget = %q, want cleared so the next night prompt starts fresh", game.HunterTarget)
+		}
+	})
+
+	t.Run("a dead Hunter is never warned", func(t *testing.T) {
+		// The common case: the Hunter's own revenge kill is what just
+		// emptied the pick. DMing a corpse "choose again tonight" is noise.
+		game := hunterGame(false, false)
+		if warn := clearStaleHunterTarget(game); warn != nil {
+			t.Errorf("warned a dead Hunter: %+v", warn)
+		}
+		if game.HunterTarget != "" {
+			t.Errorf("HunterTarget = %q, want cleared regardless", game.HunterTarget)
+		}
+	})
+
+	t.Run("no pick means nothing to say", func(t *testing.T) {
+		game := hunterGame(true, true)
+		game.HunterTarget = ""
+		if warn := clearStaleHunterTarget(game); warn != nil {
+			t.Errorf("warned with no pick set: %+v", warn)
+		}
+	})
+
+	// Not tested: a pick naming an id absent from game.Players. That state
+	// is unreachable — both delete(game.Players, ...) sites remove the same
+	// id from JoinOrder inside the same critical section, and both are
+	// lobby-only, so every JoinOrder entry resolves while a game is running.
+	// clearStaleHunterTarget still uses a comma-ok lookup and treats a
+	// missing entry as stale, but fabricating that state in a test only
+	// proves that the dozen OTHER helpers indexing game.Players[id]
+	// unguarded would panic first.
+
+	t.Run("the returned Hunter is a snapshot, not a live pointer", func(t *testing.T) {
+		// Everything crossing the cmd.mu boundary must be copied; the DM is
+		// sent after the lock is released.
+		game := hunterGame(false, true)
+		warn := clearStaleHunterTarget(game)
+		if warn == nil {
+			t.Fatal("expected a warning")
+		}
+		if warn == game.Players["hunter"] {
+			t.Error("returned the live *player — it escapes cmd.mu and races with the game goroutine")
+		}
+	})
+}
+
+// TestEveryDeathSiteClearsAStaleHunterPick guards the wiring. The helper is
+// useless if a death path forgets to call it, and each of these four is a
+// place a player can die.
+func TestEveryDeathSiteClearsAStaleHunterPick(t *testing.T) {
+	sites := []struct{ file, fn string }{
+		{"werewolf_night.go", ") finalizeNightResolution("},
+		{"werewolf_day.go", ") resolveVote("},
+		{"werewolf_day.go", ") checkAndHandleGameEnd("},
+		{"werewolf.go", ") handleLeave("},
+	}
+	for _, site := range sites {
+		src, err := os.ReadFile(site.file)
+		if err != nil {
+			t.Fatalf("read %s: %v", site.file, err)
+		}
+		body, ok := funcBody(string(src), site.fn)
+		if !ok {
+			t.Fatalf("could not locate %s in %s", site.fn, site.file)
+		}
+		if !strings.Contains(body, "clearStaleHunterTarget(game)") {
+			t.Errorf("%s%s applies deaths but never clears a stale Hunter pick", site.file, site.fn)
+		}
+		// The DM must be sent OUTSIDE the lock. clearStaleHunterTarget runs
+		// under cmd.mu; dmHunterTargetLost does REST calls.
+		clear := strings.Index(body, "clearStaleHunterTarget(game)")
+		send := strings.Index(body, "dmHunterTargetLost(s,")
+		if send < 0 {
+			t.Errorf("%s%s clears the pick but never tells the Hunter", site.file, site.fn)
+		} else if send < clear {
+			t.Errorf("%s%s sends the DM before clearing the pick", site.file, site.fn)
+		}
+	}
+}
