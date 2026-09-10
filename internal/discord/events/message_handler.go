@@ -1,6 +1,7 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"strings"
 
@@ -59,9 +60,24 @@ func (h *MessageHandler) Handle(s *discordgo.Session, m *discordgo.MessageCreate
 		Content:   cmd.Response,
 		Reference: ref,
 	}
-	if cmd.ImageURL != nil && *cmd.ImageURL != "" {
+	// Re-upload the bytes as a fresh attachment every time, rather than
+	// pointing an embed at a stored URL. Discord's attachment links are
+	// signed and expire, and the ones /addcom used to save came from
+	// /ephemeral-attachments/, which Discord does not retain at all — so
+	// the old approach rendered an empty embed box within hours of the
+	// command being created. Uploading makes the reply self-contained.
+	//
+	// Legacy rows with only ImageURL set are deliberately ignored: that
+	// link is already dead, and posting it looks like a bot failure rather
+	// than a command that needs its image re-added.
+	if cmd.HasImage() {
+		name := cmd.AttachmentName()
+		msg.Files = []*discordgo.File{{
+			Name:   name,
+			Reader: bytes.NewReader(cmd.ImageData),
+		}}
 		msg.Embeds = []*discordgo.MessageEmbed{
-			{Image: &discordgo.MessageEmbedImage{URL: *cmd.ImageURL}},
+			{Image: &discordgo.MessageEmbedImage{URL: "attachment://" + name}},
 		}
 	}
 	if _, err := s.ChannelMessageSendComplex(m.ChannelID, msg); err != nil {

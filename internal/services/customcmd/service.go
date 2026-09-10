@@ -26,9 +26,14 @@ func NewService(db *gorm.DB) *Service {
 	return &Service{db: db}
 }
 
-// Add creates a new custom command. Returns ErrAlreadyExists if the trigger already exists.
-// imageURL is optional — pass empty string for none.
-func (s *Service) Add(ctx context.Context, guildID, trigger, response, createdBy, imageURL string) error {
+// Add creates a new custom command. Returns ErrAlreadyExists if the trigger
+// already exists.
+//
+// imageData/imageName are optional — pass nil/empty for none. The BYTES are
+// stored, not a link: attachments passed as slash-command options live at a
+// signed, time-limited Discord URL that expires within hours and cannot be
+// refreshed, so anything storing the URL renders an empty box soon after.
+func (s *Service) Add(ctx context.Context, guildID, trigger, response, createdBy string, imageData []byte, imageName string) error {
 	normalizedTrigger := strings.ToLower(strings.TrimSpace(trigger))
 
 	// Check if trigger already exists
@@ -48,8 +53,11 @@ func (s *Service) Add(ctx context.Context, guildID, trigger, response, createdBy
 		Response:  response,
 		CreatedBy: createdBy,
 	}
-	if imageURL != "" {
-		cmd.ImageURL = &imageURL
+	if len(imageData) > 0 {
+		cmd.ImageData = imageData
+		if imageName != "" {
+			cmd.ImageName = &imageName
+		}
 	}
 	return s.db.WithContext(ctx).Create(cmd).Error
 }
@@ -70,10 +78,21 @@ func (s *Service) Delete(ctx context.Context, guildID, trigger string) error {
 	return nil
 }
 
-// List returns all custom commands for a guild
+// listColumns is every column except image_data. Selecting explicitly
+// matters: a bare Find would pull every stored image in the guild across
+// the wire and into memory, on a listing that never displays images. Only
+// Get — one row, for an actual keyword reply — needs the bytes.
+var listColumns = []string{
+	"id", "created_at", "updated_at", "deleted_at",
+	"guild_id", "`trigger`", "response", "image_url", "image_name", "created_by",
+}
+
+// List returns all custom commands for a guild, WITHOUT their image bytes.
+// Callers that need an image must fetch that command via Get.
 func (s *Service) List(ctx context.Context, guildID string) ([]models.CustomCommand, error) {
 	var cmds []models.CustomCommand
 	err := s.db.WithContext(ctx).
+		Select(listColumns).
 		Where("guild_id = ? AND deleted_at IS NULL", guildID).
 		Order("`trigger` ASC").
 		Find(&cmds).Error
