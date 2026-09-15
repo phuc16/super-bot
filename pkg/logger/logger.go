@@ -1,4 +1,4 @@
-// Package logger provides structured logging functionality for VCG Super Bot.
+// Package logger provides structured logging functionality for Discord Super Bot.
 // It wraps zerolog to provide a consistent logging interface with support for:
 // - Structured logging with contextual fields
 // - Multiple log levels (debug, info, warn, error)

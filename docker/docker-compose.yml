@@ -3,14 +3,14 @@ version: '3.8'
 services:
   mysql:
     image: mysql:8.0
-    container_name: vcg-super-bot-mysql
+    container_name: super-bot-mysql
     environment:
       MYSQL_ROOT_PASSWORD: root_password
-      MYSQL_DATABASE: vcgsuperbot_dev
-      MYSQL_USER: vcgsuperbot
-      MYSQL_PASSWORD: dev_password_change_me
+      MYSQL_DATABASE: superbot_dev
+      MYSQL_USER: superbot
+      MYSQL_PASSWORD: change_me
     ports:
-      - "3306:3306"
+      - "3370:3306"
     volumes:
       - ../data/mysql:/var/lib/mysql
     healthcheck:
@@ -25,7 +25,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: vcg-super-bot
+    container_name: super-bot
     depends_on:
       mysql:
         condition: service_healthy
@@ -35,7 +35,7 @@ services:
       DB_HOST: mysql
       DB_PORT: 3306
     ports:
-      - "8080:8080"
+      - "8386:8080"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -48,4 +48,3 @@ services:
 networks:
   bot-network:
     driver: bridge
-

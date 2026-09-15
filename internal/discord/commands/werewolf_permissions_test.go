@@ -1,0 +1,1439 @@
+package commands
+
+import (
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
+)
+
+// werewolfSourceFiles is every non-test file the game lives in. Used by the
+// source-scanning guards below.
+var werewolfSourceFiles = []string{
+	"werewolf.go",
+	"werewolf_night.go",
+	"werewolf_day.go",
+	"werewolf_rolepick.go",
+}
+
+func TestMissingPermissionsFrom(t *testing.T) {
+	all := int64(0)
+	for _, req := range werewolfRequiredPermissions {
+		all |= req.Bit
+	}
+
+	t.Run("a fully-granted bot is missing nothing", func(t *testing.T) {
+		if missing := missingPermissionsFrom(all); len(missing) != 0 {
+			t.Errorf("missing = %v, want none", namesOfPerms(missing))
+		}
+	})
+
+	t.Run("Administrator implies everything", func(t *testing.T) {
+		// Discord grants Administrator holders every permission implicitly,
+		// so the individual bits are absent from the mask. Checking them
+		// naively would refuse to start for the most-privileged bot there is.
+		if missing := missingPermissionsFrom(discordgo.PermissionAdministrator); len(missing) != 0 {
+			t.Errorf("Administrator reported missing %v", namesOfPerms(missing))
+		}
+	})
+
+	t.Run("a bot with nothing is missing every requirement", func(t *testing.T) {
+		missing := missingPermissionsFrom(0)
+		if len(missing) != len(werewolfRequiredPermissions) {
+			t.Fatalf("missing %d of %d requirements: %v", len(missing), len(werewolfRequiredPermissions), namesOfPerms(missing))
+		}
+	})
+
+	t.Run("each single missing bit is reported alone", func(t *testing.T) {
+		// The whole value of the up-front gate is naming exactly what to
+		// grant, so dropping one bit must surface that one bit — not a
+		// generic failure and not a partial list.
+		for _, req := range werewolfRequiredPermissions {
+			missing := missingPermissionsFrom(all &^ req.Bit)
+			if len(missing) != 1 || missing[0].Bit != req.Bit {
+				t.Errorf("dropping %s reported %v, want exactly [%s]", req.Name, namesOfPerms(missing), req.Name)
+			}
+		}
+	})
+
+	t.Run("the message names every missing permission", func(t *testing.T) {
+		// An admin fixing the role should need one pass, not one retry per
+		// gap, so every missing entry has to appear in the single response.
+		missing := missingPermissionsFrom(0)
+		msg := missingPermissionsMessage(missing)
+		for _, req := range missing {
+			if !strings.Contains(msg, req.Name) {
+				t.Errorf("refusal message omits %q:\n%s", req.Name, msg)
+			}
+		}
+		if len([]rune(msg)) > 2000 {
+			t.Errorf("refusal message is %d runes, over Discord's 2000-char content limit", len([]rune(msg)))
+		}
+	})
+
+	t.Run("every requirement is populated", func(t *testing.T) {
+		for idx, req := range werewolfRequiredPermissions {
+			if req.Bit == 0 || req.Name == "" || req.Why == "" {
+				t.Errorf("werewolfRequiredPermissions[%d] = %+v, want all fields set", idx, req)
+			}
+		}
+	})
+}
+
+// TestRequiredPermissionsCoverEveryCapabilityTheGameUses ties the gate to the
+// calls the game actually makes. Each bit below is load-bearing for a
+// specific mechanic, and dropping one from the table doesn't make the game
+// degrade — it makes a mechanic fail silently mid-game, with nothing but a
+// logged REST error while players wait on a prompt that never arrives.
+func TestRequiredPermissionsCoverEveryCapabilityTheGameUses(t *testing.T) {
+	needed := map[string]int64{
+		"read the game channel":                               discordgo.PermissionViewChannel,
+		"post day/night announcements":                        discordgo.PermissionSendMessages,
+		"lock the channel and mute the Disruptor's target":    discordgo.PermissionManageRoles,
+		"create the alive-discussion and wolf threads":        discordgo.PermissionCreatePrivateThreads,
+		"post the wolf vote and recaps inside threads":        discordgo.PermissionSendMessagesInThreads,
+		"lock/unlock threads, manage members, delete threads": discordgo.PermissionManageThreads,
+	}
+	have := int64(0)
+	for _, req := range werewolfRequiredPermissions {
+		have |= req.Bit
+	}
+	for why, bit := range needed {
+		if have&bit == 0 {
+			t.Errorf("werewolfRequiredPermissions omits the bit needed to %s", why)
+		}
+	}
+}
+
+// TestNoPermissionOverwritesOnThreads is a source-level guard against a bug
+// that shipped and silently broke two mechanics for every game: night
+// silence on the alive-discussion thread, and the Disruptor role entirely.
+//
+// Discord does not support per-channel permission overwrites on threads —
+// threads inherit permissions from their parent channel, and Edit/Delete
+// Channel Permissions are documented "only usable for guild channels". The
+// old code called ChannelPermissionSet with a THREAD id, which the API
+// rejected on every single call. Nothing surfaced: the error was logged and
+// the game carried on as though players had been silenced.
+//
+// A unit test can't catch that (it needs a live API to fail), and the
+// failure is invisible in play, so guard the shape instead: no
+// ChannelPermission* call in the werewolf sources may pass a thread-valued
+// identifier as its channel argument.
+func TestNoPermissionOverwritesOnThreads(t *testing.T) {
+	call := regexp.MustCompile(`ChannelPermission(?:Set|Delete)\(\s*([A-Za-z_][A-Za-z0-9_.]*)`)
+	for _, name := range werewolfSourceFiles {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, m := range call.FindAllStringSubmatch(string(src), -1) {
+			arg := m[1]
+			if strings.Contains(strings.ToLower(arg), "thread") {
+				t.Errorf("%s: ChannelPermission* called with %q — Discord rejects permission overwrites on threads; "+
+					"use setAliveThreadLocked/setWolfThreadLocked for whole-thread silence, or put the overwrite on the PARENT channel", name, arg)
+			}
+		}
+	}
+}
+
+// TestThreadSilenceUsesTheLockedFlag is the positive counterpart to the
+// guard above: both threads must be silenced through the one mechanism
+// Discord actually supports for threads.
+func TestThreadSilenceUsesTheLockedFlag(t *testing.T) {
+	src, err := os.ReadFile("werewolf.go")
+	if err != nil {
+		t.Fatalf("read werewolf.go: %v", err)
+	}
+	night, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	joined := string(src) + string(night)
+	for _, fn := range []string{"setAliveThreadLocked", "setWolfThreadLocked"} {
+		if !strings.Contains(joined, "func "+fn+"(") {
+			t.Errorf("%s is gone — thread silence must go through a Locked-flag helper", fn)
+		}
+	}
+	if !strings.Contains(joined, "Locked: &locked") {
+		t.Error("no ChannelEdit{Locked: ...} in the thread helpers — thread silence is not being applied the supported way")
+	}
+}
+
+// TestDisruptorMuteIsCleanedUpOnTeardown guards a leak that only became
+// reachable once the Disruptor's mute started working: the overwrite lives
+// on the game CHANNEL, so a game ending mid-discussion (force-stop, last
+// wolf lynched, bot restart) would otherwise leave a real player unable to
+// speak in that channel forever, with no game left to lift it.
+func TestDisruptorMuteIsCleanedUpOnTeardown(t *testing.T) {
+	game := &werewolfGame{
+		GuildID:              "guild1",
+		WolfThreadID:         "wolf-thread",
+		AliveThreadID:        "alive-thread",
+		DisruptorMutedUserID: "muted-user",
+	}
+	info := gameTeardownInfoFor("chan1", game)
+	if info.disruptorMutedUserID != "muted-user" {
+		t.Fatalf("gameTeardownInfoFor dropped the disruptor mute: got %q, want %q", info.disruptorMutedUserID, "muted-user")
+	}
+
+	src, err := os.ReadFile("werewolf.go")
+	if err != nil {
+		t.Fatalf("read werewolf.go: %v", err)
+	}
+	body, ok := funcBody(string(src), "func teardownGame(")
+	if !ok {
+		t.Fatal("could not locate teardownGame")
+	}
+	if !strings.Contains(body, "removeDisruptorMute(") {
+		t.Error("teardownGame never calls removeDisruptorMute — a game ending mid-discussion leaves its target muted permanently")
+	}
+}
+
+// TestPreflightRechecksPermissions guards the second half of the gate. The
+// lobby and role-count editor can sit for minutes; an admin editing the
+// channel or the bot's role in that window must not leave the game to
+// discover the gap mid-night, after roles are dealt and there is no clean
+// way back.
+func TestPreflightRechecksPermissions(t *testing.T) {
+	src, err := os.ReadFile("werewolf.go")
+	if err != nil {
+		t.Fatalf("read werewolf.go: %v", err)
+	}
+	body, ok := funcBody(string(src), ") startPreflight(")
+	if !ok {
+		t.Fatal("could not locate startPreflight")
+	}
+	if !strings.Contains(body, "missingWerewolfPermissions(") {
+		t.Error("startPreflight does not re-check permissions — a permission revoked during the lobby would surface mid-game")
+	}
+}
+
+// funcBody returns the source between marker's opening brace and the first
+// line consisting of a lone "}", i.e. the body of a top-level function.
+func funcBody(src, marker string) (string, bool) {
+	idx := strings.Index(src, marker)
+	if idx < 0 {
+		return "", false
+	}
+	rest := src[idx:]
+	if end := strings.Index(rest, "\n}\n"); end >= 0 {
+		return rest[:end], true
+	}
+	return rest, true
+}
+
+func namesOfPerms(perms []werewolfRequiredPermission) []string {
+	names := make([]string, 0, len(perms))
+	for _, p := range perms {
+		names = append(names, p.Name)
+	}
+	return names
+}
+
+// TestShouldCloseEmptyLobby covers a rule that, gotten wrong in either
+// direction, breaks the channel: too eager and one person can close every
+// lobby a host opens (the channel is locked bot-only, so each kill also
+// costs an unlock/relock cycle); too lax and an abandoned lobby holds the
+// channel read-only with nobody able to cancel it.
+func TestShouldCloseEmptyLobby(t *testing.T) {
+	cases := []struct {
+		name      string
+		leaverID  string
+		starterID string
+		remaining int
+		want      bool
+	}{
+		{"host leaves their own empty lobby", "host", "host", 0, true},
+		{"host leaves but players remain", "host", "host", 3, false},
+		{
+			// The grief case. /werewolf start does not put the starter in the
+			// roster, so one join+leave empties it while the host is present.
+			name: "a non-host empties a lobby whose host never joined", leaverID: "rando", starterID: "host", remaining: 0, want: false,
+		},
+		{"last non-host player leaves, host still present", "player", "host", 0, false},
+		{"a player leaves with others remaining", "player", "host", 2, false},
+		{"unidentified leaver never closes the lobby", "", "host", 0, false},
+		{"unidentified leaver and no starter", "", "", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldCloseEmptyLobby(tc.leaverID, tc.starterID, tc.remaining); got != tc.want {
+				t.Errorf("shouldCloseEmptyLobby(%q, %q, %d) = %v, want %v", tc.leaverID, tc.starterID, tc.remaining, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBothLeavePathsShareTheLobbyCloseRule keeps the button path and the
+// slash path on one predicate. They have drifted before, and the failure is
+// invisible until a channel is stuck.
+func TestBothLeavePathsShareTheLobbyCloseRule(t *testing.T) {
+	src, err := os.ReadFile("werewolf.go")
+	if err != nil {
+		t.Fatalf("read werewolf.go: %v", err)
+	}
+	if n := strings.Count(string(src), "shouldCloseEmptyLobby("); n < 3 {
+		t.Errorf("shouldCloseEmptyLobby appears %d times (want the definition plus both call sites) — "+
+			"one of handleLeave/handleJoinLeave is open-coding the rule again", n)
+	}
+}
+
+// TestEmptyLobbyTeardownAnswersTheClickFirst guards the 3-second interaction
+// deadline. teardownGame leads with a permission-overwrite round-trip, so
+// doing it before responding risks "This interaction failed" plus a dead
+// lobby left on screen with live buttons.
+func TestEmptyLobbyTeardownAnswersTheClickFirst(t *testing.T) {
+	src, err := os.ReadFile("werewolf.go")
+	if err != nil {
+		t.Fatalf("read werewolf.go: %v", err)
+	}
+	for _, fn := range []string{") handleJoinLeave(", ") handleLeave("} {
+		body, ok := funcBody(string(src), fn)
+		if !ok {
+			t.Fatalf("could not locate %s", fn)
+		}
+		teardown := strings.Index(body, "teardownGame(s, info)")
+		if teardown < 0 {
+			continue
+		}
+		respond := strings.Index(body, "InteractionRespond(")
+		if respond < 0 {
+			respond = strings.Index(body, "respondSuccess(")
+		}
+		if respond < 0 || respond > teardown {
+			t.Errorf("%s calls teardownGame before answering the interaction — a slow unlock will blow the 3s deadline", fn)
+		}
+	}
+}
+
+// gameWithDealtRoles builds a game whose roster holds exactly the given
+// dealt roles, one player each, all alive.
+func gameWithDealtRoles(roles ...role) *werewolfGame {
+	game := &werewolfGame{Players: map[string]*player{}}
+	for idx, r := range roles {
+		id := fmt.Sprintf("u%d", idx)
+		game.Players[id] = &player{UserID: id, Label: id, Role: r, DealtRole: r, Alive: true}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+	return game
+}
+
+// TestNightActingRolesNamesOnlyRolesInPlay covers the reported bug: the
+// night-start line was a hardcoded string that named Seer/Doctor/Hunter/
+// Disruptor whether or not they had been dealt, and omitted Witch and Cupid,
+// which do act.
+func TestNightActingRolesNamesOnlyRolesInPlay(t *testing.T) {
+	t.Run("omits roles that were never dealt", func(t *testing.T) {
+		game := gameWithDealtRoles(roleWerewolf, roleSeer, roleVillager, roleVillager)
+		got := nightActingRoles(game, 1)
+		want := []role{roleWerewolf, roleSeer}
+		if !sameRoles(got, want) {
+			t.Errorf("nightActingRoles = %v, want %v", labelsOfRoles(got), labelsOfRoles(want))
+		}
+		for _, absent := range []role{roleDoctor, roleWitch, roleHunter, roleDisruptor, roleCupid} {
+			if containsRole(got, absent) {
+				t.Errorf("named %s, which was never dealt", absent.label())
+			}
+		}
+	})
+
+	t.Run("includes Witch and Cupid, which the old string omitted", func(t *testing.T) {
+		game := gameWithDealtRoles(roleWerewolf, roleWitch, roleCupid)
+		got := nightActingRoles(game, 1)
+		for _, want := range []role{roleWitch, roleCupid} {
+			if !containsRole(got, want) {
+				t.Errorf("%s acts at night but was not named", want.label())
+			}
+		}
+	})
+
+	t.Run("Traitor is never named", func(t *testing.T) {
+		// The Traitor has no night action — naming them would advertise a
+		// role whose whole point is passing as an ordinary villager.
+		game := gameWithDealtRoles(roleWerewolf, roleTraitor, roleVillager)
+		if got := nightActingRoles(game, 1); containsRole(got, roleTraitor) {
+			t.Errorf("nightActingRoles named the Traitor: %v", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("wolf-pack roles collapse into one Ma Soi entry", func(t *testing.T) {
+		// Wolf Cub and a converted Cursed Wolf act inside the pack's own
+		// vote; listing them separately would leak the setup.
+		game := gameWithDealtRoles(roleWerewolf, roleWolfCub, roleCursedWolf, roleVillager)
+		got := nightActingRoles(game, 1)
+		if !sameRoles(got, []role{roleWerewolf}) {
+			t.Errorf("nightActingRoles = %v, want just [Ma Sói]", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("a pack of only Wolf Cubs still lists Ma Soi", func(t *testing.T) {
+		game := gameWithDealtRoles(roleWolfCub, roleVillager, roleVillager)
+		if got := nightActingRoles(game, 1); !containsRole(got, roleWerewolf) {
+			t.Errorf("nightActingRoles = %v, want Ma Sói present", labelsOfRoles(got))
+		}
+	})
+}
+
+// TestNightActingRolesNeverSignalsDeaths is the property that makes this
+// list safe to show at all. It is derived from DealtRole and ignores
+// aliveness, so it is byte-identical on every night of a game — a role
+// dropping off the list would otherwise be a reliable public death-reveal
+// in the main channel, defeating reveal-on-death.
+func TestNightActingRolesNeverSignalsDeaths(t *testing.T) {
+	game := gameWithDealtRoles(roleWerewolf, roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor, roleVillager)
+	night1 := nightActingRolesPhrase(nightActingRoles(game, 2))
+
+	// Kill every special role and convert the survivors' Role fields, the
+	// way a real game mutates them.
+	for _, p := range game.Players {
+		if p.DealtRole != roleWerewolf && p.DealtRole != roleVillager {
+			p.Alive = false
+		}
+		if p.DealtRole == roleCursedWolf {
+			p.Role = roleWerewolf
+		}
+	}
+	night5 := nightActingRolesPhrase(nightActingRoles(game, 5))
+
+	if night1 != night5 {
+		t.Errorf("the night line changed after deaths — this publicly reveals who died:\n night2: %s\n night5: %s", night1, night5)
+	}
+}
+
+// TestCupidIsNamedOnlyOnTheNightItActs keeps the one round-dependent entry
+// honest. Cupid acts on round 1 only, and that depends on the round number
+// alone, never on who is alive — so it leaks nothing.
+func TestCupidIsNamedOnlyOnTheNightItActs(t *testing.T) {
+	game := gameWithDealtRoles(roleWerewolf, roleCupid, roleVillager)
+	if got := nightActingRoles(game, 1); !containsRole(got, roleCupid) {
+		t.Errorf("round 1: Cupid acts but was not named: %v", labelsOfRoles(got))
+	}
+	for _, round := range []int{2, 3, 7} {
+		if got := nightActingRoles(game, round); containsRole(got, roleCupid) {
+			t.Errorf("round %d: Cupid does not act but was named: %v", round, labelsOfRoles(got))
+		}
+	}
+}
+
+// TestNightActingRolesPhraseIsWellFormed guards the rendered sentence,
+// including the all-villager setup that would otherwise emit a dangling
+// "đang hành động" with nothing in front of it.
+func TestNightActingRolesPhraseIsWellFormed(t *testing.T) {
+	if phrase := nightActingRolesPhrase(nil); !strings.HasPrefix(phrase, "Các vai trò đặc biệt") {
+		t.Errorf("empty role list produced %q, want the generic fallback", phrase)
+	}
+	phrase := nightActingRolesPhrase([]role{roleWerewolf, roleSeer})
+	for _, want := range []string{"🐺 Ma Sói", "🔮 Tiên Tri", "đang hành động"} {
+		if !strings.Contains(phrase, want) {
+			t.Errorf("phrase %q missing %q", phrase, want)
+		}
+	}
+	if strings.Contains(phrase, "  ") || strings.Contains(phrase, ", ,") {
+		t.Errorf("phrase has malformed spacing: %q", phrase)
+	}
+}
+
+// TestNightRoleEmojiMatchesTheProgressLine keeps the two places a role's
+// icon is shown in agreement. They had already drifted once: the Doctor was
+// 🩺 in the night-progress line and 💉 in /help, for the same role.
+func TestNightRoleEmojiMatchesTheProgressLine(t *testing.T) {
+	src, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	text := string(src)
+	for _, r := range []role{roleSeer, roleDoctor, roleWitch, roleHunter, roleDisruptor, roleCupid} {
+		want := fmt.Sprintf("%s %s", nightRoleEmoji(r), r.label())
+		if !strings.Contains(text, `announceRoleDecided(s, channelID, "`+want+`")`) {
+			t.Errorf("announceRoleDecided does not use %q — the night-start list and the progress line disagree on %s's icon", want, r.label())
+		}
+	}
+}
+
+func containsRole(roles []role, want role) bool {
+	for _, r := range roles {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sameRoles(got, want []role) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for idx := range got {
+		if got[idx] != want[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+func labelsOfRoles(roles []role) []string {
+	out := make([]string, 0, len(roles))
+	for _, r := range roles {
+		out = append(out, r.label())
+	}
+	return out
+}
+
+// maxLabelGame builds the worst realistic roster: a full lobby of players
+// whose display names are the longest Discord allows.
+func maxLabelGame() *werewolfGame {
+	game := &werewolfGame{ChannelID: "chan1", Players: map[string]*player{}}
+	for n := 0; n < werewolfMaxPlayers; n++ {
+		id := fmt.Sprintf("%d", 100000000000000000+n)
+		r := roleVillager
+		if n < 4 {
+			r = roleWerewolf
+		}
+		game.Players[id] = &player{
+			UserID:    id,
+			Label:     strings.Repeat("Ngưyễn", 5) + "ab",
+			Role:      r,
+			DealtRole: r,
+			Faction:   factionForRole(r),
+			Alive:     n%3 != 0,
+		}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+	return game
+}
+
+// TestEndOfGamePingIsScopedToPlayers is the safety property for pinging
+// everyone at game end. The mention list must resolve to exactly the
+// players who joined — never @everyone, never a role — regardless of what
+// their display names contain.
+func TestEndOfGamePingIsScopedToPlayers(t *testing.T) {
+	game := maxLabelGame()
+	pings, allowed := pingOnce(game.JoinOrder)
+
+	if allowed == nil {
+		t.Fatal("pingOnce returned nil AllowedMentions — Discord would then parse mentions out of the message text")
+	}
+	if len(allowed.Users) != len(game.JoinOrder) {
+		t.Errorf("AllowedMentions.Users has %d entries, want %d", len(allowed.Users), len(game.JoinOrder))
+	}
+	if len(allowed.Roles) != 0 {
+		t.Errorf("AllowedMentions.Roles = %v, want empty — a role ping would notify non-players", allowed.Roles)
+	}
+	for _, parse := range allowed.Parse {
+		if parse == discordgo.AllowedMentionTypeEveryone || parse == discordgo.AllowedMentionTypeRoles {
+			t.Errorf("AllowedMentions.Parse contains %q — this can mass-ping the whole server", parse)
+		}
+	}
+	for _, id := range game.JoinOrder {
+		if !strings.Contains(pings, id) {
+			t.Errorf("player %s was not pinged", id)
+		}
+	}
+
+	t.Run("a hostile display name cannot escalate the ping", func(t *testing.T) {
+		// AllowedMentions is what actually authorizes a mention, so even if
+		// "@everyone" reaches the message text via a display name, it must
+		// stay inert.
+		hostile := maxLabelGame()
+		for _, p := range hostile.Players {
+			p.Label = "@everyone @here <@&123456789012345678>"
+		}
+		_, allowed := pingOnce(hostile.JoinOrder)
+		if len(allowed.Roles) != 0 || len(allowed.Parse) != 0 {
+			t.Errorf("allowed = %+v, want Users-only scoping", allowed)
+		}
+	})
+
+	t.Run("duplicate and empty ids are dropped", func(t *testing.T) {
+		pings, allowed := pingOnce([]string{"111", "111", "", "222"})
+		if len(allowed.Users) != 2 {
+			t.Errorf("Users = %v, want 2 unique ids", allowed.Users)
+		}
+		if strings.Count(pings, "111") != 1 {
+			t.Errorf("duplicate id pinged twice: %q", pings)
+		}
+	})
+}
+
+// TestEndOfGameMessagesFitDiscordsLimit guards the overflow that adding
+// mentions would otherwise have caused. The result and roster together
+// already measured 1936 runes for a full lobby with maximum-length names,
+// against Discord's hard 2000-character cap; the ~440-rune mention list
+// pushed that to 2377, where the send fails outright and players get no
+// result at all.
+func TestEndOfGameMessagesFitDiscordsLimit(t *testing.T) {
+	game := maxLabelGame()
+	pings, _ := pingOnce(game.JoinOrder)
+
+	header := fmt.Sprintf("🎉 Ván Ma Sói kết thúc! %s\n🏆 **Người thắng:** %s%s",
+		"🏡 **Dân Làng thắng!**", winnerNamesWithRoles(game, resultVillagersWin),
+		"\n💤 someone bị loại vì AFK trước khi ván kết thúc.")
+	if pings != "" {
+		header += "\n\n" + pings
+	}
+
+	roleLines := make([]string, 0, len(game.JoinOrder))
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		roleLines = append(roleLines, fmt.Sprintf("• %s — %s (%s)\n", p.Label, finalRoleLabel(p), "còn sống"))
+	}
+
+	all := append(
+		splitIntoMessages(header, nil, werewolfMessageLimit),
+		splitIntoMessages("**Vai trò của mọi người:**\n", roleLines, werewolfMessageLimit)...,
+	)
+	if len(all) == 0 {
+		t.Fatal("no messages produced")
+	}
+	for idx, content := range all {
+		if n := len([]rune(content)); n > werewolfMessageLimit {
+			t.Errorf("message %d is %d runes, over the %d limit", idx, n, werewolfMessageLimit)
+		}
+	}
+	if werewolfMessageLimit > 2000 {
+		t.Errorf("werewolfMessageLimit = %d, above Discord's hard 2000-character cap", werewolfMessageLimit)
+	}
+
+	t.Run("every player appears in the role roster exactly once", func(t *testing.T) {
+		joined := strings.Join(all, "")
+		for _, id := range game.JoinOrder {
+			if n := strings.Count(joined, game.Players[id].Label); n < 1 {
+				t.Errorf("player %s missing from the end-of-game output", id)
+			}
+		}
+	})
+}
+
+// TestSplitIntoMessages covers the packer directly, including the inputs
+// that produced silent truncation elsewhere in this package.
+func TestSplitIntoMessages(t *testing.T) {
+	t.Run("a header that fits alone yields one message", func(t *testing.T) {
+		got := splitIntoMessages("hello", nil, 100)
+		if len(got) != 1 || got[0] != "hello" {
+			t.Errorf("got %q, want [hello]", got)
+		}
+	})
+	t.Run("empty input yields no messages", func(t *testing.T) {
+		if got := splitIntoMessages("", nil, 100); len(got) != 0 {
+			t.Errorf("got %q, want none", got)
+		}
+	})
+	t.Run("no message exceeds the limit and no line is lost", func(t *testing.T) {
+		lines := make([]string, 40)
+		for idx := range lines {
+			lines[idx] = fmt.Sprintf("• line %d ăâêôơư\n", idx)
+		}
+		for _, limit := range []int{20, 50, 100, 1900} {
+			got := splitIntoMessages("HEADER\n", lines, limit)
+			joined := strings.Join(got, "")
+			for idx, content := range got {
+				if n := len([]rune(content)); n > limit {
+					t.Errorf("limit %d: message %d is %d runes", limit, idx, n)
+				}
+			}
+			for idx := range lines {
+				if !strings.Contains(joined, fmt.Sprintf("• line %d", idx)) {
+					t.Errorf("limit %d: dropped line %d", limit, idx)
+				}
+			}
+		}
+	})
+	t.Run("an over-long single line is clamped, not dropped", func(t *testing.T) {
+		got := splitIntoMessages("", []string{strings.Repeat("ư", 500)}, 100)
+		if len(got) != 1 {
+			t.Fatalf("got %d messages, want 1", len(got))
+		}
+		if n := len([]rune(got[0])); n != 100 {
+			t.Errorf("clamped to %d runes, want 100", n)
+		}
+	})
+	t.Run("counts runes, not bytes", func(t *testing.T) {
+		// "ư" is 3 bytes; a byte-based splitter would break these up.
+		got := splitIntoMessages("", []string{strings.Repeat("ư", 30)}, 30)
+		if len(got) != 1 {
+			t.Errorf("got %d messages, want 1 — the packer is counting bytes", len(got))
+		}
+	})
+}
+
+// TestLopsidedCustomSetupsAreAccepted pins the deliberate removal of the
+// wolf-faction balance floor from the custom-role editor. The editor exists
+// so a group can deal whatever setup they want, including one that hands
+// the wolves an immediate win; that is the starter's call, not the bot's to
+// veto. Only structural rules — the ones without which the game cannot run
+// at all — still reject.
+func TestLopsidedCustomSetupsAreAccepted(t *testing.T) {
+	accepted := []struct {
+		name        string
+		counts      map[role]int
+		playerCount int
+	}{
+		{"wolves at parity", map[role]int{roleWerewolf: 2, roleVillager: 3}, 5},
+		{"wolves already past parity", map[role]int{roleWerewolf: 3, roleVillager: 2}, 5},
+		{"everyone but one is a wolf", map[role]int{roleWerewolf: 4, roleVillager: 1}, 5},
+		{"cursed wolf on a thin roster", map[role]int{roleWerewolf: 2, roleCursedWolf: 1, roleVillager: 3}, 6},
+		{"traitor pushing the wolf faction over", map[role]int{roleWerewolf: 2, roleTraitor: 1, roleVillager: 2}, 5},
+	}
+	for _, c := range accepted {
+		t.Run(c.name, func(t *testing.T) {
+			if !roleCountConfirmValid(c.counts, c.playerCount) {
+				t.Errorf("roleCountConfirmValid(%v, %d) = false, want true — balance must not be enforced for custom roles", c.counts, c.playerCount)
+			}
+			if msg := roleCountConfirmError(c.counts, c.playerCount); msg != "" {
+				t.Errorf("roleCountConfirmError(%v, %d) = %q, want \"\"", c.counts, c.playerCount, msg)
+			}
+		})
+	}
+
+	rejected := []struct {
+		name        string
+		counts      map[role]int
+		playerCount int
+		why         string
+	}{
+		{"total does not match the roster", map[role]int{roleWerewolf: 2, roleVillager: 2}, 7, "Tổng số vai trò"},
+		{"no wolf side at all", map[role]int{roleVillager: 5}, 5, "phe Sói"},
+		{"no villager side at all", map[role]int{roleWerewolf: 5}, 5, "phe Dân"},
+		{"wolf side cannot vote to bite", map[role]int{roleTraitor: 1, roleCursedWolf: 1, roleVillager: 6}, 8, "Ma Sói hoặc Sói Con"},
+	}
+	for _, c := range rejected {
+		t.Run(c.name, func(t *testing.T) {
+			if roleCountConfirmValid(c.counts, c.playerCount) {
+				t.Errorf("roleCountConfirmValid(%v, %d) = true, want false — %s is structural, not a balance judgment", c.counts, c.playerCount, c.name)
+			}
+			if msg := roleCountConfirmError(c.counts, c.playerCount); !strings.Contains(msg, c.why) {
+				t.Errorf("roleCountConfirmError(%v, %d) = %q, want it to mention %q", c.counts, c.playerCount, msg, c.why)
+			}
+		})
+	}
+}
+
+// TestGameEndSeparator covers the closing line that visually divides one
+// game's output from the next in the channel.
+func TestGameEndSeparator(t *testing.T) {
+	const esc = "\u001b"
+
+	results := map[gameResult]struct {
+		color int
+		word  string
+	}{
+		resultWerewolvesWin: {ansiRed, "SÓI"},
+		resultVillagersWin:  {ansiGreen, "DÂN"},
+		resultLoversWin:     {ansiPink, "CẶP ĐÔI"},
+	}
+	for result, want := range results {
+		got := gameEndSeparator(result)
+
+		if !strings.HasPrefix(got, "```ansi\n") || !strings.HasSuffix(got, "\n```") {
+			t.Errorf("result %v: not a well-formed ansi block: %q", result, got)
+		}
+		// Discord colours text only inside a fence tagged exactly "ansi",
+		// and a real ESC byte must reach the wire or the codes render as
+		// literal text in the middle of the line.
+		if !strings.Contains(got, esc+fmt.Sprintf("[1;%dm", want.color)) {
+			t.Errorf("result %v: missing bold colour %d: %q", result, want.color, got)
+		}
+		if !strings.Contains(got, esc+"[0m") {
+			t.Errorf("result %v: colour is never reset, which can bleed into later text: %q", result, got)
+		}
+		if !strings.Contains(got, want.word) {
+			t.Errorf("result %v: does not name the winner (%q): %q", result, want.word, got)
+		}
+
+		// One line inside the fence — that is what makes it read as a rule
+		// between games rather than another block of output.
+		inner := strings.TrimSuffix(strings.TrimPrefix(got, "```ansi\n"), "\n```")
+		if strings.Contains(inner, "\n") {
+			t.Errorf("result %v: separator spans multiple lines: %q", result, inner)
+		}
+		if n := len([]rune(got)); n > werewolfMessageLimit {
+			t.Errorf("result %v: %d runes, over the %d limit", result, n, werewolfMessageLimit)
+		}
+	}
+
+	t.Run("each result gets a distinct colour", func(t *testing.T) {
+		seen := map[string]gameResult{}
+		for result := range results {
+			line := gameEndSeparator(result)
+			if prev, dup := seen[line]; dup {
+				t.Errorf("results %v and %v render identically — the colour cue carries no information", prev, result)
+			}
+			seen[line] = result
+		}
+	})
+
+	t.Run("an unknown result still renders a valid block", func(t *testing.T) {
+		// resultOngoing should never reach here, but a malformed fence
+		// would corrupt the rest of the channel's rendering.
+		got := gameEndSeparator(resultOngoing)
+		if !strings.HasPrefix(got, "```ansi\n") || !strings.HasSuffix(got, "\n```") {
+			t.Errorf("malformed block for an unexpected result: %q", got)
+		}
+	})
+}
+
+// TestAnsiLineCannotBreakOutOfItsFence guards the two characters that would
+// let text escape the code block and corrupt every message after it.
+func TestAnsiLineCannotBreakOutOfItsFence(t *testing.T) {
+	got := ansiLine(ansiRed, "line one\nline two ``` still inside")
+
+	inner := strings.TrimSuffix(strings.TrimPrefix(got, "```ansi\n"), "\n```")
+	if strings.Contains(inner, "\n") {
+		t.Errorf("newline survived into the block, splitting the separator: %q", inner)
+	}
+	if strings.Contains(inner, "`") {
+		t.Errorf("backtick survived into the block and can close the fence early: %q", inner)
+	}
+	if strings.Count(got, "```") != 2 {
+		t.Errorf("expected exactly one opening and one closing fence: %q", got)
+	}
+}
+
+// TestWitchIsNotOfferedADoctorProtectedTarget covers the trap the Witch
+// used to face: the wolves bite someone the Doctor already protected, she
+// is shown that name, and spending her single once-per-game heal on it
+// consumes the potion to buy an outcome that was already guaranteed. She
+// cannot tell the difference from her side, so it was never a real choice.
+func TestWitchIsNotOfferedADoctorProtectedTarget(t *testing.T) {
+	cases := []struct {
+		name          string
+		bites         []string
+		doctorProtect string
+		want          []string
+	}{
+		{"lone bite, doctor covered it", []string{"a"}, "a", nil},
+		{"lone bite, doctor elsewhere", []string{"a"}, "b", []string{"a"}},
+		{"lone bite, no doctor in play", []string{"a"}, "", []string{"a"}},
+		{"bonus bite, doctor covered the first", []string{"a", "b"}, "a", []string{"b"}},
+		{"bonus bite, doctor covered the second", []string{"a", "b"}, "b", []string{"a"}},
+		{"bonus bite, doctor covered neither", []string{"a", "b"}, "c", []string{"a", "b"}},
+		{"no bite at all", nil, "a", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := healableBiteTargetIDs(c.bites, c.doctorProtect)
+			if !sameStrings(got, c.want) {
+				t.Errorf("healableBiteTargetIDs(%v, %q) = %v, want %v", c.bites, c.doctorProtect, got, c.want)
+			}
+		})
+	}
+
+	t.Run("a fully-protected night offers no heal control", func(t *testing.T) {
+		// The heal button/menu must disappear, not just be pointless — and
+		// with poison already spent she has nothing left to do, so
+		// witchHasChoiceLeft must report false rather than stalling the
+		// night on a prompt she cannot answer.
+		healable := healableBiteTargetIDs([]string{"a"}, "a")
+		if n := healableBiteTargetCount(healable, ""); n != 0 {
+			t.Errorf("healable count = %d, want 0", n)
+		}
+		if witchHasChoiceLeft(true, false, healableBiteTargetCount(healable, "")) {
+			t.Error("witchHasChoiceLeft = true with poison spent and every bite protected — the night would wait on a prompt with nothing to click")
+		}
+		if !witchHasChoiceLeft(false, false, 0) {
+			t.Error("witchHasChoiceLeft = false while poison is still available — she should still be prompted to poison")
+		}
+	})
+
+	t.Run("the single-target heal sentinel resolves within the healable list", func(t *testing.T) {
+		// Two bites, the Doctor covered the first. The "heal" sentinel means
+		// "the one target she was shown" — resolving it against the raw bite
+		// list would heal the already-protected player and waste the potion
+		// on exactly the case this change exists to prevent.
+		healable := healableBiteTargetIDs([]string{"a", "b"}, "a")
+		if got := resolveWitchHealTarget("heal", healable); got != "b" {
+			t.Errorf("resolveWitchHealTarget = %q, want \"b\"", got)
+		}
+	})
+}
+
+// TestWitchPromptHidesTheDoctorsSave pins the secrecy property. A night
+// whose only bite was protected must read to the Witch exactly like a night
+// with no bite, or the message becomes a reliable tell that the Doctor
+// saved someone.
+func TestWitchPromptHidesTheDoctorsSave(t *testing.T) {
+	src, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	body, ok := funcBody(string(src), ") dmWitchPrompt(")
+	if !ok {
+		t.Fatal("could not locate dmWitchPrompt")
+	}
+	// One no-target phrase, used for both situations. Two distinct phrases
+	// would be exactly the leak.
+	if strings.Contains(body, "Bác Sĩ") || strings.Contains(body, "bác sĩ") {
+		t.Error("the Witch's prompt mentions the Doctor — that reveals a save she should not be able to see")
+	}
+	if !strings.Contains(body, "không có ai cần cứu") {
+		t.Error("dmWitchPrompt lost its no-healable-target wording")
+	}
+}
+
+// TestAliveSummaryMentionsTheLivingOnly guards the alive-list ping added so
+// players notice the day phase and come back from their DMs.
+func TestAliveSummaryMentionsTheLivingOnly(t *testing.T) {
+	game := &werewolfGame{Players: map[string]*player{}}
+	for n := 0; n < 6; n++ {
+		id := fmt.Sprintf("%d", 100000000000000000+n)
+		game.Players[id] = &player{UserID: id, Label: fmt.Sprintf("Player%d", n), Alive: n%2 == 0}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+
+	summary := aliveDeadSummary(game)
+	allowed := aliveMentionsFor(game)
+
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		mentioned := strings.Contains(summary, nameTag(id))
+		if p.Alive != mentioned {
+			t.Errorf("player %s alive=%v but mentioned=%v", id, p.Alive, mentioned)
+		}
+		authorized := false
+		for _, u := range allowed.Users {
+			if u == id {
+				authorized = true
+			}
+		}
+		if p.Alive != authorized {
+			t.Errorf("player %s alive=%v but ping-authorized=%v", id, p.Alive, authorized)
+		}
+	}
+
+	if len(allowed.Roles) != 0 || len(allowed.Parse) != 0 {
+		t.Errorf("allowed = %+v, want Users-only — a role or everyone ping would reach non-players", allowed)
+	}
+
+	t.Run("the dead are never pinged", func(t *testing.T) {
+		// Dead players stay plain labels: they are out of the game and
+		// would otherwise be notified on every phase for the rest of it.
+		dead := game.Players[game.JoinOrder[1]]
+		if strings.Contains(summary, nameTag(dead.UserID)) {
+			t.Errorf("dead player %s is mentioned: %q", dead.UserID, summary)
+		}
+		if !strings.Contains(summary, dead.Label) {
+			t.Errorf("dead player %s lost their name from the summary: %q", dead.Label, summary)
+		}
+	})
+}
+
+// TestOnlyDayPhasesPingTheAliveList pins where the ping fires. Night
+// announcements carry the same mention text but must not notify: night
+// action happens in DMs, and pinging every phase would be ~4 notifications
+// per player per round.
+func TestOnlyDayPhasesPingTheAliveList(t *testing.T) {
+	src, err := os.ReadFile("werewolf_day.go")
+	if err != nil {
+		t.Fatalf("read werewolf_day.go: %v", err)
+	}
+	for _, fn := range []string{") runDayDiscuss(", ") runDayVote("} {
+		body, ok := funcBody(string(src), fn)
+		if !ok {
+			t.Fatalf("could not locate %s", fn)
+		}
+		if !strings.Contains(body, "AllowedMentions: aliveMentions") {
+			t.Errorf("%s does not ping the alive list — players stay in their DMs through the day phase", fn)
+		}
+	}
+
+	night, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	if strings.Contains(string(night), "aliveMentionsFor(") {
+		t.Error("a night path pings the alive list — night action is in DMs, so this is pure notification noise")
+	}
+}
+
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for idx := range got {
+		if got[idx] != want[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestResolveNightFiltersTheWitchsHealTargets guards the WIRING, not the
+// helper. healableBiteTargetIDs being correct is worthless if resolveNight
+// goes back to handing the Witch the raw bite list — and reverting exactly
+// that passed every other test in this file.
+func TestResolveNightFiltersTheWitchsHealTargets(t *testing.T) {
+	src, err := os.ReadFile("werewolf_night.go")
+	if err != nil {
+		t.Fatalf("read werewolf_night.go: %v", err)
+	}
+	text := string(src)
+
+	if !strings.Contains(text, "healableBiteTargetIDs(resolvedTargets, game.DoctorProtect)") {
+		t.Error("resolveNight no longer filters the Witch's heal targets by the Doctor's pick — she can waste her one heal on an already-protected player")
+	}
+	// The menu and the stored validation list must come from the same
+	// filtered source; building the menu from resolvedTargets would show
+	// her a target handleWitchHeal then rejects.
+	if strings.Contains(text, "copyPlayers(playersByIDs(game, resolvedTargets))") {
+		t.Error("the Witch's heal menu is built from the raw bite list instead of WitchHealableTargetIDs")
+	}
+	if !strings.Contains(text, "resolveWitchHealTarget(game.WitchSaveTarget, game.WitchHealableTargetIDs)") {
+		t.Error("finalizeNightResolution resolves the heal sentinel against the raw bite list — with a bonus bite this heals the wrong player")
+	}
+}
+
+// TestSilencedPlayerIsBarredFromChatAndVote pins the Disruptor's full
+// effect. The chat half is a Discord permission overwrite and can fail; the
+// vote half is enforced internally and always holds. The announcement is
+// therefore gated on a validated target, NOT on the overwrite landing — a
+// failed overwrite degrades the silence to vote-only rather than cancelling
+// it.
+func TestSilencedPlayerIsBarredFromChatAndVote(t *testing.T) {
+	src, err := os.ReadFile("werewolf_day.go")
+	if err != nil {
+		t.Fatalf("read werewolf_day.go: %v", err)
+	}
+	text := string(src)
+
+	t.Run("the day announcement names them and says what is blocked", func(t *testing.T) {
+		body, ok := funcBody(text, ") runDayDiscuss(")
+		if !ok {
+			t.Fatal("could not locate runDayDiscuss")
+		}
+		if !strings.Contains(body, "làm câm lặng hôm nay") {
+			t.Fatal("runDayDiscuss no longer names the silenced player")
+		}
+		// Naming them without saying what they lost is what prompted this:
+		// a reader could not tell whether the ban covered chat, voting or
+		// both, and the silenced player may assume they cannot vote when
+		// they can (or the reverse).
+		for _, want := range []string{"không chat", "không bỏ phiếu"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the mute line does not spell out %q — players cannot tell what is actually blocked", want)
+			}
+		}
+		if !strings.Contains(body, "game.DisruptorSilencedUserID = mutedUserID") {
+			t.Error("runDayDiscuss does not record DisruptorSilencedUserID — the vote ban has nothing to read")
+		}
+	})
+
+	t.Run("every vote path honours the ban", func(t *testing.T) {
+		for _, fn := range []string{") handleVote(", ") waitForVotes("} {
+			body, ok := funcBody(text, fn)
+			if !ok {
+				t.Fatalf("could not locate %s", fn)
+			}
+			if !strings.Contains(body, "DisruptorSilencedUserID") {
+				t.Errorf("%s ignores DisruptorSilencedUserID", fn)
+			}
+		}
+		// waitForVotes must EXCLUDE them from the expected-voter count, or
+		// every day-vote burns its full deadline waiting on a ballot that
+		// can never arrive.
+		body, _ := funcBody(text, ") waitForVotes(")
+		if !strings.Contains(body, "continue") {
+			t.Error("waitForVotes counts the silenced player as an expected voter — the vote window will never end early")
+		}
+	})
+
+	t.Run("a ballot cast before the silence is still dropped", func(t *testing.T) {
+		players := map[string]*player{
+			"a": {UserID: "a", Alive: true},
+			"b": {UserID: "b", Alive: true},
+		}
+		votes := map[string]string{"a": "b", "b": "a"}
+		got := validDayVotes(votes, players, "a")
+		if _, present := got["a"]; present {
+			t.Error("the silenced player's vote survived validDayVotes — the ban is bypassed by voting early in the day")
+		}
+		if _, present := got["b"]; !present {
+			t.Error("an unsilenced player's vote was dropped")
+		}
+	})
+
+	t.Run("no silenced id bans nobody", func(t *testing.T) {
+		players := map[string]*player{"a": {UserID: "a", Alive: true}}
+		if got := validDayVotes(map[string]string{"a": voteSkipValue}, players, ""); len(got) != 1 {
+			t.Errorf("validDayVotes with no silenced player returned %v, want the vote kept", got)
+		}
+	})
+
+	t.Run("the silenced player is not struck for the vote they could not cast", func(t *testing.T) {
+		body, ok := funcBody(text, ") resolveVote(")
+		if !ok {
+			t.Fatal("could not locate resolveVote")
+		}
+		strike := strings.Index(body, "AFKStrikes[p.UserID]++")
+		guard := strings.Index(body, "DisruptorSilencedUserID")
+		if strike >= 0 && (guard < 0 || guard > strike) {
+			t.Error("resolveVote strikes the silenced player for not voting — the Disruptor could farm strikes to get their target auto-removed")
+		}
+	})
+}
+
+// TestLastCallWarnings covers the 30-second warning posted into whichever
+// room is actually deliberating.
+func TestLastCallWarnings(t *testing.T) {
+	t.Run("fires 30s before a long window closes", func(t *testing.T) {
+		// Timing is asserted through the arithmetic rather than by
+		// sleeping: the real windows run minutes.
+		for _, window := range []time.Duration{dayDiscussMax, wolfDiscussMax, 60 * time.Second} {
+			if window <= lastCallWindow {
+				t.Errorf("window %v is not longer than lastCallWindow %v, so players would never be warned", window, lastCallWindow)
+			}
+			if got := window - lastCallWindow; got <= 0 {
+				t.Errorf("pre-warning sleep for %v is %v, want positive", window, got)
+			}
+		}
+	})
+
+	t.Run("a window at or under 30s does not warn", func(t *testing.T) {
+		// Announcing "30 seconds left" the instant a 30-second window opens
+		// is noise. sleepWithLastCall must fall through to a plain sleep,
+		// and must not post to an empty thread id either.
+		start := time.Now()
+		sleepWithLastCall(nil, "", 10*time.Millisecond, "unused")
+		if elapsed := time.Since(start); elapsed < 10*time.Millisecond {
+			t.Errorf("returned after %v, want at least the full window", elapsed)
+		}
+		// A nil session would panic if it tried to send; reaching here
+		// proves the short-window and empty-thread paths send nothing.
+		sleepWithLastCall(nil, "thread", 10*time.Millisecond, "unused")
+		postLastCall(nil, "", "unused")
+	})
+
+	t.Run("day warns in the alive thread, night in the wolf thread", func(t *testing.T) {
+		// Each warning must land where that phase's conversation is
+		// happening. The main channel already gets waitForNightActions'
+		// halfway reminder, so routing either of these there too would
+		// double up in the one room that is not the discussion.
+		day, err := os.ReadFile("werewolf_day.go")
+		if err != nil {
+			t.Fatalf("read werewolf_day.go: %v", err)
+		}
+		body, ok := funcBody(string(day), ") runDayDiscuss(")
+		if !ok {
+			t.Fatal("could not locate runDayDiscuss")
+		}
+		if !strings.Contains(body, "sleepWithLastCall(s, aliveThreadID,") {
+			t.Error("day discussion does not warn in the alive-players thread")
+		}
+		if strings.Contains(body, "time.Sleep(discussWindow)") {
+			t.Error("runDayDiscuss still sleeps the window straight through, so no warning can fire")
+		}
+
+		night, err := os.ReadFile("werewolf_night.go")
+		if err != nil {
+			t.Fatalf("read werewolf_night.go: %v", err)
+		}
+		body, ok = funcBody(string(night), ") waitForNightActions(")
+		if !ok {
+			t.Fatal("could not locate waitForNightActions")
+		}
+		if !strings.Contains(body, "postLastCall(s, wolfThreadID,") {
+			t.Error("the night last call does not reach the wolf thread")
+		}
+		if !strings.Contains(body, "lastCalled = true") {
+			t.Error("the night last call is not latched — it would repeat every 2s poll until the deadline")
+		}
+	})
+}
+
+// TestNightActingRolesFollowsRevealOnDeath covers the fork that decides
+// whether the night line may narrow to the living. The reported symptom was
+// a 3-player endgame still announcing five special roles.
+func TestNightActingRolesFollowsRevealOnDeath(t *testing.T) {
+	// A mid-game state: Doctor, Hunter and Disruptor are dead; a wolf, the
+	// Seer and a villager remain.
+	build := func(revealOnDeath bool) *werewolfGame {
+		game := &werewolfGame{RevealOnDeath: revealOnDeath, Players: map[string]*player{}}
+		roles := []struct {
+			r     role
+			alive bool
+		}{
+			{roleWerewolf, true}, {roleSeer, true}, {roleVillager, true},
+			{roleDoctor, false}, {roleHunter, false}, {roleDisruptor, false},
+		}
+		for idx, e := range roles {
+			id := fmt.Sprintf("u%d", idx)
+			game.Players[id] = &player{
+				UserID: id, Label: id, Role: e.r, DealtRole: e.r,
+				Faction: factionForRole(e.r), Alive: e.alive,
+			}
+			game.JoinOrder = append(game.JoinOrder, id)
+		}
+		return game
+	}
+
+	t.Run("reveal-on-death ON narrows to the living", func(t *testing.T) {
+		// Each death already announced its role, so the village knows the
+		// Doctor/Hunter/Disruptor are gone. Naming them anyway is just wrong.
+		got := nightActingRoles(build(true), 3)
+		if !sameRoles(got, []role{roleWerewolf, roleSeer}) {
+			t.Errorf("nightActingRoles = %v, want [Ma Sói, Tiên Tri]", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("reveal-on-death OFF keeps every dealt role", func(t *testing.T) {
+		// Here the list is the only signal, so narrowing it would turn the
+		// main channel into a reliable death-reveal.
+		got := nightActingRoles(build(false), 3)
+		want := []role{roleWerewolf, roleSeer, roleDoctor, roleHunter, roleDisruptor}
+		if !sameRoles(got, want) {
+			t.Errorf("nightActingRoles = %v, want %v", labelsOfRoles(got), labelsOfRoles(want))
+		}
+	})
+
+	t.Run("with reveal OFF the line never changes as players die", func(t *testing.T) {
+		early := nightActingRolesPhrase(nightActingRoles(build(false), 2))
+		late := build(false)
+		for _, p := range late.Players {
+			if p.DealtRole != roleWerewolf {
+				p.Alive = false
+			}
+		}
+		if got := nightActingRolesPhrase(nightActingRoles(late, 5)); got != early {
+			t.Errorf("the line changed after deaths, revealing them:\n early: %s\n late:  %s", early, got)
+		}
+	})
+
+	t.Run("a promoted Traitor keeps the pack on the line", func(t *testing.T) {
+		// Every dealt wolf is dead and the Traitor has been promoted to a
+		// full Werewolf. With reveal ON, dropping "Ma Sói" here would be
+		// both wrong (a wolf still acts) and a tell that the promotion
+		// happened — the promotion is deliberately private.
+		game := &werewolfGame{RevealOnDeath: true, Players: map[string]*player{}}
+		add := func(id string, dealt, now role, alive bool) {
+			game.Players[id] = &player{
+				UserID: id, Label: id, Role: now, DealtRole: dealt,
+				Faction: factionForRole(now), Alive: alive,
+			}
+			game.JoinOrder = append(game.JoinOrder, id)
+		}
+		add("w", roleWerewolf, roleWerewolf, false)
+		add("t", roleTraitor, roleWerewolf, true)
+		add("v", roleVillager, roleVillager, true)
+
+		got := nightActingRoles(game, 4)
+		if !containsRole(got, roleWerewolf) {
+			t.Errorf("nightActingRoles = %v, want Ma Sói present via the promoted Traitor", labelsOfRoles(got))
+		}
+		if containsRole(got, roleTraitor) {
+			t.Errorf("nightActingRoles named the Traitor: %v", labelsOfRoles(got))
+		}
+	})
+
+	t.Run("an unpromoted Traitor is never listed", func(t *testing.T) {
+		game := &werewolfGame{RevealOnDeath: true, Players: map[string]*player{}}
+		for idx, e := range []struct {
+			r     role
+			alive bool
+		}{{roleWerewolf, true}, {roleTraitor, true}, {roleVillager, true}} {
+			id := fmt.Sprintf("u%d", idx)
+			game.Players[id] = &player{
+				UserID: id, Label: id, Role: e.r, DealtRole: e.r,
+				Faction: factionForRole(e.r), Alive: e.alive,
+			}
+			game.JoinOrder = append(game.JoinOrder, id)
+		}
+		if got := nightActingRoles(game, 2); !sameRoles(got, []role{roleWerewolf}) {
+			t.Errorf("nightActingRoles = %v, want just [Ma Sói]", labelsOfRoles(got))
+		}
+	})
+}
+
+// hunterGame builds a game with a Hunter holding a standing pick.
+func hunterGame(targetAlive, hunterAlive bool) *werewolfGame {
+	game := &werewolfGame{Players: map[string]*player{}, HunterTarget: "victim"}
+	add := func(id string, r role, alive bool) {
+		game.Players[id] = &player{UserID: id, Label: id, Role: r, DealtRole: r, Faction: factionForRole(r), Alive: alive}
+		game.JoinOrder = append(game.JoinOrder, id)
+	}
+	add("hunter", roleHunter, hunterAlive)
+	add("victim", roleVillager, targetAlive)
+	add("other", roleVillager, true)
+	return game
+}
+
+// TestClearStaleHunterTarget covers the silent dead-end the Hunter used to
+// walk into: a pick made on night 2 becomes worthless the moment that
+// player dies on day 3, hunterRevengeStep bails on a dead target, and the
+// Hunter dies later having effectively had no ability — never told why.
+func TestClearStaleHunterTarget(t *testing.T) {
+	t.Run("a live pick is left alone", func(t *testing.T) {
+		game := hunterGame(true, true)
+		if warn := clearStaleHunterTarget(game); warn != nil {
+			t.Errorf("warned about a still-valid pick: %+v", warn)
+		}
+		if game.HunterTarget != "victim" {
+			t.Errorf("HunterTarget = %q, want it untouched", game.HunterTarget)
+		}
+	})
+
+	t.Run("a dead pick is cleared and the Hunter is told", func(t *testing.T) {
+		game := hunterGame(false, true)
+		warn := clearStaleHunterTarget(game)
+		if warn == nil {
+			t.Fatal("no warning returned — the Hunter would never learn their gun is empty")
+		}
+		if warn.UserID != "hunter" {
+			t.Errorf("warned %q, want the hunter", warn.UserID)
+		}
+		if game.HunterTarget != "" {
+			t.Errorf("HunterTarget = %q, want cleared so the next night prompt starts fresh", game.HunterTarget)
+		}
+	})
+
+	t.Run("a dead Hunter is never warned", func(t *testing.T) {
+		// The common case: the Hunter's own revenge kill is what just
+		// emptied the pick. DMing a corpse "choose again tonight" is noise.
+		game := hunterGame(false, false)
+		if warn := clearStaleHunterTarget(game); warn != nil {
+			t.Errorf("warned a dead Hunter: %+v", warn)
+		}
+		if game.HunterTarget != "" {
+			t.Errorf("HunterTarget = %q, want cleared regardless", game.HunterTarget)
+		}
+	})
+
+	t.Run("no pick means nothing to say", func(t *testing.T) {
+		game := hunterGame(true, true)
+		game.HunterTarget = ""
+		if warn := clearStaleHunterTarget(game); warn != nil {
+			t.Errorf("warned with no pick set: %+v", warn)
+		}
+	})
+
+	// Not tested: a pick naming an id absent from game.Players. That state
+	// is unreachable — both delete(game.Players, ...) sites remove the same
+	// id from JoinOrder inside the same critical section, and both are
+	// lobby-only, so every JoinOrder entry resolves while a game is running.
+	// clearStaleHunterTarget still uses a comma-ok lookup and treats a
+	// missing entry as stale, but fabricating that state in a test only
+	// proves that the dozen OTHER helpers indexing game.Players[id]
+	// unguarded would panic first.
+
+	t.Run("the returned Hunter is a snapshot, not a live pointer", func(t *testing.T) {
+		// Everything crossing the cmd.mu boundary must be copied; the DM is
+		// sent after the lock is released.
+		game := hunterGame(false, true)
+		warn := clearStaleHunterTarget(game)
+		if warn == nil {
+			t.Fatal("expected a warning")
+		}
+		if warn == game.Players["hunter"] {
+			t.Error("returned the live *player — it escapes cmd.mu and races with the game goroutine")
+		}
+	})
+}
+
+// TestEveryDeathSiteClearsAStaleHunterPick guards the wiring. The helper is
+// useless if a death path forgets to call it, and each of these four is a
+// place a player can die.
+func TestEveryDeathSiteClearsAStaleHunterPick(t *testing.T) {
+	sites := []struct{ file, fn string }{
+		{"werewolf_night.go", ") finalizeNightResolution("},
+		{"werewolf_day.go", ") resolveVote("},
+		{"werewolf_day.go", ") checkAndHandleGameEnd("},
+		{"werewolf.go", ") handleLeave("},
+	}
+	for _, site := range sites {
+		src, err := os.ReadFile(site.file)
+		if err != nil {
+			t.Fatalf("read %s: %v", site.file, err)
+		}
+		body, ok := funcBody(string(src), site.fn)
+		if !ok {
+			t.Fatalf("could not locate %s in %s", site.fn, site.file)
+		}
+		if !strings.Contains(body, "clearStaleHunterTarget(game)") {
+			t.Errorf("%s%s applies deaths but never clears a stale Hunter pick", site.file, site.fn)
+		}
+		// The DM must be sent OUTSIDE the lock. clearStaleHunterTarget runs
+		// under cmd.mu; dmHunterTargetLost does REST calls.
+		clear := strings.Index(body, "clearStaleHunterTarget(game)")
+		send := strings.Index(body, "dmHunterTargetLost(s,")
+		if send < 0 {
+			t.Errorf("%s%s clears the pick but never tells the Hunter", site.file, site.fn)
+		} else if send < clear {
+			t.Errorf("%s%s sends the DM before clearing the pick", site.file, site.fn)
+		}
+	}
+}
+
+// TestRoleEditTimeoutsStayInsideTheirCeilings pins the extended editor
+// window against the two limits that bound it. Both are satisfied with room
+// to spare today; the point is that raising roleEditTimeout further has to
+// be a deliberate act, not a number bumped in isolation.
+func TestRoleEditTimeoutsStayInsideTheirCeilings(t *testing.T) {
+	const discordInteractionTokenLifetime = 15 * time.Minute
+
+	if roleEditTimeout <= 0 {
+		t.Fatal("roleEditTimeout is disabled — an editor nobody confirms would hold the channel forever")
+	}
+	if roleEditTimeout >= lobbyTimeout {
+		t.Errorf("roleEditTimeout (%v) reaches lobbyTimeout (%v) — the two watchdogs could disagree about the same game",
+			roleEditTimeout, lobbyTimeout)
+	}
+	if roleEditTimeout >= discordInteractionTokenLifetime {
+		t.Errorf("roleEditTimeout (%v) reaches Discord's %v interaction-token lifetime",
+			roleEditTimeout, discordInteractionTokenLifetime)
+	}
+
+	// The undeliverable-editor fallback is not a pacing choice, so it must
+	// stay far shorter: the starter is looking at nothing and does not know
+	// the game is waiting on them.
+	if roleEditorUnavailableTimeout <= 0 {
+		t.Fatal("roleEditorUnavailableTimeout is disabled — a game whose editor failed to send would never leave phaseRoleEdit")
+	}
+	if roleEditorUnavailableTimeout >= roleEditTimeout {
+		t.Errorf("roleEditorUnavailableTimeout (%v) is not shorter than roleEditTimeout (%v) — a starter with no editor waits as long as one who has it",
+			roleEditorUnavailableTimeout, roleEditTimeout)
+	}
+}
+
+// TestUndeliverableEditorStillLeavesRoleEdit guards the stuck state that
+// made the role-edit watchdog load-bearing in the first place: if BOTH
+// ephemeral editor messages fail to send, the starter has no way to confirm
+// and no idea the game is waiting, so nothing but this fallback ever moves
+// it out of phaseRoleEdit.
+func TestUndeliverableEditorStillLeavesRoleEdit(t *testing.T) {
+	src, err := os.ReadFile("werewolf_rolepick.go")
+	if err != nil {
+		t.Fatalf("read werewolf_rolepick.go: %v", err)
+	}
+	text := string(src)
+
+	body, ok := funcBody(text, ") sendRoleCountEditor(")
+	if !ok {
+		t.Fatal("could not locate sendRoleCountEditor")
+	}
+	// Launched unconditionally — especially when nothing was delivered.
+	if !strings.Contains(body, "go cmd.waitForRoleCountConfirm(s, channelID, seq, delivered)") {
+		t.Error("sendRoleCountEditor no longer reports delivery to the watchdog, so an undeliverable editor cannot be distinguished from a slow starter")
+	}
+	if strings.Count(body, "delivered = true") != 2 {
+		t.Error("delivery is not tracked per editor message — one surviving message still means the starter can confirm")
+	}
+
+	body, ok = funcBody(text, ") waitForRoleCountConfirm(")
+	if !ok {
+		t.Fatal("could not locate waitForRoleCountConfirm")
+	}
+	if !strings.Contains(body, "roleEditorUnavailableTimeout") {
+		t.Error("waitForRoleCountConfirm ignores the undeliverable-editor case")
+	}
+	// The poll must exit on phase change even with no deadline set, or a
+	// disabled timeout would leak a goroutine per game.
+	if !strings.Contains(body, "if !stillEditing {") {
+		t.Error("the poll no longer exits on phase change — with a zero timeout it would never terminate")
+	}
+	if !strings.Contains(body, "deadline.IsZero()") {
+		t.Error("a zero timeout is no longer treated as 'no deadline' — setting roleEditTimeout to 0 would fire the fallback immediately")
+	}
+}

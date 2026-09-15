@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: super-bot-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - bot-network
+
+  bot:
+    image: phuc16/super-bot:${IMAGE_TAG:-latest}
+    container_name: super-bot
+    depends_on:
+      mysql:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: production
+      DB_HOST: mysql
+      DB_PORT: 3306
+    ports:
+      - "8386:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/bot", "--health-check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - bot-network
+
+networks:
+  bot-network:
+    driver: bridge
+
+volumes:
+  mysql-data:

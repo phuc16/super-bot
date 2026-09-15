@@ -92,46 +92,6 @@ func ValidateDateTimeRangeWithTimezone(fromStr, endStr string, loc *time.Locatio
 	return from, end, nil
 }
 
-// ValidateInactivityThreshold validates the inactivity threshold
-func ValidateInactivityThreshold(days int) error {
-	if days < 7 {
-		return ValidationError{
-			Field:   "days",
-			Message: "Inactivity threshold must be at least 7 days",
-		}
-	}
-
-	if days > 90 {
-		return ValidationError{
-			Field:   "days",
-			Message: "Inactivity threshold cannot exceed 90 days",
-		}
-	}
-
-	return nil
-}
-
-// ValidateChannelID validates a Discord channel ID
-func ValidateChannelID(channelID string) error {
-	if channelID == "" {
-		return ValidationError{
-			Field:   "channel_id",
-			Message: "Channel ID cannot be empty",
-		}
-	}
-
-	// Discord snowflake IDs are numeric strings, typically 17-19 digits
-	matched, err := regexp.MatchString(`^\d{17,19}$`, channelID)
-	if err != nil || !matched {
-		return ValidationError{
-			Field:   "channel_id",
-			Message: "Invalid channel ID format",
-		}
-	}
-
-	return nil
-}
-
 // ValidateRoleID validates a Discord role ID
 func ValidateRoleID(roleID string) error {
 	if roleID == "" {

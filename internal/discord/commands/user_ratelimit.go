@@ -195,26 +195,23 @@ func formatDuration(d time.Duration) string {
 // GlobalRateLimiters holds rate limiters for different command types
 var GlobalRateLimiters = struct {
 	Export   *UserRateLimiter
-	Activity *UserRateLimiter
-	Report   *UserRateLimiter
-	Inactive *UserRateLimiter
-	Config   *UserRateLimiter
 	Help     *UserRateLimiter
+	Roast    *UserRateLimiter
+	Duel     *UserRateLimiter
+	Werewolf *UserRateLimiter
 }{
 	Export:   NewUserRateLimiter(3, 1*time.Hour),    // 3 per hour per bot-commands.md
-	Activity: NewUserRateLimiter(10, 1*time.Minute), // 10 per minute
-	Report:   NewUserRateLimiter(5, 1*time.Hour),    // 5 per hour
-	Inactive: NewUserRateLimiter(10, 1*time.Minute), // 10 per minute
-	Config:   NewUserRateLimiter(10, 1*time.Minute), // 10 per minute (admin only)
 	Help:     NewUserRateLimiter(20, 1*time.Minute), // 20 per minute (generous for help)
+	Roast:    NewUserRateLimiter(5, 1*time.Minute),  // 5 per minute (costs GPT tokens)
+	Duel:     NewUserRateLimiter(10, 1*time.Minute), // 10 per minute (no GPT cost)
+	Werewolf: NewUserRateLimiter(10, 1*time.Minute), // 10 per minute (start/status/leave)
 }
 
 // CloseAllRateLimiters closes all global rate limiters
 func CloseAllRateLimiters() {
 	GlobalRateLimiters.Export.Close()
-	GlobalRateLimiters.Activity.Close()
-	GlobalRateLimiters.Report.Close()
-	GlobalRateLimiters.Inactive.Close()
-	GlobalRateLimiters.Config.Close()
 	GlobalRateLimiters.Help.Close()
+	GlobalRateLimiters.Roast.Close()
+	GlobalRateLimiters.Duel.Close()
+	GlobalRateLimiters.Werewolf.Close()
 }

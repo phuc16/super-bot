@@ -1,4 +1,4 @@
-// Package config provides configuration management for VCG Super Bot.
+// Package config provides configuration management for Discord Super Bot.
 // It loads configuration from environment variables and validates all settings
 // on startup, failing fast if any required values are missing or invalid.
 //
@@ -53,8 +53,7 @@ type Config struct {
 	Timezone string
 
 	// Rate Limiting
-	RateLimitExportPerHour     int
-	RateLimitActivityPerMinute int
+	RateLimitExportPerHour int
 
 	// GPT
 	GPTMaxConcurrentRequests int
@@ -85,15 +84,15 @@ func Load() (*Config, error) {
 
 		// OpenAI
 		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
-		GPTModel:     getEnv("GPT_MODEL", "gpt-4-turbo-preview"),
+		GPTModel:     getEnv("GPT_MODEL", "gpt-4o-mini"),
 		GPTMaxTokens: getEnvAsInt("GPT_MAX_TOKENS", 4096),
 
 		// Database
 		DBHost:     getEnv("DB_HOST", "localhost"),
 		DBPort:     getEnv("DB_PORT", "3306"),
-		DBUser:     getEnv("DB_USER", "vcgsuperbot"),
+		DBUser:     getEnv("DB_USER", "superbot"),
 		DBPassword: getEnv("DB_PASSWORD", ""),
-		DBName:     getEnv("DB_NAME", "vcgsuperbot_dev"),
+		DBName:     getEnv("DB_NAME", "superbot_dev"),
 
 		// Application
 		AppEnv:   getEnv("APP_ENV", "development"),
@@ -102,13 +101,12 @@ func Load() (*Config, error) {
 		Timezone: getEnv("TIMEZONE", "UTC"),
 
 		// Rate Limiting
-		RateLimitExportPerHour:     getEnvAsInt("RATE_LIMIT_EXPORT_PER_HOUR", 3),
-		RateLimitActivityPerMinute: getEnvAsInt("RATE_LIMIT_ACTIVITY_PER_MINUTE", 10),
+		RateLimitExportPerHour: getEnvAsInt("RATE_LIMIT_EXPORT_PER_HOUR", 3),
 
 		// GPT
 		GPTMaxConcurrentRequests: getEnvAsInt("GPT_MAX_CONCURRENT_REQUESTS", 5),
 		GPTRequestTimeoutSeconds: getEnvAsInt("GPT_REQUEST_TIMEOUT_SECONDS", 90),
-		GPTDailyBudgetUSD:        getEnvAsFloat("GPT_DAILY_BUDGET_USD", 10.0),
+		GPTDailyBudgetUSD:        getEnvAsFloat("GPT_DAILY_BUDGET_USD", 0.034),
 
 		// Development
 		DebugMode:  getEnvAsBool("DEBUG_MODE", false),
@@ -169,9 +167,6 @@ func (c *Config) Validate() error {
 	if c.RateLimitExportPerHour < 1 || c.RateLimitExportPerHour > 100 {
 		errors = append(errors, "RATE_LIMIT_EXPORT_PER_HOUR must be between 1 and 100")
 	}
-	if c.RateLimitActivityPerMinute < 1 || c.RateLimitActivityPerMinute > 1000 {
-		errors = append(errors, "RATE_LIMIT_ACTIVITY_PER_MINUTE must be between 1 and 1000")
-	}
 	if c.GPTMaxConcurrentRequests < 1 || c.GPTMaxConcurrentRequests > 50 {
 		errors = append(errors, "GPT_MAX_CONCURRENT_REQUESTS must be between 1 and 50")
 	}
@@ -220,7 +215,7 @@ func (c *Config) Validate() error {
 // Format: user:password@tcp(host:port)/database?params
 //
 // Example output:
-// "vcgsuperbot:password@tcp(localhost:3306)/vcgsuperbot_dev?charset=utf8mb4&parseTime=True&loc=Local"
+// "superbot:password@tcp(localhost:3306)/superbot_dev?charset=utf8mb4&parseTime=True&loc=Local"
 func (c *Config) GetDSN() string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName)

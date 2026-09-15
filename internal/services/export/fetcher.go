@@ -19,13 +19,17 @@ func NewFetcher(session *discordgo.Session) *Fetcher {
 	return &Fetcher{session: session}
 }
 
-// FetchDateRange fetches messages within a date range
-func (f *Fetcher) FetchDateRange(channelID string, startTime, endTime time.Time) ([]models.DiscordMessage, error) {
+// FetchDateRange fetches messages within a date range.
+// guildID is used to resolve server nicknames; pass empty string to skip.
+func (f *Fetcher) FetchDateRange(channelID string, guildID string, startTime, endTime time.Time) ([]models.DiscordMessage, error) {
 	log.Debug().
 		Str("channel_id", channelID).
 		Time("start", startTime).
 		Time("end", endTime).
 		Msg("Fetching messages by date range")
+
+	// Pre-fetch server nicknames for better display names
+	nicknames := f.fetchNicknames(guildID)
 
 	var allMessages []models.DiscordMessage
 	var beforeID string
@@ -68,14 +72,22 @@ func (f *Fetcher) FetchDateRange(channelID string, startTime, endTime time.Time)
 				return allMessages, nil
 			}
 
+			// Skip bot messages (e.g. previous export summaries posted by this bot)
+			if msg.Author.Bot {
+				continue
+			}
+
 			// Include message if within range
 			if timestamp.After(startTime) && timestamp.Before(endTime) {
+				replyAuthor, replyContent := resolveReplyTarget(msg, nicknames)
 				allMessages = append(allMessages, models.DiscordMessage{
-					ID:        msg.ID,
-					Author:    msg.Author.Username + "#" + msg.Author.Discriminator,
-					Content:   msg.Content,
-					Timestamp: timestamp,
-					HasAttach: len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+					ID:             msg.ID,
+					Author:         resolveDisplayName(msg.Author, nicknames),
+					Content:        msg.Content,
+					Timestamp:      timestamp,
+					HasAttach:      len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+					ReplyToAuthor:  replyAuthor,
+					ReplyToContent: replyContent,
 				})
 
 				// Check if we've hit the max limit
@@ -95,6 +107,64 @@ func (f *Fetcher) FetchDateRange(channelID string, startTime, endTime time.Time)
 
 	log.Info().Int("count", len(allMessages)).Msg("Messages fetched successfully")
 	return allMessages, nil
+}
+
+// fetchNicknames returns a map of userID → server nickname for the guild.
+// Returns an empty map on error (non-fatal).
+func (f *Fetcher) fetchNicknames(guildID string) map[string]string {
+	m := make(map[string]string)
+	if guildID == "" {
+		return m
+	}
+	after := ""
+	for {
+		members, err := f.session.GuildMembers(guildID, after, 1000)
+		if err != nil || len(members) == 0 {
+			break
+		}
+		for _, mem := range members {
+			if mem.User == nil {
+				continue
+			}
+			if mem.Nick != "" {
+				m[mem.User.ID] = mem.Nick
+			}
+		}
+		if len(members) < 1000 {
+			break
+		}
+		after = members[len(members)-1].User.ID
+	}
+	return m
+}
+
+// resolveReplyTarget extracts the author and (truncated) content of the message
+// being replied to, using Discord's own reply/reference data rather than
+// inferring it from surrounding text. Returns ("", "") if not a reply.
+func resolveReplyTarget(msg *discordgo.Message, nicknames map[string]string) (author string, content string) {
+	ref := msg.ReferencedMessage
+	if ref == nil || ref.Author == nil {
+		return "", ""
+	}
+	replyContent := ref.Content
+	if len(replyContent) > 200 {
+		replyContent = replyContent[:200] + "..."
+	}
+	return resolveDisplayName(ref.Author, nicknames), replyContent
+}
+
+// resolveDisplayName picks the best human-readable name for a user:
+// server nickname > global display name > username (no # suffix, no @ prefix).
+func resolveDisplayName(u *discordgo.User, nicknames map[string]string) string {
+	if nicknames != nil {
+		if nick, ok := nicknames[u.ID]; ok && nick != "" {
+			return nick
+		}
+	}
+	if u.GlobalName != "" {
+		return u.GlobalName
+	}
+	return u.Username
 }
 
 // FetchRecentMessages fetches the last N messages (default 100)
@@ -139,12 +209,15 @@ func (f *Fetcher) FetchRecent(channelID string, limit int) ([]models.DiscordMess
 
 	var result []models.DiscordMessage
 	for _, msg := range messages {
+		replyAuthor, replyContent := resolveReplyTarget(msg, nil)
 		result = append(result, models.DiscordMessage{
-			ID:        msg.ID,
-			Author:    msg.Author.Username + "#" + msg.Author.Discriminator,
-			Content:   msg.Content,
-			Timestamp: msg.Timestamp,
-			HasAttach: len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+			ID:             msg.ID,
+			Author:         resolveDisplayName(msg.Author, nil),
+			Content:        msg.Content,
+			Timestamp:      msg.Timestamp,
+			HasAttach:      len(msg.Attachments) > 0 || len(msg.Embeds) > 0,
+			ReplyToAuthor:  replyAuthor,
+			ReplyToContent: replyContent,
 		})
 	}
 

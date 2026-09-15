@@ -1,0 +1,2480 @@
+package commands
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/rs/zerolog/log"
+)
+
+const (
+	werewolfWolfTargetID      = "ww:wolftarget:"
+	werewolfSeerCheckID       = "ww:seercheck:"
+	werewolfDoctorProtectID   = "ww:doctorprotect:"
+	werewolfHunterTargetID    = "ww:huntertarget:"
+	werewolfWitchHealID       = "ww:witchheal:"
+	werewolfWitchPoisonID     = "ww:witchpoison:"
+	werewolfWitchSkipID       = "ww:witchskip:"
+	werewolfDisruptorTargetID = "ww:disruptortarget:"
+	werewolfCupidPairID       = "ww:cupidpair:"
+
+	// nightActionWindow is the solo window shared by every non-wolf night
+	// role that acts alone — Seer, Doctor, Hunter, Disruptor, and round-1
+	// Cupid. Each is a single pick from a menu with no one to consult, so
+	// it stays tighter than the pack's window (see wolfDiscussWindowFor)
+	// and tighter than day discussion, which is where the time is better
+	// spent. Note this is not the night's total length: the night runs for
+	// the longer of this and the wolf window, so trimming it does not
+	// shorten a night in which the pack is still deliberating.
+	nightActionWindow = 60 * time.Second
+
+	// witchActionWindow is shorter than the others: she makes one decision
+	// after already knowing who was bitten, rather than coordinating with
+	// anyone. It still has to be long enough to read the bite result and
+	// choose, so it is not merely a formality.
+	witchActionWindow = 60 * time.Second
+
+	wolfDiscussBase    = 90 * time.Second
+	wolfDiscussPerWolf = 20 * time.Second
+
+	// wolfDiscussMax caps the pack's window. Without a cap the window grows
+	// with the wolf count, and since custom roles no longer enforce a
+	// wolf-faction balance floor, that count can run to nearly the whole
+	// lobby — which would push a single night+day cycle past the ceilings
+	// pinned by TestWolfThreadIdleGapStaysUnderAutoArchive and
+	// TestOneFullCycleFitsWellInsideAnInteractionTokenLifetime.
+	wolfDiscussMax = 240 * time.Second
+
+	// wolfThreadAutoArchiveMinutes is the AutoArchiveDuration Discord
+	// applies to the wolf thread (Discord only accepts 60, 1440, 4320 or
+	// 10080 — i.e. minutes). Since the thread now persists for the whole
+	// game rather than being recreated nightly, it sits idle from the end
+	// of one night's wolf activity until the next night reopens it, and
+	// must not auto-archive in between. setWolfThreadLocked also clears
+	// Archived defensively on every lock/unlock, but the window still has
+	// to be comfortably longer than a full day+night cycle — see
+	// TestWolfThreadIdleGapStaysUnderAutoArchive, which pins that.
+	wolfThreadAutoArchiveMinutes = 60
+)
+
+// wolfDiscussWindowFor returns the night-discussion window for the wolves'
+// private thread, given how many wolves are alive this round, capped at
+// wolfDiscussMax so an unusually wolf-heavy custom setup can't stretch the
+// night without bound.
+func wolfDiscussWindowFor(wolfCount int) time.Duration {
+	window := wolfDiscussBase + wolfDiscussPerWolf*time.Duration(wolfCount)
+	if window > wolfDiscussMax {
+		return wolfDiscussMax
+	}
+	return window
+}
+
+// tallyWolfVotes resolves the wolf pack's plurality vote into up to topN
+// kill targets. Targets are picked one slot at a time, highest remaining
+// vote count first. A slot only becomes genuinely ambiguous — and gets
+// dropped, ending the tally right there — when there are MORE tied
+// candidates than there are remaining slots to give them: real scarcity,
+// forcing an arbitrary pick among rivals. When the tied candidates all fit
+// within the remaining slots, there's no rivalry to arbitrate (nobody has
+// to lose to anyone else), so all of them are taken at once instead of
+// treated as a tie.
+//
+// This distinction is what makes the Wolf-Cub bonus bite (topN=2) behave
+// correctly for BOTH shapes of pack: a pack that splits 2-1 between two
+// targets already had a clear top pick and a clear, unrivaled second pick
+// (2 candidates competing for exactly... no candidates competing at all for
+// the second slot — it's the only one left), so both die; and a pack that
+// unanimously multi-selects the same 2 targets ties them 1-1 against each
+// other by raw count, but since there are exactly 2 slots for those exact 2
+// names, that's agreement, not indecision, and both die too. A true tie
+// only bites when there are more names than room — e.g. 3 wolves splitting
+// evenly across 3 names for 2 slots — which correctly still yields zero
+// kills, since picking 2 of the 3 would be arbitrary. ok is false only
+// when there were no votes at all, or the very first slot is genuinely
+// ambiguous this way.
+func tallyWolfVotes(votes map[string][]string, topN int) (targets []string, ok bool) {
+	counts := make(map[string]int)
+	for _, picks := range votes {
+		for _, target := range picks {
+			counts[target]++
+		}
+	}
+	if len(counts) == 0 {
+		return nil, false
+	}
+
+	remaining := make(map[string]int, len(counts))
+	for target, c := range counts {
+		remaining[target] = c
+	}
+
+	for len(targets) < topN && len(remaining) > 0 {
+		slotsLeft := topN - len(targets)
+		if len(remaining) <= slotsLeft {
+			// Everyone left fits in the room left — no rivalry, take them
+			// all regardless of their relative counts. Sorted (by count
+			// descending, target ID as a stable tiebreak) rather than
+			// ranged over directly — Go's map iteration order is random,
+			// and this result feeds the recap's target-label ordering and
+			// the Witch's heal-menu option order, both of which must be
+			// deterministic from one run to the next.
+			rest := make([]string, 0, len(remaining))
+			for target := range remaining {
+				rest = append(rest, target)
+			}
+			sort.Slice(rest, func(a, b int) bool {
+				if remaining[rest[a]] != remaining[rest[b]] {
+					return remaining[rest[a]] > remaining[rest[b]]
+				}
+				return rest[a] < rest[b]
+			})
+			targets = append(targets, rest...)
+			break
+		}
+
+		maxCount := 0
+		for _, c := range remaining {
+			if c > maxCount {
+				maxCount = c
+			}
+		}
+		var tied []string
+		for target, c := range remaining {
+			if c == maxCount {
+				tied = append(tied, target)
+			}
+		}
+		sort.Strings(tied) // deterministic order among equal-count candidates
+		if len(tied) > slotsLeft {
+			// More rivals than room for this pass: genuinely ambiguous,
+			// and no lower-count target can un-tie it, so stop entirely
+			// rather than continuing to a slot that would out-rank a tied
+			// rival.
+			break
+		}
+		targets = append(targets, tied...)
+		for _, t := range tied {
+			delete(remaining, t)
+		}
+	}
+
+	return targets, len(targets) > 0
+}
+
+// validWolfVotes filters raw votes down to the ones that should actually
+// count toward the kill tally: cast by a still-alive wolf, for a
+// still-alive target. A departed/lynched wolf's vote can no longer decide
+// the kill, and a vote for a target who died some other way before
+// resolution can't silently produce a no-kill with a misleading recap —
+// both are dropped here rather than reaching tallyWolfVotes at all. Does
+// NOT affect the AFK-strike check in resolveNight, which intentionally
+// still reads the raw, unfiltered votes map — a wolf who voted for a
+// since-dead target still acted and should not be struck.
+func validWolfVotes(votes map[string][]string, aliveWolves []*player, allPlayers map[string]*player) map[string][]string {
+	aliveWolfIDs := make(map[string]bool, len(aliveWolves))
+	for _, w := range aliveWolves {
+		aliveWolfIDs[w.UserID] = true
+	}
+	valid := make(map[string][]string, len(votes))
+	for voterID, picks := range votes {
+		if !aliveWolfIDs[voterID] {
+			continue
+		}
+		var validPicks []string
+		for _, targetID := range picks {
+			if target, exists := allPlayers[targetID]; exists && target.Alive {
+				validPicks = append(validPicks, targetID)
+			}
+		}
+		if len(validPicks) > 0 {
+			valid[voterID] = validPicks
+		}
+	}
+	return valid
+}
+
+// wolfVoteSummary renders the live per-target vote count and per-wolf
+// current pick, shown (and re-edited on every vote) inside the private wolf
+// thread so the pack can coordinate openly with each other — nothing here
+// is ever posted outside that thread.
+func wolfVoteSummary(votes map[string][]string, wolves, targets []*player) string {
+	labelByID := make(map[string]string, len(targets))
+	for _, t := range targets {
+		labelByID[t.UserID] = t.Label
+	}
+
+	counts := make(map[string]int)
+	for _, picks := range votes {
+		for _, targetID := range picks {
+			counts[targetID]++
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("**Số phiếu:**")
+	if len(counts) == 0 {
+		b.WriteString(" chưa có phiếu nào.")
+	} else {
+		for _, t := range targets {
+			if c := counts[t.UserID]; c > 0 {
+				fmt.Fprintf(&b, "\n%s: %d phiếu", t.Label, c)
+			}
+		}
+	}
+
+	b.WriteString("\n\n**Lượt chọn:**")
+	for _, w := range wolves {
+		pick := "Chưa chọn"
+		if picks, voted := votes[w.UserID]; voted && len(picks) > 0 {
+			labels := make([]string, 0, len(picks))
+			for _, targetID := range picks {
+				if label, ok := labelByID[targetID]; ok {
+					labels = append(labels, label)
+				} else {
+					labels = append(labels, "(mục tiêu đã chết)")
+				}
+			}
+			pick = strings.Join(labels, ", ")
+		}
+		fmt.Fprintf(&b, "\n%s: %s", w.Label, pick)
+	}
+
+	return b.String()
+}
+
+// wolfVoteMessageContent renders the wolf-thread target-select message
+// body shared by startWolfThread (initial post) and handleWolfTarget
+// (live-edited on every new vote). maxPicks is how many targets each wolf
+// may select in one go this round — 1 normally, or 1+WolfBonusBiteActiveThisRound
+// when a Wolf Cub died — and drives which instructional line is shown, so
+// the pack always knows whether tonight is a bonus round without having to
+// infer it from anything else.
+func wolfVoteMessageContent(pingText, summary string, maxPicks int) string {
+	instruction := "Chọn mục tiêu để tấn công đêm nay. Mỗi Sói chỉ được bỏ phiếu 1 lần, hãy bàn bạc trong thread trước khi chọn."
+	if maxPicks > 1 {
+		instruction = fmt.Sprintf(
+			"🐺🐺 Sói Con đã ngã xuống — đêm nay bầy Sói được cắn tối đa %d mục tiêu! Mỗi Sói chọn tối đa %d người trong một lượt (chọn 1 vẫn hợp lệ), hãy bàn bạc trong thread trước khi chọn.",
+			maxPicks, maxPicks,
+		)
+	}
+	return fmt.Sprintf("🐺 %s %s\n\n%s", pingText, instruction, summary)
+}
+
+func alivePlayersOfRole(game *werewolfGame, r role) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive && p.Role == r {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// aliveWolfBiteTargets returns everyone the wolf pack can legitimately vote
+// to bite: every alive player who isn't a voting wolf pack member. This
+// deliberately INCLUDES the Traitor (isWolf()==true but wolfVoteParticipant()
+// ==false) rather than excluding all of isWolf() — the wolves don't know
+// who the Traitor is, so if the menu silently omitted them, a pack could
+// identify the Traitor by pure elimination (public alive count minus
+// visible wolf-thread headcount minus this menu's size leaves exactly one
+// unaccounted player), defeating the role's entire point. A wolf voting
+// for the Traitor and actually killing their own hidden ally is a rare,
+// thematically-correct possibility, not a bug.
+func aliveWolfBiteTargets(game *werewolfGame) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive && !p.wolfVoteParticipant() {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// aliveWolfVoters returns every alive player who currently votes in the
+// wolf pack's nightly kill vote — Werewolf, Wolf Cub, and (once converted)
+// Cursed Wolf, but never Traitor. Use this instead of
+// alivePlayersOfRole(game, roleWerewolf) for wolf-thread membership,
+// voting validation, and AFK-gating; alivePlayersOfRole itself is still
+// correct for anything that genuinely means "exactly roleWerewolf" (there
+// is no such use left in this file after this task).
+func aliveWolfVoters(game *werewolfGame) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive && p.wolfVoteParticipant() {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// aliveExcept returns every alive player in game except the one identified
+// by excludeID (typically the acting player themself). Order follows
+// game.JoinOrder, same as the other alive-roster helpers in this file.
+func aliveExcept(game *werewolfGame, excludeID string) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive && p.UserID != excludeID {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// alivePlayers returns every alive player in game, self included — used
+// by Cupid's target list, since Cupid is explicitly allowed to pair
+// themself with someone else (the standard Ultimate Werewolf rule: "they
+// can choose themselves or anyone else").
+func alivePlayers(game *werewolfGame) []*player {
+	var result []*player
+	for _, id := range game.JoinOrder {
+		p := game.Players[id]
+		if p.Alive {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// hunterRevengeStep checks whether the player who just died (deadID) was
+// the Hunter with a locked-in target; if so, kills that target too
+// (unless already dead) and returns a copy of them. Returns nil if no
+// revenge-kill happens.
+//
+// Single-hop by design: applyDeathChains is the sole consumer and loops
+// this alongside applyLoverDeathChain, so a revenge kill that itself
+// triggers another chain is handled there rather than here.
+//
+// Note game.HunterTarget is a single game-scoped field, not per-Hunter.
+// With today's ratio tables and the manual role-pick cap that's moot
+// (exactly one Hunter is ever dealt), but if a second were ever dealt
+// they would share the one target: the already-dead guard above makes the
+// second resolution a safe no-op rather than a mis-kill.
+//
+// Must be called with cmd.mu held.
+// clearStaleHunterTarget drops the Hunter's standing pick once that target
+// is no longer alive, returning a snapshot of the Hunter so the caller can
+// tell them to choose again (nil when there is nothing to say).
+//
+// The Hunter pre-commits a target and it persists across rounds, so a pick
+// made on night 2 can quietly become worthless the moment that player is
+// lynched on day 3 — hunterRevengeStep bails on a dead target, so the
+// Hunter dies later having effectively had no ability at all, and never
+// learns why. Clearing the pick here means their next night prompt starts
+// empty and the DM tells them the gun is unloaded.
+//
+// This does NOT recover the shot in every case: a Hunter killed before the
+// next night still gets no re-pick. Closing that gap needs a death-time
+// prompt, which would have to block the death chain (see HunterTarget).
+//
+// Returns nil when the Hunter is themself dead — including the ordinary
+// case where their own revenge kill is what just emptied the pick. Must be
+// called with cmd.mu held, AFTER the round's deaths have been applied.
+func clearStaleHunterTarget(game *werewolfGame) *player {
+	if game.HunterTarget == "" {
+		return nil
+	}
+	if target, ok := game.Players[game.HunterTarget]; ok && target.Alive {
+		return nil
+	}
+	game.HunterTarget = ""
+	hunters := alivePlayersOfRole(game, roleHunter)
+	if len(hunters) == 0 {
+		return nil
+	}
+	return copyPlayer(hunters[0])
+}
+
+// dmHunterTargetLost tells a living Hunter their standing pick is gone.
+// Called with a copyPlayer snapshot, after cmd.mu is released.
+func dmHunterTargetLost(s *discordgo.Session, p *player) {
+	if p == nil {
+		return
+	}
+	dm, err := s.UserChannelCreate(p.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to open DM for hunter target-lost notice")
+		return
+	}
+	if _, err := s.ChannelMessageSend(dm.ID, "🏹 Mục tiêu bạn đã chỉ định không còn sống, nên bạn đang **không có mục tiêu nào**. Hãy chọn lại trong đêm tới — nếu bạn chết trước khi chọn lại thì sẽ không có ai chết theo."); err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to DM hunter target-lost notice")
+	}
+}
+
+func hunterRevengeStep(game *werewolfGame, deadID string) *player {
+	dead, ok := game.Players[deadID]
+	if !ok || dead.Role != roleHunter {
+		return nil
+	}
+	targetID := game.HunterTarget
+	if targetID == "" {
+		return nil
+	}
+	target, exists := game.Players[targetID]
+	if !exists || !target.Alive {
+		return nil
+	}
+	target.Alive = false
+	return copyPlayer(target)
+}
+
+// applyLoverDeathChain checks whether the player who just died (deadID)
+// has a living lover via game.LoverIDs; if so, kills that lover too and
+// returns a copy of them. Single-hop by design (spec §4h: "chains only
+// one level deep" — LoverIDs only ever names the original two players, so
+// there is nothing further to chain even if this were looped). Must be
+// called with cmd.mu held.
+func applyLoverDeathChain(game *werewolfGame, deadID string) *player {
+	if deadID == "" {
+		return nil
+	}
+	var partnerID string
+	switch deadID {
+	case game.LoverIDs[0]:
+		partnerID = game.LoverIDs[1]
+	case game.LoverIDs[1]:
+		partnerID = game.LoverIDs[0]
+	default:
+		return nil
+	}
+	if partnerID == "" {
+		return nil
+	}
+	partner, exists := game.Players[partnerID]
+	if !exists || !partner.Alive {
+		return nil
+	}
+	partner.Alive = false
+	return copyPlayer(partner)
+}
+
+type chainedDeathReason int
+
+const (
+	chainedDeathHunterRevenge chainedDeathReason = iota
+	chainedDeathLover
+)
+
+// chainedDeath pairs a copy-snapshot of a chain-killed player with why
+// they died, so callers can render the right recap/announcement line.
+type chainedDeath struct {
+	Player *player
+	Reason chainedDeathReason
+}
+
+// applyDeathChains resolves every secondary death cascading from deadID:
+// Hunter's revenge-kill and Cupid's lover-death, repeating until a pass
+// produces no new deaths. A revenge-killed or lover-killed player can
+// themselves be a Hunter with a locked target, or have a living lover, so
+// both chain types must be checked at every hop.
+//
+// This is the single entry point every death-application site uses
+// (resolveVote, checkAndHandleGameEnd, handleLeave,
+// finalizeNightResolution) — there is deliberately no per-mechanic
+// variant, so a new chain type only has to be added here to apply
+// everywhere. Must be called with cmd.mu held.
+func applyDeathChains(game *werewolfGame, deadID string) []chainedDeath {
+	var result []chainedDeath
+	seen := map[string]bool{deadID: true}
+	queue := []string{deadID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if hp := hunterRevengeStep(game, id); hp != nil && !seen[hp.UserID] {
+			seen[hp.UserID] = true
+			result = append(result, chainedDeath{Player: hp, Reason: chainedDeathHunterRevenge})
+			queue = append(queue, hp.UserID)
+		}
+		if lp := applyLoverDeathChain(game, id); lp != nil && !seen[lp.UserID] {
+			seen[lp.UserID] = true
+			result = append(result, chainedDeath{Player: lp, Reason: chainedDeathLover})
+			queue = append(queue, lp.UserID)
+		}
+	}
+	return result
+}
+
+// splitChainedDeaths partitions applyDeathChains's result back into the
+// two announcement/recap shapes the existing call sites already expect
+// (hunterRevengeLine vs loverDeathLine, HunterRevengeLabels vs
+// LoverDeathLabels).
+func splitChainedDeaths(chained []chainedDeath) (hunterRevenged, loverDeaths []*player) {
+	for _, c := range chained {
+		switch c.Reason {
+		case chainedDeathHunterRevenge:
+			hunterRevenged = append(hunterRevenged, c.Player)
+		case chainedDeathLover:
+			loverDeaths = append(loverDeaths, c.Player)
+		}
+	}
+	return hunterRevenged, loverDeaths
+}
+
+// wolfBiteOutcome is what happens to one wolf-vote target at resolution
+// time.
+type wolfBiteOutcome int
+
+const (
+	wolfBiteSpare wolfBiteOutcome = iota
+	wolfBiteKill
+	wolfBiteConvert
+)
+
+// resolveWolfBiteOutcome decides a single target's fate: spared (Doctor
+// protection or Witch heal covered them — no death, no conversion),
+// killed (the ordinary case), or converted (a not-saved Cursed Wolf
+// survives by flipping to wolf-faction instead of dying — spec §4c). Pure
+// — callers apply the actual Alive/Faction mutation themselves.
+func resolveWolfBiteOutcome(targetRole role, saved bool) wolfBiteOutcome {
+	switch {
+	case saved:
+		return wolfBiteSpare
+	case targetRole == roleCursedWolf:
+		return wolfBiteConvert
+	default:
+		return wolfBiteKill
+	}
+}
+
+// hunterRevengeLine renders the shared announcement line used wherever a
+// Hunter's locked-in target dies alongside them — resolveVote, handleLeave,
+// and announceHunterRevenge.
+// hunterRevengeLine names the mechanism ("vì Thợ Săn") only when
+// revealOnDeath is true — that phrase retroactively reveals the Hunter
+// role of whoever died immediately before it in the same result message,
+// which must respect the host's reveal-on-death:false choice exactly like
+// every other role-naming death line already does. Reveal-off uses the
+// same neutral wording loverDeathLine falls back to, so even the fallback
+// text itself doesn't hint at which mechanism caused the chained death.
+func hunterRevengeLine(p *player, revealOnDeath bool) string {
+	if !revealOnDeath {
+		return fmt.Sprintf("💀 **%s** cũng qua đời.", p.Label)
+	}
+	return fmt.Sprintf("🏹 **%s** cũng chết theo vì Thợ Săn.", p.Label)
+}
+
+// loverDeathLine renders the shared announcement line for a lover-death,
+// mirroring hunterRevengeLine's role (and its revealOnDeath gating) in the
+// same call sites — naming "vì mất người yêu" outs both the pairing and
+// that a Cupid is in play, which must respect reveal-on-death:false too.
+func loverDeathLine(p *player, revealOnDeath bool) string {
+	if !revealOnDeath {
+		return fmt.Sprintf("💀 **%s** cũng qua đời.", p.Label)
+	}
+	return fmt.Sprintf("💔 **%s** cũng chết theo vì mất người yêu.", p.Label)
+}
+
+// applyWolfCubBonusBiteFlag arms one extra game.WolfBonusBiteNextNight
+// target per Wolf Cub found among the given just-died player IDs. Additive
+// — never resets the counter, only increments it — so every
+// death-application site (night kill/poison/Hunter-revenge, day lynch, AFK
+// removal, voluntary leave) can call it independently after applying its
+// own deaths, in any order, without needing to coordinate with the others,
+// and so 2+ Wolf Cubs dying in the same round (possible in a custom-roles
+// game — Wolf Cub has no 1-per-game cap) compound into a 3+-target bite
+// instead of silently capping at 2. Must be called with cmd.mu held.
+func applyWolfCubBonusBiteFlag(game *werewolfGame, deadIDs []string) {
+	for _, id := range deadIDs {
+		if p, ok := game.Players[id]; ok && p.Role == roleWolfCub {
+			game.WolfBonusBiteNextNight++
+		}
+	}
+}
+
+// playersByIDs looks up each ID in game.Players, skipping any that don't
+// exist (shouldn't happen — every ID here came from game.Players itself
+// moments earlier — but this keeps the lookup total rather than panicking
+// on a theoretical race). Must be called with cmd.mu held; the returned
+// pointers are live and must be copyPlayer'd before escaping the lock.
+func playersByIDs(game *werewolfGame, ids []string) []*player {
+	var result []*player
+	for _, id := range ids {
+		if p, ok := game.Players[id]; ok {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func targetSelectMenu(customID, placeholder string, targets []*player) []discordgo.MessageComponent {
+	options := make([]discordgo.SelectMenuOption, 0, len(targets))
+	for _, p := range targets {
+		options = append(options, discordgo.SelectMenuOption{
+			Label: truncateLabel(p.Label),
+			Value: p.UserID,
+		})
+	}
+	minValues := 1
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					MenuType:    discordgo.StringSelectMenu,
+					CustomID:    customID,
+					Placeholder: placeholder,
+					Options:     options,
+					MinValues:   &minValues,
+					MaxValues:   1,
+				},
+			},
+		},
+	}
+}
+
+// wolfTargetSelectMenu is targetSelectMenu's multi-pick variant, used only
+// for the wolf-vote menu: MinValues stays 1 (a wolf may still just name one
+// target), but MaxValues follows maxPicks so a Wolf-Cub bonus-bite round
+// lets each wolf name multiple targets in the same select instead of
+// voting once each and relying purely on tally math to surface a second
+// kill. Clamped to len(targets) since Discord rejects a MaxValues above
+// the option count.
+func wolfTargetSelectMenu(customID, placeholder string, targets []*player, maxPicks int) []discordgo.MessageComponent {
+	options := make([]discordgo.SelectMenuOption, 0, len(targets))
+	for _, p := range targets {
+		options = append(options, discordgo.SelectMenuOption{
+			Label: truncateLabel(p.Label),
+			Value: p.UserID,
+		})
+	}
+	minValues := 1
+	maxValues := maxPicks
+	if maxValues < minValues {
+		maxValues = minValues
+	}
+	if maxValues > len(targets) {
+		maxValues = len(targets)
+	}
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					MenuType:    discordgo.StringSelectMenu,
+					CustomID:    customID,
+					Placeholder: placeholder,
+					Options:     options,
+					MinValues:   &minValues,
+					MaxValues:   maxValues,
+				},
+			},
+		},
+	}
+}
+
+// cupidPairSelectMenu builds Cupid's round-1 pairing select — a single
+// multi-select requiring exactly 2 picks, simpler than the reference's
+// sequential click-twice UX and equivalent in outcome.
+func cupidPairSelectMenu(customID, placeholder string, targets []*player) []discordgo.MessageComponent {
+	options := make([]discordgo.SelectMenuOption, 0, len(targets))
+	for _, p := range targets {
+		options = append(options, discordgo.SelectMenuOption{
+			Label: truncateLabel(p.Label),
+			Value: p.UserID,
+		})
+	}
+	minValues := 2
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					MenuType:    discordgo.StringSelectMenu,
+					CustomID:    customID,
+					Placeholder: placeholder,
+					Options:     options,
+					MinValues:   &minValues,
+					MaxValues:   2,
+				},
+			},
+		},
+	}
+}
+
+func (cmd *WerewolfCommand) dmCupidPrompt(s *discordgo.Session, channelID string, cupid *player, targets []*player) {
+	dm, err := s.UserChannelCreate(cupid.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for cupid")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "💘 Chọn đúng 2 người để ghép thành một cặp đôi — bạn có thể chọn cả chính mình. Đây là lựa chọn một lần duy nhất, không thể đổi sau khi xác nhận.",
+		Components: cupidPairSelectMenu(werewolfCupidPairID+channelID, "Chọn 2 người", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM cupid prompt")
+	}
+}
+
+func (cmd *WerewolfCommand) handleCupidPair(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) != 2 {
+		respondComponentEphemeral(s, i, "Phải chọn đúng 2 người.")
+		return
+	}
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.Round != 1 {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isCupid := game.Players[clickerID]
+	if !isCupid || clicker.Role != roleCupid || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Thần Tình Yêu còn sống mới được ghép đôi.")
+		return
+	}
+	if game.LoverIDs[0] != "" || game.LoverIDs[1] != "" {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã chọn cặp đôi rồi.")
+		return
+	}
+	target1, exists1 := game.Players[values[0]]
+	target2, exists2 := game.Players[values[1]]
+	if !exists1 || !target1.Alive || !exists2 || !target2.Alive || values[0] == values[1] {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	game.LoverIDs = [2]string{values[0], values[1]}
+	label1, label2 := target1.Label, target2.Label
+	role1, role2 := target1.Role, target2.Role
+	id1, id2 := values[0], values[1]
+	cmd.mu.Unlock()
+
+	respondComponentEphemeral(s, i, fmt.Sprintf("💘 Đã ghép: %s ❤️ %s.", label1, label2))
+	announceRoleDecided(s, channelID, "💘 Thần Tình Yêu")
+
+	// Lovers learn each other's full identity, including role — the
+	// standard Cupid rule bonds them as allies who need to coordinate, not
+	// just two names who happen to be linked; they still don't know who
+	// Cupid is (this DM never says who paired them). No in-bot messaging
+	// channel is provided between the two — nothing here creates one, they
+	// already have ordinary Discord DMs to each other if they want to talk.
+	for _, pair := range []struct {
+		toID, partnerLabel string
+		partnerRole        role
+	}{
+		{id1, label2, role2},
+		{id2, label1, role1},
+	} {
+		dm, err := s.UserChannelCreate(pair.toID)
+		if err != nil {
+			log.Error().Err(err).Str("user_id", pair.toID).Msg("werewolf: failed to open DM for lover reveal")
+			continue
+		}
+		if _, err := s.ChannelMessageSend(dm.ID, fmt.Sprintf("💘 Thần Tình Yêu đã ghép bạn với **%s** (%s). Hai bạn không thể trò chuyện trực tiếp với nhau qua bot. Nếu một trong hai người chết, người còn lại cũng chết theo.", pair.partnerLabel, pair.partnerRole.label())); err != nil {
+			log.Error().Err(err).Str("user_id", pair.toID).Msg("werewolf: failed to DM lover reveal")
+		}
+	}
+}
+
+// copyPlayer returns a fresh *player holding a value copy of p, safe to read
+// without cmd.mu held — unlike p itself, which handleLeave (and other
+// handlers) can mutate concurrently at any time.
+func copyPlayer(p *player) *player {
+	cp := *p
+	return &cp
+}
+
+func copyPlayers(ps []*player) []*player {
+	out := make([]*player, len(ps))
+	for idx, p := range ps {
+		out[idx] = copyPlayer(p)
+	}
+	return out
+}
+
+func idsOf(ps []*player) []string {
+	ids := make([]string, len(ps))
+	for idx, p := range ps {
+		ids[idx] = p.UserID
+	}
+	return ids
+}
+
+// runNightPhase resets this round's night state, opens the wolf thread and
+// seer/doctor DMs, waits for actions (or the timer), then resolves the night.
+func (cmd *WerewolfCommand) runNightPhase(s *discordgo.Session, channelID string, seq uint64) {
+	var (
+		gameFound        bool
+		round            int
+		summary          string
+		actingRolesLine  string
+		aliveThreadID    string
+		wolves           []*player
+		nonWolfTargets   []*player
+		seer             *player
+		seerTargets      []*player
+		doctor           *player
+		doctorTargets    []*player
+		hunter           *player
+		hunterTargets    []*player
+		disruptor        *player
+		disruptorTargets []*player
+		cupid            *player
+		cupidTargets     []*player
+		traitorDM        *wolfRosterDM
+	)
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+		game.Phase = phaseNight
+		game.Round++
+		// Snapshot-and-clear right at night-open: this round's picker and
+		// tally both read WolfBonusBiteActiveThisRound, never the live
+		// counter, so a Wolf Cub death arriving mid-round (e.g. via
+		// /werewolf leave, which permits leaving during phaseNight) arms
+		// WolfBonusBiteNextNight for the round AFTER this one instead of
+		// retroactively changing the bonus for the vote already open.
+		game.WolfBonusBiteActiveThisRound = game.WolfBonusBiteNextNight
+		game.WolfBonusBiteNextNight = 0
+		game.WolfVotes = make(map[string][]string)
+		game.SeerActed = false
+		game.SeerTarget = ""
+		game.SeerResult = roleVillager
+		game.DoctorProtect = ""
+		game.WitchSaveTarget = ""
+		game.WitchPoisonTarget = ""
+		game.WitchActedThisRound = false
+		game.WitchDidSomethingThisRound = false
+		game.WitchPromptedThisRound = false
+		game.WitchHealableTargetIDs = nil
+		game.HunterActedThisRound = false
+		game.DisruptorTarget = ""
+		game.DisruptorActedThisRound = false
+		game.NightActionsClosed = false
+		game.History = append(game.History, roundLog{Round: game.Round})
+
+		round = game.Round
+		summary = aliveDeadSummary(game)
+		actingRolesLine = nightActingRolesPhrase(nightActingRoles(game, round))
+		aliveThreadID = game.AliveThreadID
+		wolves = copyPlayers(aliveWolfVoters(game))
+		nonWolfTargets = copyPlayers(aliveWolfBiteTargets(game))
+
+		if seers := alivePlayersOfRole(game, roleSeer); len(seers) > 0 {
+			seer = copyPlayer(seers[0])
+			for _, id := range game.JoinOrder {
+				p := game.Players[id]
+				if p.Alive && p.UserID != seer.UserID {
+					seerTargets = append(seerTargets, copyPlayer(p))
+				}
+			}
+		}
+
+		if doctors := alivePlayersOfRole(game, roleDoctor); len(doctors) > 0 {
+			doctor = copyPlayer(doctors[0])
+			lastPick := game.DoctorLastPick
+			// Excludes the Doctor's own ID, not just lastPick: the standard
+			// Doctor cannot self-protect at all (unlike Cupid's explicitly
+			// documented self-pick exception) — without this, only the
+			// "can't repeat last night's pick" rule applied, letting the
+			// Doctor self-protect every other night indefinitely.
+			for _, id := range game.JoinOrder {
+				p := game.Players[id]
+				if p.Alive && p.UserID != lastPick && p.UserID != doctor.UserID {
+					doctorTargets = append(doctorTargets, copyPlayer(p))
+				}
+			}
+		}
+
+		if hunters := alivePlayersOfRole(game, roleHunter); len(hunters) > 0 {
+			hunter = copyPlayer(hunters[0])
+			hunterTargets = copyPlayers(aliveExcept(game, hunter.UserID))
+		}
+
+		if disruptors := alivePlayersOfRole(game, roleDisruptor); len(disruptors) > 0 {
+			disruptor = copyPlayer(disruptors[0])
+			disruptorTargets = copyPlayers(aliveExcept(game, disruptor.UserID))
+		}
+
+		if game.Round == 1 {
+			if cupids := alivePlayersOfRole(game, roleCupid); len(cupids) > 0 {
+				cupid = copyPlayer(cupids[0])
+				cupidTargets = copyPlayers(alivePlayers(game))
+			}
+		}
+
+		traitorDM = traitorRosterDM(game)
+	}()
+	if !gameFound {
+		return
+	}
+	setAliveThreadLocked(s, aliveThreadID, true)
+	cmd.sendTraitorRosterDM(s, traitorDM)
+
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         fmt.Sprintf("🌙 **Đêm %d bắt đầu.** %s\n\n%s", round, actingRolesLine, summary),
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to post night announcement")
+	}
+
+	cmd.startWolfThread(s, channelID, round, wolves, nonWolfTargets, seq)
+	if seer != nil {
+		cmd.dmSeerPrompt(s, channelID, seer, seerTargets)
+	}
+	if doctor != nil {
+		cmd.dmDoctorPrompt(s, channelID, doctor, doctorTargets)
+	}
+	if hunter != nil {
+		cmd.dmHunterPrompt(s, channelID, hunter, hunterTargets)
+	}
+	if disruptor != nil {
+		cmd.dmDisruptorPrompt(s, channelID, disruptor, disruptorTargets)
+	}
+	if cupid != nil {
+		cmd.dmCupidPrompt(s, channelID, cupid, cupidTargets)
+	}
+
+	totalWindow := nightActionWindow
+	if w := wolfDiscussWindowFor(len(wolves)); len(wolves) > 0 && w > totalWindow {
+		totalWindow = w
+	}
+	deadline := time.Now().Add(totalWindow)
+	cmd.waitForNightActions(s, channelID, deadline, totalWindow, seq)
+
+	cmd.resolveNight(s, channelID, seq)
+}
+
+// setWolfThreadLocked locks or unlocks the persistent wolf thread — locked
+// during the day/vote (via runDayDiscuss) so the pack can't keep
+// coordinating there once night ends, unlocked (and unarchived, in case a
+// long day window let Discord auto-archive it) each time startWolfThread
+// reopens it for a new night. Locking only blocks members without
+// MANAGE_THREADS from posting; it does not hide the thread or its history,
+// so wolves can still read back over past nights, they just can't add to it
+// until night returns. No-op if threadID is empty (no wolf thread exists
+// yet, or the game has none — e.g. an all-Traitor edge case is not
+// currently reachable, but this stays defensive regardless).
+func setWolfThreadLocked(s *discordgo.Session, threadID string, locked bool) {
+	if threadID == "" {
+		return
+	}
+	archived := false
+	if _, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{Locked: &locked, Archived: &archived}); err != nil {
+		log.Error().Err(err).Str("thread_id", threadID).Bool("locked", locked).Msg("werewolf: failed to set wolf thread lock state")
+	}
+}
+
+// startWolfThread and the DM prompts below all take pre-snapshotted player
+// data (copyPlayer'd under cmd.mu by the caller) rather than the live
+// *werewolfGame — handleLeave can mutate live player/game state concurrently
+// at any time during the night, so these must not read it unguarded.
+//
+// The wolf thread is created once and reused for every night of the game
+// (resolveNight no longer deletes it) so the pack keeps its chat history
+// round to round instead of starting from a blank thread every night — only
+// game-end/cancel/force-stop paths delete it now, same lifecycle as the
+// alive-discussion thread. Reusing means each night's setup here also has
+// to (1) defensively unarchive, in case a long day-discuss window let
+// Discord auto-archive it, and (2) sweep out anyone who died since the
+// thread was last opened — Discord doesn't auto-remove thread members on
+// death, so without this a dead wolf would keep read/post access to the
+// pack's ongoing chat.
+func (cmd *WerewolfCommand) startWolfThread(s *discordgo.Session, channelID string, round int, wolves, targets []*player, seq uint64) {
+	if len(wolves) == 0 {
+		return
+	}
+
+	var existingThreadID string
+	var deadWolfIDs []string
+	maxPicks := 1
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		g := cmd.gameIfCurrent(channelID, seq)
+		if g == nil {
+			return
+		}
+		existingThreadID = g.WolfThreadID
+		maxPicks = 1 + g.WolfBonusBiteActiveThisRound
+		for _, p := range g.Players {
+			// Gated on WolfThreadMemberIDs, not Faction: a wolf-faction
+			// player who was never actually added (the Traitor never
+			// joins; a Cursed Wolf can convert and die before its first
+			// wolf night) would otherwise be "removed" from a thread they
+			// were never in, every remaining night — which is exactly the
+			// repeat-forever behavior WolfThreadRemovedIDs exists to stop.
+			// The Faction check is redundant now, since only wolf voters
+			// are ever added in the first place.
+			if !p.Alive && g.WolfThreadMemberIDs[p.UserID] && !g.WolfThreadRemovedIDs[p.UserID] {
+				deadWolfIDs = append(deadWolfIDs, p.UserID)
+			}
+		}
+	}()
+
+	threadID := existingThreadID
+	if threadID == "" {
+		thread, err := s.ThreadStartComplex(channelID, &discordgo.ThreadStart{
+			Name:                "🐺 Bàn Sói",
+			Type:                discordgo.ChannelTypeGuildPrivateThread,
+			AutoArchiveDuration: wolfThreadAutoArchiveMinutes,
+			Invitable:           false,
+		})
+		if err != nil {
+			log.Error().Err(err).Msg("werewolf: failed to create wolf thread, falling back to independent DMs")
+			cmd.dmWolvesIndependently(s, channelID, wolves, targets, maxPicks)
+			return
+		}
+		threadID = thread.ID
+		stillCurrent := false
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+				g.WolfThreadID = threadID
+				stillCurrent = true
+			}
+		}()
+		if !stillCurrent {
+			// The game was force-stopped/cancelled/ended in the window
+			// between creating this thread and re-acquiring the lock to
+			// record it — nothing else holds this ID (it was never written
+			// to game state), so it would otherwise leak as an orphaned
+			// thread in the guild forever. Delete it here instead.
+			if _, err := s.ChannelDelete(threadID); err != nil {
+				log.Error().Err(err).Str("thread_id", threadID).Msg("werewolf: failed to delete orphaned wolf thread after game ended mid-creation")
+			}
+			return
+		}
+	} else {
+		setWolfThreadLocked(s, threadID, false)
+		var removedIDs []string
+		for _, id := range deadWolfIDs {
+			if err := s.ThreadMemberRemove(threadID, id); err != nil {
+				log.Error().Err(err).Str("user_id", id).Msg("werewolf: failed to remove dead wolf from thread")
+				continue
+			}
+			removedIDs = append(removedIDs, id)
+		}
+		if len(removedIDs) > 0 {
+			// Recorded only on success (not attempted-and-failed) so a
+			// transient API error still gets retried next night — this is
+			// purely to stop re-attempting (and re-logging an error for) a
+			// removal that already succeeded, which would otherwise repeat
+			// every remaining night of the game for every wolf who ever died.
+			func() {
+				cmd.mu.Lock()
+				defer cmd.mu.Unlock()
+				if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+					if g.WolfThreadRemovedIDs == nil {
+						// Defensive: the only production constructor
+						// (handleStart) always initializes this map, but
+						// nothing enforces that for a werewolfGame{} built
+						// elsewhere (e.g. a future test), and this write
+						// would otherwise panic on a nil map.
+						g.WolfThreadRemovedIDs = make(map[string]bool)
+					}
+					for _, id := range removedIDs {
+						g.WolfThreadRemovedIDs[id] = true
+					}
+				}
+			}()
+		}
+	}
+
+	var addedIDs []string
+	for _, w := range wolves {
+		if err := s.ThreadMemberAdd(threadID, w.UserID); err != nil {
+			log.Error().Err(err).Str("user_id", w.UserID).Msg("werewolf: failed to add wolf to thread")
+			continue
+		}
+		addedIDs = append(addedIDs, w.UserID)
+	}
+	if len(addedIDs) > 0 {
+		// Recorded only on SUCCESS, so the dead-wolf sweep above never
+		// tries to remove someone who was never actually a member (and a
+		// failed add stays eligible for a retry on a later night, when
+		// this same loop runs again for a still-alive wolf).
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			g := cmd.gameIfCurrent(channelID, seq)
+			if g == nil {
+				return
+			}
+			if g.WolfThreadMemberIDs == nil {
+				// Defensive, matching the WolfThreadRemovedIDs guard below:
+				// handleStart always initializes this, but a werewolfGame{}
+				// built elsewhere (e.g. a future test) would panic here.
+				g.WolfThreadMemberIDs = make(map[string]bool)
+			}
+			for _, id := range addedIDs {
+				g.WolfThreadMemberIDs[id] = true
+			}
+		}()
+	}
+
+	pingText, allowedMentions := pingOnce(idsOf(wolves))
+	content := wolfVoteMessageContent(pingText, wolfVoteSummary(nil, wolves, targets), maxPicks)
+	msg, err := s.ChannelMessageSendComplex(threadID, &discordgo.MessageSend{
+		Content:         fmt.Sprintf("**Đêm %d**\n%s", round, content),
+		Components:      wolfTargetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets, maxPicks),
+		AllowedMentions: allowedMentions,
+	})
+	if err != nil {
+		// Same requirement as a failed thread CREATION (handled above):
+		// the pack must end up with a picker somewhere, or they cast no
+		// votes, every alive wolf takes an AFK strike, and two such nights
+		// auto-eliminate the whole pack — ending the game with no player
+		// input. Only thread creation had a fallback before; a failure to
+		// post INTO an existing thread (transient API error, or a thread a
+		// mod deleted out from under us) left them with nothing, and on
+		// round 2+ the creation-failure path is unreachable by definition
+		// since the thread already exists.
+		log.Error().Err(err).Msg("werewolf: failed to post wolf target select, falling back to independent DMs")
+		cmd.dmWolvesIndependently(s, channelID, wolves, targets, maxPicks)
+		return
+	}
+
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		if g := cmd.gameIfCurrent(channelID, seq); g != nil {
+			g.WolfTargetMessageID = msg.ID
+		}
+	}()
+}
+
+// dmWolvesIndependently is the fallback when the wolf thread can't be
+// created: each wolf gets the same target-picker in their own DM instead.
+// Votes are locked once cast — handleWolfTarget rejects any further pick
+// from a wolf who has already voted this round.
+func (cmd *WerewolfCommand) dmWolvesIndependently(s *discordgo.Session, channelID string, wolves, targets []*player, maxPicks int) {
+	promptText := "🐺 Chọn mục tiêu để tấn công đêm nay."
+	if maxPicks > 1 {
+		promptText = fmt.Sprintf("🐺🐺 Sói Con đã ngã xuống — đêm nay bạn được chọn tối đa %d mục tiêu (chọn 1 vẫn hợp lệ).", maxPicks)
+	}
+	for _, w := range wolves {
+		dm, err := s.UserChannelCreate(w.UserID)
+		if err != nil {
+			log.Error().Err(err).Str("user_id", w.UserID).Msg("werewolf: failed to open DM for wolf fallback")
+			continue
+		}
+		if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+			Content:    promptText,
+			Components: wolfTargetSelectMenu(werewolfWolfTargetID+channelID, "Chọn mục tiêu", targets, maxPicks),
+		}); err != nil {
+			log.Error().Err(err).Str("user_id", w.UserID).Msg("werewolf: failed to DM wolf fallback prompt")
+		}
+	}
+}
+
+func (cmd *WerewolfCommand) dmSeerPrompt(s *discordgo.Session, channelID string, seer *player, targets []*player) {
+	dm, err := s.UserChannelCreate(seer.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for seer")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "🔮 Chọn một người để soi.",
+		Components: targetSelectMenu(werewolfSeerCheckID+channelID, "Chọn người để soi", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM seer prompt")
+	}
+}
+
+func (cmd *WerewolfCommand) dmDoctorPrompt(s *discordgo.Session, channelID string, doctor *player, targets []*player) {
+	dm, err := s.UserChannelCreate(doctor.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for doctor")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "💉 Chọn một người để bảo vệ đêm nay (không được trùng người đêm trước).",
+		Components: targetSelectMenu(werewolfDoctorProtectID+channelID, "Chọn người để bảo vệ", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM doctor prompt")
+	}
+}
+
+// dmHunterPrompt sends the Hunter their revenge-target picker for THIS
+// night. The pick is pre-committed and standing: it persists across rounds
+// and fires whenever the Hunter later dies, including during the day — but
+// it can only be SET or CHANGED inside a night window, since
+// handleHunterTarget rejects anything outside phaseNight (and anything
+// after NightActionsClosed within a night). An earlier version of this
+// comment claimed the pick could be made "at any time while alive", which
+// misdescribed the handler and matched a since-corrected line in
+// /help werewolf.
+//
+// NOTE: canonical Ultimate Werewolf instead has the Hunter choose only at
+// the moment they die, with full information about who's alive right then
+// — this project deliberately uses a standing, pre-committed pick instead
+// (see HunterTarget's doc comment). Not an oversight; a design decision
+// from an earlier planning pass, kept as-is on a later review pass.
+func (cmd *WerewolfCommand) dmHunterPrompt(s *discordgo.Session, channelID string, hunter *player, targets []*player) {
+	dm, err := s.UserChannelCreate(hunter.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for hunter")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "🏹 Chọn người bạn muốn chỉ định — nếu bạn chết (bất kỳ lý do gì, kể cả ban ngày), người này sẽ chết theo. Lưu ý: chỉ đổi được trong đêm; sang ban ngày thì lựa chọn bị khoá lại, muốn đổi phải chờ đêm sau.",
+		Components: targetSelectMenu(werewolfHunterTargetID+channelID, "Chỉ định mục tiêu", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM hunter prompt")
+	}
+}
+
+// dmCursedWolfConverted tells a Cursed Wolf who survived a bite that they
+// just flipped to the wolf faction. Nothing else in the game tells them:
+// the public night result deliberately never names a conversion, and their
+// original role-reveal DM described them as a plain villager. Called with
+// a copyPlayer snapshot, after cmd.mu is released.
+func dmCursedWolfConverted(s *discordgo.Session, p *player) {
+	dm, err := s.UserChannelCreate(p.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to open DM for converted cursed wolf")
+		return
+	}
+	if _, err := s.ChannelMessageSend(dm.ID, "🐺✨ Bạn đã bị Sói cắn đêm qua nhưng sống sót — bạn giờ là **Sói Nguyền**, thuộc phe Sói! Từ đêm sau bạn sẽ vào thread riêng của bầy Sói và bỏ phiếu cắn cùng họ."); err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to DM cursed wolf conversion notice")
+	}
+}
+
+// dmTraitorPromoted tells a Traitor that every other wolf has died and
+// they've just become a full Werewolf. Nothing else in the game announces
+// this — it's a private endgame twist, not a public reveal. Called with a
+// copyPlayer snapshot, after cmd.mu is released.
+func dmTraitorPromoted(s *discordgo.Session, p *player) {
+	dm, err := s.UserChannelCreate(p.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to open DM for promoted traitor")
+		return
+	}
+	if _, err := s.ChannelMessageSend(dm.ID, "🐺✨ Mọi Ma Sói khác đã chết — bạn giờ chính thức là **Ma Sói**! Từ đêm sau bạn sẽ vào thread riêng của bầy Sói và bỏ phiếu cắn."); err != nil {
+		log.Error().Err(err).Str("user_id", p.UserID).Msg("werewolf: failed to DM traitor promotion notice")
+	}
+}
+
+func (cmd *WerewolfCommand) dmDisruptorPrompt(s *discordgo.Session, channelID string, disruptor *player, targets []*player) {
+	dm, err := s.UserChannelCreate(disruptor.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for disruptor")
+		return
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    "🤫 Chọn người bạn muốn làm câm lặng trong buổi thảo luận ngày mai (có thể đổi lại trong đêm nay).",
+		Components: targetSelectMenu(werewolfDisruptorTargetID+channelID, "Chọn người để làm câm lặng", targets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM disruptor prompt")
+	}
+}
+
+// witchHasChoiceLeft reports whether the Witch still has at least one real
+// action available: the poison row renders whenever that potion isn't used
+// yet, and the heal control only when there's a bite target she could still
+// legitimately heal and that potion isn't used yet. Otherwise she has
+// nothing clickable but "skip". Shared by resolveNight (to decide whether
+// to prompt/wait at all) and by handleWitchHeal/handleWitchPoison (to
+// decide whether using one potion just now still leaves her with a real
+// choice — the two potions are independent, once-per-game items usable the
+// same night, so using one must not end her turn while the other is still
+// available).
+//
+// healableBiteTargetCount, NOT the raw bite-target count, is what belongs
+// in the third argument: handleWitchHeal rejects healing someone she has
+// already poisoned this round, so if the lone bite target IS her poison
+// target, heal is unreachable and her turn must be treated as over.
+// Passing the raw count there would leave her turn "open" with only a
+// button guaranteed to error, stalling the whole night for the full
+// witchActionWindow.
+func witchHasChoiceLeft(poisonUsed, healUsed bool, healableBiteTargets int) bool {
+	return !poisonUsed || (!healUsed && healableBiteTargets > 0)
+}
+
+// healableBiteTargetCount counts this round's bite targets the Witch could
+// still choose to heal — i.e. every one except a target she has already
+// poisoned this round, which handleWitchHeal refuses to also heal. Pass ""
+// for poisonTargetID when she hasn't poisoned anyone yet.
+// healableBiteTargetIDs narrows this round's bite targets to the ones the
+// Witch could still meaningfully save — everyone the Doctor did NOT already
+// protect.
+//
+// Without this the Witch was offered a target the Doctor had already
+// covered, and spending her single once-per-game heal there consumed the
+// potion to produce an outcome that was going to happen anyway. She has no
+// way to tell the difference, so the choice was a pure trap.
+//
+// Filtering here also keeps the Doctor's pick secret rather than leaking
+// it: a night where the only bite was protected now looks identical, from
+// the Witch's side, to a night with no bite at all.
+func healableBiteTargetIDs(biteTargetIDs []string, doctorProtectID string) []string {
+	var result []string
+	for _, id := range biteTargetIDs {
+		if doctorProtectID == "" || id != doctorProtectID {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func healableBiteTargetCount(biteTargetIDs []string, poisonTargetID string) int {
+	n := 0
+	for _, id := range biteTargetIDs {
+		if poisonTargetID == "" || id != poisonTargetID {
+			n++
+		}
+	}
+	return n
+}
+
+// resolveWitchHealTarget resolves WitchSaveTarget's two encodings into one
+// target ID: the "heal" sentinel (single-target button path) means "the
+// lone bite target", while any other non-empty value is an explicit ID
+// picked from the two-target select menu. Empty if she hasn't (yet) chosen
+// to heal this round. Shared by finalizeNightResolution (to apply the
+// save) and handleWitchPoison (to reject poisoning the exact target she
+// already chose to heal — see that handler's comment).
+func resolveWitchHealTarget(saveTarget string, biteTargetIDs []string) string {
+	switch {
+	case saveTarget == "heal" && len(biteTargetIDs) > 0:
+		return biteTargetIDs[0]
+	case saveTarget != "" && saveTarget != "heal":
+		return saveTarget
+	default:
+		return ""
+	}
+}
+
+// witchActionComponents builds the Witch's action message: an optional
+// poison target-select row (omitted if she's already used it), and a heal
+// control (omitted if there's no valid bite target, or she's already used
+// it) plus an always-present skip button. The heal control is a plain
+// confirm button when there's exactly one bite target (she can only be
+// healing "the" bite target) and a target-select menu when there are two
+// (the Wolf-Cub bonus bite) — she has to pick which one to save.
+func witchActionComponents(channelID string, biteTargets []*player, healUsed, poisonUsed bool, poisonTargets []*player) []discordgo.MessageComponent {
+	var rows []discordgo.MessageComponent
+	if !poisonUsed {
+		rows = append(rows, targetSelectMenu(werewolfWitchPoisonID+channelID, "☠️ Đầu độc ai đó (bỏ qua nếu không muốn)", poisonTargets)[0])
+	}
+	if len(biteTargets) > 1 && !healUsed {
+		// "một trong hai" ("one of the two") only ever matched when a lone
+		// Wolf Cub death armed a 2-target bite — with the bonus now
+		// compounding per Wolf Cub death, biteTargets can run to 3+, so the
+		// label must not assume exactly two.
+		rows = append(rows, targetSelectMenu(werewolfWitchHealID+channelID, "💊 Cứu một trong những người bị cắn", biteTargets)[0])
+	}
+	buttons := []discordgo.MessageComponent{}
+	if len(biteTargets) == 1 && !healUsed {
+		buttons = append(buttons, discordgo.Button{
+			Label:    "💊 Cứu người bị cắn",
+			Style:    discordgo.SuccessButton,
+			CustomID: werewolfWitchHealID + channelID,
+		})
+	}
+	buttons = append(buttons, discordgo.Button{
+		Label:    "🚫 Không làm gì",
+		Style:    discordgo.SecondaryButton,
+		CustomID: werewolfWitchSkipID + channelID,
+	})
+	rows = append(rows, discordgo.ActionsRow{Components: buttons})
+	return rows
+}
+
+func (cmd *WerewolfCommand) dmWitchPrompt(s *discordgo.Session, channelID string, witch *player, biteTargets []*player, healUsed, poisonUsed bool, poisonTargets []*player) {
+	dm, err := s.UserChannelCreate(witch.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to open DM for witch")
+		return
+	}
+	// Covers both "the wolves killed nobody" and "the only bite was already
+	// protected by the Doctor" — deliberately the same wording, so this
+	// message never reveals that the Doctor made a save.
+	bittenText := "Đêm nay không có ai cần cứu."
+	if len(biteTargets) > 0 {
+		labels := make([]string, len(biteTargets))
+		for idx, p := range biteTargets {
+			labels[idx] = p.Label
+		}
+		bittenText = fmt.Sprintf("Sói cắn: **%s** đêm nay.", strings.Join(labels, ", "))
+	}
+	if _, err := s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Content:    fmt.Sprintf("🧙 %s Bạn muốn cứu, đầu độc ai đó, hay không làm gì?", bittenText),
+		Components: witchActionComponents(channelID, biteTargets, healUsed, poisonUsed, poisonTargets),
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to DM witch prompt")
+	}
+}
+
+func (cmd *WerewolfCommand) nightActionsComplete(game *werewolfGame) bool {
+	wolves := aliveWolfVoters(game)
+	if len(wolves) > 0 {
+		for _, w := range wolves {
+			if _, voted := game.WolfVotes[w.UserID]; !voted {
+				return false
+			}
+		}
+	}
+	if len(alivePlayersOfRole(game, roleSeer)) > 0 && !game.SeerActed {
+		return false
+	}
+	if len(alivePlayersOfRole(game, roleDoctor)) > 0 && game.DoctorProtect == "" {
+		return false
+	}
+	if len(alivePlayersOfRole(game, roleDisruptor)) > 0 && game.DisruptorTarget == "" {
+		return false
+	}
+	// Cupid acts once, on round 1 only, with no retry: if the night ended
+	// the moment the other actors finished, an alive Cupid could lose the
+	// pairing for the entire game before even reading their DM. So round 1
+	// waits for them too. Deliberately NOT mirrored in the AFK-strike loop —
+	// this only buys Cupid the same time window everyone else gets, it never
+	// penalizes them for still missing it.
+	if game.Round == 1 && len(alivePlayersOfRole(game, roleCupid)) > 0 &&
+		game.LoverIDs[0] == "" && game.LoverIDs[1] == "" {
+		return false
+	}
+	return true
+}
+
+// waitForNightActions blocks until every required night-actor has acted or
+// the deadline passes. Posts one public reminder at the halfway point if
+// the night is still waiting on someone.
+func (cmd *WerewolfCommand) waitForNightActions(s *discordgo.Session, channelID string, deadline time.Time, totalWindow time.Duration, seq uint64) {
+	reminded := false
+	lastCalled := false
+	for {
+		var gameFound, done bool
+		var wolfThreadID string
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			game := cmd.gameIfCurrent(channelID, seq)
+			if game == nil {
+				return
+			}
+			gameFound = true
+			done = cmd.nightActionsComplete(game)
+			// Read each tick rather than taking it as a parameter: the wolf
+			// thread is created concurrently by startWolfThread, so it may
+			// not exist yet when this loop starts.
+			wolfThreadID = game.WolfThreadID
+		}()
+		if !gameFound || done || time.Now().After(deadline) {
+			return
+		}
+
+		remaining := time.Until(deadline)
+		if !reminded && remaining <= totalWindow/2 {
+			reminded = true
+			if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+				Content:         fmt.Sprintf("⏳ Còn %s để mọi người hành động đêm nay.", formatRemaining(remaining)),
+				AllowedMentions: &discordgo.MessageAllowedMentions{},
+			}); err != nil {
+				log.Error().Err(err).Msg("werewolf: failed to post night reminder")
+			}
+		}
+		// Last call goes into the pack's own thread, where they are actually
+		// deliberating — the halfway reminder above already covers the main
+		// channel, so this does not double up there.
+		if !lastCalled && remaining <= lastCallWindow {
+			lastCalled = true
+			postLastCall(s, wolfThreadID, "⏳ **Còn 30 giây** — chốt mục tiêu cắn đi, hết giờ là phiếu hiện tại được tính.")
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// waitForWitchAction blocks until the Witch has acted (heal/poison/skip) or
+// the deadline passes. No halfway reminder — this window is short and she
+// already has all the information she needs the moment she's prompted. Unlike
+// waitForNightActions, this has no Discord-facing side effect (no reminder
+// message to send), so it takes no *discordgo.Session.
+// waitForWitchAction blocks until the Witch finishes her turn, she leaves
+// the game, or the deadline passes.
+//
+// The liveness check is not optional: her handlers all reject once she's
+// no longer alive, so if she leaves (or is otherwise eliminated) while her
+// prompt is open, WitchActedThisRound can never become true and waiting on
+// it alone would burn the entire witchActionWindow with nobody able to end
+// it early. nightActionsComplete recomputes the alive roster every tick for
+// exactly this reason; this waiter has to as well.
+func (cmd *WerewolfCommand) waitForWitchAction(channelID string, deadline time.Time, seq uint64) {
+	for {
+		var gameFound, done bool
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			game := cmd.gameIfCurrent(channelID, seq)
+			if game == nil {
+				return
+			}
+			gameFound = true
+			done = game.WitchActedThisRound || len(alivePlayersOfRole(game, roleWitch)) == 0
+		}()
+		if !gameFound || done || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// resolveNight resolves the wolf vote and the AFK strikes for wolves/
+// seer/doctor WITHOUT applying the wolf-bite death yet, deletes the wolf
+// thread, then — if a Witch is alive — DMs her the bite outcome and waits
+// for her decision before finalizing anything. finalizeNightResolution
+// does the actual death application, Witch poison, Hunter revenge chain,
+// recap, and result message, then hands off exactly like the old single-
+// stage resolveNight used to.
+func (cmd *WerewolfCommand) resolveNight(s *discordgo.Session, channelID string, seq uint64) {
+	var (
+		gameFound          bool
+		resolvedTargets    []string
+		wolfTargetLabels   []string
+		bonusBite          bool
+		wolfVoteTied       bool
+		aliveThreadID      string
+		witch              *player
+		witchHealable      []string
+		witchPoisonTargets []*player
+		biteTargetPlayers  []*player
+	)
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+		aliveThreadID = game.AliveThreadID
+
+		aliveWolves := aliveWolfVoters(game)
+		validVotes := validWolfVotes(game.WolfVotes, aliveWolves, game.Players)
+		topN := 1 + game.WolfBonusBiteActiveThisRound
+		wolfTargets, tallyOK := tallyWolfVotes(validVotes, topN)
+		// The bonus only actually *fires* when the tally really produced two
+		// distinct targets. A unanimous pack with the bonus armed still bites
+		// one player, and that round must stay on the ordinary single-target
+		// message/recap path.
+		bonusBite = len(wolfTargets) > 1
+		wolfVoteTied = !tallyOK && len(validVotes) > 0
+		resolvedTargets = wolfTargets
+		for _, id := range resolvedTargets {
+			if target, exists := game.Players[id]; exists {
+				wolfTargetLabels = append(wolfTargetLabels, target.Label)
+			}
+		}
+		doctorTargetLabel := ""
+		if game.DoctorProtect != "" {
+			if target, exists := game.Players[game.DoctorProtect]; exists {
+				doctorTargetLabel = target.Label
+			}
+		}
+
+		// Wolves/Seer/Doctor/Disruptor strike here since their action window
+		// closes at this point in the flow. The Witch acts in a later,
+		// separate stage (after the wolf thread is torn down) and strikes
+		// there instead — see the AFKStrikes update right after
+		// waitForWitchAction below. Hunter and Cupid are deliberately NOT
+		// struck anywhere: Hunter's pick persists across rounds and not
+		// re-picking is a valid no-op (see HunterTarget's doc comment), and
+		// Cupid's round-1-only window explicitly must not penalize a miss
+		// (see the comment in nightActionsComplete).
+		for _, w := range aliveWolves {
+			if _, voted := game.WolfVotes[w.UserID]; voted {
+				game.AFKStrikes[w.UserID] = 0
+			} else {
+				game.AFKStrikes[w.UserID]++
+			}
+		}
+		for _, p := range alivePlayersOfRole(game, roleSeer) {
+			if game.SeerActed {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+		for _, p := range alivePlayersOfRole(game, roleDoctor) {
+			if game.DoctorProtect != "" {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+		for _, p := range alivePlayersOfRole(game, roleDisruptor) {
+			if game.DisruptorTarget != "" {
+				game.AFKStrikes[p.UserID] = 0
+			} else {
+				game.AFKStrikes[p.UserID]++
+			}
+		}
+
+		game.DoctorLastPick = game.DoctorProtect
+		// game.WolfThreadID deliberately NOT cleared/deleted here — the wolf
+		// thread now persists across nights (see startWolfThread's doc
+		// comment) so the pack keeps its chat history instead of starting
+		// fresh every round. WolfTargetMessageID still resets: that's the
+		// specific vote-select message, which IS new each night.
+		game.WolfTargetMessageID = ""
+
+		if witches := alivePlayersOfRole(game, roleWitch); len(witches) > 0 {
+			witch = copyPlayer(witches[0])
+			witchPoisonTargets = copyPlayers(aliveExcept(game, witch.UserID))
+		}
+
+		game.WitchHealableTargetIDs = healableBiteTargetIDs(resolvedTargets, game.DoctorProtect)
+		biteTargetPlayers = copyPlayers(playersByIDs(game, game.WitchHealableTargetIDs))
+		witchHealable = append([]string(nil), game.WitchHealableTargetIDs...)
+
+		if n := len(game.History); n > 0 {
+			entry := &game.History[n-1]
+			entry.WolfTargetLabel = strings.Join(wolfTargetLabels, ", ")
+			entry.WolfBonusBite = bonusBite
+			entry.WolfVoteTied = wolfVoteTied
+			entry.DoctorTargetLabel = doctorTargetLabel
+			if game.SeerTarget != "" {
+				if target, exists := game.Players[game.SeerTarget]; exists {
+					entry.SeerTargetLabel = target.Label
+				}
+				entry.SeerResult = game.SeerResult
+			}
+		}
+
+		game.NightActionsClosed = true
+	}()
+	if !gameFound {
+		return
+	}
+
+	if witch != nil {
+		var healUsed, poisonUsed, hasChoice bool
+		func() {
+			cmd.mu.Lock()
+			defer cmd.mu.Unlock()
+			g := cmd.gameIfCurrent(channelID, seq)
+			if g == nil {
+				return
+			}
+			healUsed = g.WitchHealUsed
+			poisonUsed = g.WitchPoisonUsed
+			// g.WitchPoisonTarget is guaranteed "" here (reset at
+			// runNightPhase, and only settable once WitchPromptedThisRound
+			// goes true a few lines below), but pass it rather than assume,
+			// so this stays correct if the prompt flow ever changes.
+			hasChoice = witchHasChoiceLeft(poisonUsed, healUsed, healableBiteTargetCount(witchHealable, g.WitchPoisonTarget))
+			if hasChoice {
+				g.WitchPromptedThisRound = true
+			}
+		}()
+		if hasChoice {
+			cmd.dmWitchPrompt(s, channelID, witch, biteTargetPlayers, healUsed, poisonUsed, witchPoisonTargets)
+			deadline := time.Now().Add(witchActionWindow)
+			cmd.waitForWitchAction(channelID, deadline, seq)
+			// AFK bookkeeping for the Witch was missing entirely: Seer/Doctor/
+			// Disruptor/wolves all strike on a missed action in resolveNight's
+			// locked block above, but the Witch's action lives in this
+			// separate, unlocked-then-relocked stage and was never covered.
+			// Only strike when she genuinely had a choice this round (mirrors
+			// hasChoice/WitchPromptedThisRound) — if she had nothing clickable
+			// but skip, staying silent isn't negligence.
+			func() {
+				cmd.mu.Lock()
+				defer cmd.mu.Unlock()
+				g := cmd.gameIfCurrent(channelID, seq)
+				if g == nil {
+					return
+				}
+				// Don't strike a Witch who is no longer alive: she may
+				// have left or been killed mid-window, in which case she
+				// didn't ignore the prompt, she stopped being able to
+				// answer it.
+				if p, ok := g.Players[witch.UserID]; !ok || !p.Alive {
+					return
+				}
+				if g.WitchDidSomethingThisRound {
+					g.AFKStrikes[witch.UserID] = 0
+				} else {
+					g.AFKStrikes[witch.UserID]++
+				}
+			}()
+		}
+	}
+
+	cmd.finalizeNightResolution(s, channelID, seq, resolvedTargets, bonusBite, wolfVoteTied, aliveThreadID)
+}
+
+// finalizeNightResolution applies the wolf-bite death (accounting for
+// Doctor protection and Witch's heal), applies Witch's poison if she chose
+// one, chains Hunter's revenge off of either death, builds the recap
+// fields and the public result message, then hands off to the win-check
+// and day-discuss exactly like the old single-stage resolveNight used to.
+func (cmd *WerewolfCommand) finalizeNightResolution(s *discordgo.Session, channelID string, seq uint64, resolvedTargets []string, bonusBite, wolfVoteTied bool, aliveThreadID string) {
+	var (
+		gameFound           bool
+		revealOnDeath       bool
+		killedPlayers       []*player
+		poisonedPlayer      *player
+		doctorSaved         bool
+		witchHealed         bool
+		cursedWolfConverted []string
+		convertedPlayers    []*player
+		biteOutcomeLines    []string
+		biteSparedCount     int
+		hunterRevenged      []*player
+		loverDeaths         []*player
+		summary             string
+		hunterToWarn        *player
+	)
+	func() {
+		cmd.mu.Lock()
+		defer cmd.mu.Unlock()
+		game := cmd.gameIfCurrent(channelID, seq)
+		if game == nil {
+			return
+		}
+		gameFound = true
+
+		// Close the Witch's action window right now, before reading any of
+		// her round-scoped picks below. A click that lands after the
+		// deadline but before this lock is acquired (waitForWitchAction
+		// polls on a 2s sleep, so up to ~2s of slack) would otherwise still
+		// be accepted by the handlers, burning a lifetime potion with the
+		// round-scoped target then discarded by next round's reset and zero
+		// visible effect. The handlers already reject on
+		// !WitchPromptedThisRound with "Tin nhắn này đã hết hạn.", so this
+		// closes the window completely.
+		game.WitchPromptedThisRound = false
+
+		// Resolve against the healable list, the same one her menu was built
+		// from: with two bite targets where the Doctor covered the first,
+		// the single-target "heal" sentinel must mean the target she was
+		// actually shown, not resolvedTargets[0].
+		witchHealTarget := resolveWitchHealTarget(game.WitchSaveTarget, game.WitchHealableTargetIDs)
+		// doctorSaved/witchHealed keep the exact meaning they had in the
+		// single-target implementation (computed from the picks alone, not
+		// from whether the bite actually resolved to a spare) so the
+		// non-bonus-bite result-message cascade below is unchanged.
+		for _, id := range resolvedTargets {
+			if id == game.DoctorProtect {
+				doctorSaved = true
+			}
+		}
+		witchHealed = len(game.WitchHealableTargetIDs) > 0 && game.WitchSaveTarget == "heal"
+
+		var killedIDs []string
+		for _, targetID := range resolvedTargets {
+			target, exists := game.Players[targetID]
+			if !exists || !target.Alive {
+				continue
+			}
+			doctorSavedThis := targetID == game.DoctorProtect
+			witchHealedThis := witchHealTarget != "" && targetID == witchHealTarget
+			switch resolveWolfBiteOutcome(target.Role, doctorSavedThis || witchHealedThis) {
+			case wolfBiteKill:
+				target.Alive = false
+				killedIDs = append(killedIDs, targetID)
+				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: chết", target.Label))
+			case wolfBiteConvert:
+				target.Faction = factionWolf
+				cursedWolfConverted = append(cursedWolfConverted, target.Label)
+				convertedPlayers = append(convertedPlayers, copyPlayer(target))
+				biteSparedCount++
+				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: biến thành Sói Nguyền, không chết", target.Label))
+			case wolfBiteSpare:
+				reason := "Bác Sĩ cứu"
+				if witchHealedThis && !doctorSavedThis {
+					reason = "Phù Thủy cứu"
+				}
+				biteSparedCount++
+				biteOutcomeLines = append(biteOutcomeLines, fmt.Sprintf("%s: được %s", target.Label, reason))
+			}
+		}
+
+		var poisonedID string
+		if game.WitchPoisonTarget != "" {
+			// Known, accepted edge case: the Witch can poison the same player
+			// the wolves bit (heal/poison are only mutually exclusive with
+			// each other for OTHER targets via WitchActedThisRound). If that
+			// player already died via the wolf-kill path above, target.Alive
+			// is false here and this block silently no-ops — no double-kill,
+			// no separate poison recap line — even though WitchPoisonUsed was
+			// already set true when she chose the target. The potion is
+			// simply burned with no visible effect; this is intentional.
+			if target, exists := game.Players[game.WitchPoisonTarget]; exists && target.Alive {
+				target.Alive = false
+				poisonedID = game.WitchPoisonTarget
+			}
+		}
+
+		var chained []chainedDeath
+		for _, id := range killedIDs {
+			chained = append(chained, applyDeathChains(game, id)...)
+		}
+		if poisonedID != "" {
+			chained = append(chained, applyDeathChains(game, poisonedID)...)
+		}
+		hunterRevenged, loverDeaths = splitChainedDeaths(chained)
+		hunterToWarn = clearStaleHunterTarget(game)
+
+		deadThisResolution := append([]string(nil), killedIDs...)
+		if poisonedID != "" {
+			deadThisResolution = append(deadThisResolution, poisonedID)
+		}
+		deadThisResolution = append(deadThisResolution, idsOf(hunterRevenged)...)
+		deadThisResolution = append(deadThisResolution, idsOf(loverDeaths)...)
+		applyWolfCubBonusBiteFlag(game, deadThisResolution)
+
+		revealOnDeath = game.RevealOnDeath
+		summary = aliveDeadSummary(game)
+		killedPlayers = copyPlayers(playersByIDs(game, killedIDs))
+		if poisonedID != "" {
+			poisonedPlayer = copyPlayer(game.Players[poisonedID])
+		}
+
+		if n := len(game.History); n > 0 {
+			entry := &game.History[n-1]
+			entry.WolfTargetSaved = doctorSaved
+			if witchHealTarget != "" {
+				if target, exists := game.Players[witchHealTarget]; exists {
+					entry.WitchSavedLabel = target.Label
+				}
+			}
+			if poisonedPlayer != nil {
+				entry.WitchPoisonedLabel = poisonedPlayer.Label
+			}
+			entry.CursedWolfConverted = cursedWolfConverted
+			if len(hunterRevenged) > 0 {
+				entry.HunterRevengeLabels = append(entry.HunterRevengeLabels, labelsOf(hunterRevenged)...)
+			}
+			if len(loverDeaths) > 0 {
+				entry.LoverDeathLabels = append(entry.LoverDeathLabels, labelsOf(loverDeaths)...)
+			}
+			if bonusBite {
+				entry.WolfBiteOutcomeLines = append([]string(nil), biteOutcomeLines...)
+			}
+		}
+	}()
+	if !gameFound {
+		return
+	}
+	dmHunterTargetLost(s, hunterToWarn)
+	var deadNow []string
+	for _, p := range killedPlayers {
+		removeFromAliveThread(s, aliveThreadID, p.UserID)
+		deadNow = append(deadNow, p.UserID)
+	}
+	if poisonedPlayer != nil {
+		removeFromAliveThread(s, aliveThreadID, poisonedPlayer.UserID)
+		deadNow = append(deadNow, poisonedPlayer.UserID)
+	}
+	for _, p := range hunterRevenged {
+		removeFromAliveThread(s, aliveThreadID, p.UserID)
+		deadNow = append(deadNow, p.UserID)
+	}
+	for _, p := range loverDeaths {
+		removeFromAliveThread(s, aliveThreadID, p.UserID)
+		deadNow = append(deadNow, p.UserID)
+	}
+	// Evict any wolf among tonight's dead from the wolf thread now. The
+	// thread is still UNLOCKED at this point — runDayDiscuss doesn't lock
+	// it until a moment later — so a wolf killed by poison, a Hunter's
+	// revenge or a lover chain would otherwise linger in a live thread the
+	// surviving pack can still post in. startWolfThread's sweep would
+	// catch them next night, but that's a whole day too late.
+	cmd.evictFromWolfThread(s, channelID, seq, deadNow)
+
+	var resultMsg string
+	switch {
+	case bonusBite && len(biteOutcomeLines) > 0:
+		// Two-target round: the single-target cascade below can't represent
+		// "one target died, the other was saved" — report each outcome
+		// separately instead. Only reachable once a Wolf Cub has died.
+		//
+		// Secrecy: deaths are always named (every other path in the game
+		// does the same), but who was saved and who converted into a Cursed
+		// Wolf must NOT be named — the single-target Doctor-save path
+		// deliberately says only "mục tiêu", and the single-target
+		// conversion path says nothing at all. Naming them here would leak
+		// the Doctor's/Witch's pick and out a brand-new wolf publicly. The
+		// recap (biteOutcomeLines, kept in full above) is game-end only,
+		// where every role is revealed anyway.
+		var lines []string
+		for _, p := range killedPlayers {
+			if revealOnDeath {
+				lines = append(lines, fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", p.Label, displayRoleLabel(p)))
+			} else {
+				lines = append(lines, fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", p.Label))
+			}
+		}
+		if biteSparedCount > 0 {
+			if len(killedPlayers) > 0 {
+				lines = append(lines, "🌫️ Có người khác cũng bị Sói cắn nhưng thoát chết trong bí ẩn.")
+			} else {
+				lines = append(lines, "🌫️ Có người bị Sói cắn nhưng thoát chết trong bí ẩn.")
+			}
+		}
+		resultMsg = strings.Join(lines, "\n")
+	case bonusBite && poisonedPlayer == nil:
+		// Both bite targets already died some other way (e.g. left mid-round)
+		// before finalize could record an outcome for either — nothing to
+		// list. Must not fall into the single-target cascade below: its
+		// doctorSaved/witchHealed booleans are stale/unrelated to this round.
+		resultMsg = "😴 Không ai chết trong đêm qua."
+	case bonusBite:
+		resultMsg = "😴 Không ai chết vì Sói cắn đêm qua."
+	case len(killedPlayers) == 1 && revealOnDeath:
+		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua. Vai trò: %s.", killedPlayers[0].Label, displayRoleLabel(killedPlayers[0]))
+	case len(killedPlayers) == 1:
+		resultMsg = fmt.Sprintf("☠️ **%s** đã chết trong đêm qua.", killedPlayers[0].Label)
+	case doctorSaved && poisonedPlayer == nil:
+		resultMsg = "🛡️ Bác Sĩ đã cứu sống mục tiêu đêm qua — không ai chết!"
+	case doctorSaved:
+		resultMsg = "🛡️ Bác Sĩ đã cứu sống mục tiêu bị Sói cắn đêm qua."
+	case witchHealed && poisonedPlayer == nil:
+		resultMsg = "🧙 Phù Thủy đã cứu sống mục tiêu đêm qua — không ai chết!"
+	case witchHealed:
+		resultMsg = "🧙 Phù Thủy đã cứu sống mục tiêu bị Sói cắn đêm qua."
+	case poisonedPlayer == nil:
+		// Deliberately the SAME wording whether wolfVoteTied is true or
+		// false: by this point in the switch, killedPlayers is empty and
+		// neither Doctor nor Witch saved anyone, which is EXACTLY the
+		// signature of a silent Cursed Wolf conversion too (bitten,
+		// nobody saved them, nobody died). If this branch used distinct
+		// wording per cause, a real tie being publicly distinguishable
+		// from "quiet, unexplained" would let players deduce a conversion
+		// happened by elimination — merging them gives a conversion a
+		// permanent, always-plausible "the pack just didn't agree" cover
+		// story instead.
+		resultMsg = "🐺 Bầy Sói không thống nhất được mục tiêu — không ai chết trong đêm qua."
+	default:
+		resultMsg = "🐺 Bầy Sói không thống nhất được mục tiêu."
+	}
+	if poisonedPlayer != nil {
+		if revealOnDeath {
+			resultMsg += fmt.Sprintf("\n☠️ **%s** trúng độc của Phù Thủy. Vai trò: %s.", poisonedPlayer.Label, displayRoleLabel(poisonedPlayer))
+		} else {
+			resultMsg += fmt.Sprintf("\n☠️ **%s** trúng độc của Phù Thủy.", poisonedPlayer.Label)
+		}
+	}
+	for _, p := range hunterRevenged {
+		resultMsg += "\n" + hunterRevengeLine(p, revealOnDeath)
+	}
+	for _, p := range loverDeaths {
+		resultMsg += "\n" + loverDeathLine(p, revealOnDeath)
+	}
+
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         resultMsg + "\n\n" + summary,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to post night result")
+	}
+
+	if cmd.checkAndHandleGameEnd(s, channelID, seq) {
+		return
+	}
+	// Only DM the conversion once we know the game is actually continuing:
+	// a conversion alone swings the win tally by 2 (one player leaves
+	// aliveOthers and joins aliveWolves at once), so it can end the game in
+	// this exact tick with no other death needed — "you'll join the pack
+	// from next night" would be confusing noise for a game that's already
+	// over. Mirrors the same guard on dmTraitorPromoted in
+	// checkAndHandleGameEnd. convertedPlayers is already a copyPlayer
+	// snapshot taken under the lock above, so it's safe to read this far
+	// past the unlock and past the win-check.
+	for _, p := range convertedPlayers {
+		dmCursedWolfConverted(s, p)
+	}
+	cmd.runDayDiscuss(s, channelID, seq)
+}
+
+func (cmd *WerewolfCommand) handleWolfTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isWolf := game.Players[clickerID]
+	if !isWolf || !clicker.wolfVoteParticipant() || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ thành viên phe Sói còn sống mới được chọn mục tiêu.")
+		return
+	}
+	if _, alreadyVoted := game.WolfVotes[clickerID]; alreadyVoted {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã bỏ phiếu rồi, không thể đổi.")
+		return
+	}
+	// maxPicks mirrors the value startWolfThread used to build this exact
+	// menu's MaxValues — re-derived here rather than trusted from the
+	// client payload, same defense-in-depth as every other validated field
+	// below. Reads the round-scoped snapshot (WolfBonusBiteActiveThisRound),
+	// not the live WolfBonusBiteNextNight counter — the live counter CAN
+	// change mid-round (e.g. /werewolf leave arming a bonus for a Wolf Cub
+	// death during this exact night), and the snapshot is what keeps this
+	// check in agreement with the menu the wolf is actually looking at.
+	maxPicks := 1 + game.WolfBonusBiteActiveThisRound
+	if len(values) > maxPicks {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn chọn nhiều mục tiêu hơn cho phép.")
+		return
+	}
+	seen := make(map[string]bool, len(values))
+	for _, targetID := range values {
+		if seen[targetID] {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Không thể chọn trùng một người 2 lần.")
+			return
+		}
+		seen[targetID] = true
+		if target, exists := game.Players[targetID]; !exists || !target.Alive {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+			return
+		}
+	}
+	game.WolfVotes[clickerID] = append([]string(nil), values...)
+	allVoted := true
+	for _, w := range aliveWolfVoters(game) {
+		if _, voted := game.WolfVotes[w.UserID]; !voted {
+			allVoted = false
+			break
+		}
+	}
+	seq := game.Seq
+	cmd.mu.Unlock()
+
+	mentions := make([]string, len(values))
+	for idx, targetID := range values {
+		mentions[idx] = fmt.Sprintf("<@%s>", targetID)
+	}
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Bạn đã chọn: %s. Phiếu đã khóa, không thể đổi.", strings.Join(mentions, ", ")))
+	if allVoted {
+		announceRoleDecided(s, channelID, "🐺 Bầy Sói")
+	}
+
+	// Re-lock and take a fresh snapshot of the full vote state rather than
+	// reusing the one taken above — another wolf may have voted in the
+	// meantime, and this closes the gap between "when I voted" and "what I
+	// display." This does not eliminate the residual Discord-API
+	// network-ordering race between two fully concurrent edits fired by
+	// different goroutines (each still reads-then-edits without a shared
+	// serialization point) — that risk is accepted here, consistent with
+	// other pre-existing unlock/lock-ordering races elsewhere in this
+	// codebase.
+	var threadID, messageID string
+	var wolves, targets []*player
+	cmd.mu.Lock()
+	game = cmd.gameIfCurrent(channelID, seq)
+	if game == nil {
+		cmd.mu.Unlock()
+		return
+	}
+	threadID = game.WolfThreadID
+	messageID = game.WolfTargetMessageID
+	wolves = copyPlayers(aliveWolfVoters(game))
+	targets = copyPlayers(aliveWolfBiteTargets(game))
+	maxPicks = 1 + game.WolfBonusBiteActiveThisRound
+	votesCopy := make(map[string][]string, len(game.WolfVotes))
+	for k, v := range game.WolfVotes {
+		votesCopy[k] = append([]string(nil), v...)
+	}
+	cmd.mu.Unlock()
+
+	if threadID == "" || messageID == "" {
+		return
+	}
+	summary := wolfVoteSummary(votesCopy, wolves, targets)
+	pingText, allowedMentions := pingOnce(idsOf(wolves))
+	content := wolfVoteMessageContent(pingText, summary, maxPicks)
+	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:         threadID,
+		ID:              messageID,
+		Content:         &content,
+		AllowedMentions: allowedMentions,
+	}); err != nil {
+		log.Error().Err(err).Msg("werewolf: failed to update wolf vote summary")
+	}
+}
+
+func (cmd *WerewolfCommand) handleSeerCheck(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	targetID := values[0]
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isSeer := game.Players[clickerID]
+	if !isSeer || clicker.Role != roleSeer || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Tiên Tri còn sống mới được soi.")
+		return
+	}
+	if game.SeerActed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã soi đêm nay rồi.")
+		return
+	}
+	target, exists := game.Players[targetID]
+	if !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	game.SeerActed = true
+	game.SeerTarget = targetID
+	game.SeerResult = target.Role
+	isWolf := target.investigatesAsWolf()
+	cmd.mu.Unlock()
+
+	verdict := "KHÔNG PHẢI Ma Sói"
+	if isWolf {
+		verdict = "LÀ MA SÓI"
+	}
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("🔮 <@%s> %s.", targetID, verdict))
+	announceRoleDecided(s, channelID, "🔮 Tiên Tri")
+}
+
+func (cmd *WerewolfCommand) handleDoctorProtect(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	targetID := values[0]
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isDoctor := game.Players[clickerID]
+	if !isDoctor || clicker.Role != roleDoctor || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Bác Sĩ còn sống mới được bảo vệ.")
+		return
+	}
+	if game.DoctorProtect != "" {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã chọn người để bảo vệ đêm nay rồi.")
+		return
+	}
+	if targetID == game.DoctorLastPick {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Không thể bảo vệ cùng một người hai đêm liên tiếp.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	game.DoctorProtect = targetID
+	cmd.mu.Unlock()
+
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chọn bảo vệ: <@%s>.", targetID))
+	announceRoleDecided(s, channelID, "💉 Bác Sĩ")
+}
+
+func (cmd *WerewolfCommand) handleHunterTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	targetID := values[0]
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isHunter := game.Players[clickerID]
+	if !isHunter || clicker.Role != roleHunter || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Thợ Săn còn sống mới được chỉ định.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	firstActionThisRound := !game.HunterActedThisRound
+	game.HunterTarget = targetID
+	game.HunterActedThisRound = true
+	cmd.mu.Unlock()
+
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chỉ định: <@%s>.", targetID))
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🏹 Thợ Săn")
+	}
+}
+
+func (cmd *WerewolfCommand) handleDisruptorTarget(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	targetID := values[0]
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight || game.NightActionsClosed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isDisruptor := game.Players[clickerID]
+	if !isDisruptor || clicker.Role != roleDisruptor || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Kẻ Phá Hoại còn sống mới được chọn.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	firstActionThisRound := !game.DisruptorActedThisRound
+	game.DisruptorTarget = targetID
+	game.DisruptorActedThisRound = true
+	cmd.mu.Unlock()
+
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("✅ Đã chọn: <@%s>.", targetID))
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🤫 Kẻ Phá Hoại")
+	}
+}
+
+func (cmd *WerewolfCommand) handleWitchHeal(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isWitch := game.Players[clickerID]
+	if !isWitch || clicker.Role != roleWitch || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Phù Thủy còn sống mới được cứu.")
+		return
+	}
+	if !game.WitchPromptedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
+		return
+	}
+	if game.WitchActedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã hành động đêm nay rồi.")
+		return
+	}
+	if game.WitchHealUsed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã dùng bình cứu rồi.")
+		return
+	}
+	// NOT gated on WitchPoisonUsed/WitchPoisonTarget: heal and poison are
+	// two independent once-per-GAME potions and both usable the same
+	// night, so using poison earlier this round must not block heal (or
+	// vice versa in handleWitchPoison) — only WitchActedThisRound (set
+	// below, once she has nothing left to choose) ends her turn.
+	var healTargetID string
+	if values := i.MessageComponentData().Values; len(values) > 0 {
+		// Two-target select-menu path (Wolf-Cub bonus bite): the option list
+		// was built from game.WitchHealableTargetIDs, but re-validate against it
+		// directly rather than trusting the client payload.
+		healTargetID = values[0]
+		valid := false
+		for _, id := range game.WitchHealableTargetIDs {
+			if id == healTargetID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+			return
+		}
+	} else {
+		// Single-target button path: sentinel resolved against the lone bite
+		// target at finalize time. The plain button is only ever rendered
+		// for a 1-target round, but the DM carrying it survives into later
+		// rounds — so a stale button from an earlier 1-target round could
+		// otherwise be clicked during a 2-target bonus-bite round and
+		// silently save resolvedTargets[0], a target she never picked.
+		if len(game.WitchHealableTargetIDs) != 1 {
+			cmd.mu.Unlock()
+			respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
+			return
+		}
+		healTargetID = game.WitchHealableTargetIDs[0]
+	}
+	// Reject healing the exact target she already poisoned this round: the
+	// two potions are independent, but pointing both at the same person
+	// wastes them to no effect (the poison kills anyway) and would print a
+	// self-contradicting public message ("saved" immediately followed by
+	// "died of poison"), leaking her full night's actions by construction.
+	if game.WitchPoisonUsed && game.WitchPoisonTarget == healTargetID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã đầu độc người này rồi, không thể vừa cứu vừa đầu độc cùng một người.")
+		return
+	}
+	if len(game.WitchHealableTargetIDs) == 1 && healTargetID == game.WitchHealableTargetIDs[0] {
+		game.WitchSaveTarget = "heal"
+	} else {
+		game.WitchSaveTarget = healTargetID
+	}
+	game.WitchHealUsed = true
+	firstActionThisRound := !game.WitchDidSomethingThisRound
+	game.WitchDidSomethingThisRound = true
+	// Only ends her turn if poison is also already spent (or was never a
+	// choice) — otherwise she still has a real action left this round and
+	// must be allowed to take it.
+	game.WitchActedThisRound = !witchHasChoiceLeft(game.WitchPoisonUsed, game.WitchHealUsed,
+		healableBiteTargetCount(game.WitchHealableTargetIDs, game.WitchPoisonTarget))
+	cmd.mu.Unlock()
+
+	respondComponentEphemeral(s, i, "✅ Bạn đã chọn cứu người bị cắn đêm nay.")
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	}
+}
+
+func (cmd *WerewolfCommand) handleWitchPoison(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	values := i.MessageComponentData().Values
+	if len(values) == 0 {
+		return
+	}
+	targetID := values[0]
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isWitch := game.Players[clickerID]
+	if !isWitch || clicker.Role != roleWitch || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Phù Thủy còn sống mới được đầu độc.")
+		return
+	}
+	if !game.WitchPromptedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
+		return
+	}
+	if game.WitchActedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã hành động đêm nay rồi.")
+		return
+	}
+	if game.WitchPoisonUsed {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã dùng bình độc rồi.")
+		return
+	}
+	if target, exists := game.Players[targetID]; !exists || !target.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Mục tiêu không còn hợp lệ.")
+		return
+	}
+	// Reject poisoning the exact target she already chose to heal this
+	// round — see handleWitchHeal's matching guard for why.
+	if game.WitchHealUsed && resolveWitchHealTarget(game.WitchSaveTarget, game.WitchHealableTargetIDs) == targetID {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã cứu người này rồi, không thể vừa cứu vừa đầu độc cùng một người.")
+		return
+	}
+	game.WitchPoisonTarget = targetID
+	game.WitchPoisonUsed = true
+	firstActionThisRound := !game.WitchDidSomethingThisRound
+	game.WitchDidSomethingThisRound = true
+	// Only ends her turn if heal is also already spent/unavailable —
+	// otherwise she still has a real action left this round (heal and
+	// poison are independent, both usable the same night). Note this reads
+	// WitchPoisonTarget AFTER it was just set above, so if she poisoned the
+	// only bite target, the heal she'd now be refused is correctly counted
+	// as unavailable and her turn closes instead of stalling the night.
+	game.WitchActedThisRound = !witchHasChoiceLeft(game.WitchPoisonUsed, game.WitchHealUsed,
+		healableBiteTargetCount(game.WitchHealableTargetIDs, game.WitchPoisonTarget))
+	cmd.mu.Unlock()
+
+	respondComponentEphemeralMentioned(s, i, fmt.Sprintf("☠️ Bạn đã đầu độc: <@%s>.", targetID))
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	}
+}
+
+func (cmd *WerewolfCommand) handleWitchSkip(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) {
+	clickerID := interactionUserID(i)
+
+	cmd.mu.Lock()
+	game, ok := cmd.games[channelID]
+	if !ok || game.Phase != phaseNight {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Đêm nay đã kết thúc rồi.")
+		return
+	}
+	clicker, isWitch := game.Players[clickerID]
+	if !isWitch || clicker.Role != roleWitch || !clicker.Alive {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Chỉ Phù Thủy còn sống mới được chọn.")
+		return
+	}
+	if !game.WitchPromptedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Tin nhắn này đã hết hạn.")
+		return
+	}
+	if game.WitchActedThisRound {
+		cmd.mu.Unlock()
+		respondComponentEphemeral(s, i, "Bạn đã hành động đêm nay rồi.")
+		return
+	}
+	firstActionThisRound := !game.WitchDidSomethingThisRound
+	game.WitchDidSomethingThisRound = true
+	game.WitchActedThisRound = true
+	cmd.mu.Unlock()
+
+	respondComponentEphemeral(s, i, "✅ Bạn chọn không làm gì đêm nay.")
+	if firstActionThisRound {
+		announceRoleDecided(s, channelID, "🧙 Phù Thủy")
+	}
+}
