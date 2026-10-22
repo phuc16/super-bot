@@ -1,75 +1,78 @@
 # Discord Super Bot
 
-Bot Discord theo dõi hoạt động, phân tích tương tác và tóm tắt tin nhắn bằng AI.
+**English** | [Tiếng Việt](README.vi.md)
 
-## Tính năng
+A Discord bot for communities: Werewolf game, points duels, AI message summaries, custom keyword commands, and scheduled AI posts.
 
-- **Export & Tóm tắt AI** — Export tin nhắn kèm tóm tắt bằng GPT
-- **Theo dõi hoạt động** — Thống kê tương tác, trao role thành viên tích cực
-- **Báo cáo hàng tuần** — Tự động gửi báo cáo engagement lên Discord
-- **Phát hiện thành viên không hoạt động** — Identify inactive members
-- **Cấu hình linh hoạt** — Mỗi server có cài đặt riêng qua lệnh `/config`
+## Features
 
----
-
-## Yêu cầu
-
-- Go 1.21+
-- MySQL 8.0+ (hoặc Docker)
-- Discord Bot Token
-- OpenAI API Key
+- **Werewolf (`/werewolf`)**: a full social-deduction game for 5–20 players with 11 roles, played directly in Discord
+- **Duel (`/duel`)**: dice challenges with point wagers, streaks, a leaderboard, and scheduled tournaments
+- **Export & AI summary (`/export`)**: export channel messages with a GPT summary
+- **Keyword commands (`/addcom`)**: create your own `/name` command that replies with text and/or an image
+- **AI topics (`/addtopic`)**: the bot writes and posts about a given topic on a schedule
+- **Roast (`/roast`)**: AI playfully roasts a member based on their recent messages
 
 ---
 
-## Hướng dẫn cài đặt
+## Requirements
 
-### Bước 1 — Tạo Discord Bot
+- Go 1.24+
+- MySQL 8.0+ (or Docker)
+- Discord bot token
+- OpenAI API key
 
-1. Vào [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**
-2. Vào tab **Bot** → **Add Bot** → Copy **Token** (đây là `DISCORD_TOKEN`)
-3. Bật các **Privileged Gateway Intents**:
+---
+
+## Setup
+
+### Step 1: Create the Discord bot
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**
+2. Open the **Bot** tab → **Add Bot** → copy the **Token** (this is `DISCORD_TOKEN`)
+3. Enable the **Privileged Gateway Intents**:
    - ✅ Server Members Intent
    - ✅ Message Content Intent
-4. Vào tab **OAuth2 → URL Generator**:
+4. Open **OAuth2 → URL Generator**:
    - Scopes: `bot`, `applications.commands`
-   - Bot Permissions: `Read Messages`, `Send Messages`, `Manage Roles`, `Manage Threads`, `Read Message History`
-5. Mở URL được tạo ra → Thêm bot vào server của bạn
+   - Bot Permissions: see [Required bot permissions](#required-bot-permissions) below
+5. Open the generated URL and add the bot to your server
 
-### Bước 2 — Lấy Server ID
+### Step 2: Get the server ID
 
-1. Trong Discord, vào **Settings → Advanced** → Bật **Developer Mode**
-2. Chuột phải vào tên server → **Copy Server ID** (đây là `DISCORD_GUILD_ID`)
+1. In Discord, go to **Settings → Advanced** and enable **Developer Mode**
+2. Right-click the server name → **Copy Server ID** (this is `DISCORD_GUILD_ID`)
 
-### Bước 3 — Cấu hình môi trường
+### Step 3: Configure the environment
 
 ```bash
-git clone https://github.com/phuc16/VCG-super-bot.git
-cd VCG-super-bot
+git clone https://github.com/phuc16/super-bot.git
+cd super-bot
 go mod download
 
 cp env.example .env
 ```
 
-Chỉnh sửa file `.env` — **bắt buộc** phải điền 2 giá trị sau:
+Edit `.env`. You **must** set these two values:
 
 ```env
-DISCORD_TOKEN=token_của_bot_bạn
-DISCORD_GUILD_ID=id_server_của_bạn
+DISCORD_TOKEN=your_bot_token
+DISCORD_GUILD_ID=your_server_id
 ```
 
-Xem toàn bộ các biến cấu hình tại mục [Environment Variables](#environment-variables) bên dưới.
+See [Environment Variables](#environment-variables) below for every setting.
 
-### Bước 4 — Khởi động Database
+### Step 4: Start the database
 
-**Dùng Docker (khuyến nghị):**
+**With Docker (recommended):**
 
 ```bash
 docker-compose -f docker/docker-compose.yml up -d mysql
 ```
 
-**Hoặc tự cài MySQL** rồi tạo database và user tương ứng với các giá trị `DB_*` trong `.env`.
+**Or install MySQL yourself** and create the database and user matching the `DB_*` values in `.env`.
 
-### Bước 5 — Chạy Bot
+### Step 5: Run the bot
 
 **Development:**
 
@@ -77,152 +80,195 @@ docker-compose -f docker/docker-compose.yml up -d mysql
 go run cmd/bot/main.go
 ```
 
-**Production (build binary):**
+**Production (build a binary):**
 
 ```bash
 go build -o bot ./cmd/bot
 ./bot
 ```
 
-**Docker (chạy cả bot lẫn MySQL):**
+**Docker (runs both the bot and MySQL):**
 
 ```bash
 docker-compose -f docker/docker-compose.yml up -d
 docker-compose -f docker/docker-compose.yml logs -f bot
 ```
 
-Bot sẽ tự động chạy migration database khi khởi động.
+The bot runs database migrations automatically on startup.
 
 ---
 
-## Đổi sang server khác
+## Required bot permissions
 
-Chỉ cần thay 2 dòng trong `.env` rồi restart bot:
+| Permission | Used for |
+|------------|----------|
+| View Channel | Reading channels |
+| Send Messages | Posting announcements and results |
+| Read Message History | `/export` and `/roast` read past messages |
+| Manage Roles | Locking the channel during Werewolf, muting the Saboteur's target |
+| Create Private Threads | Private threads for the whole table and for the wolf pack |
+| Send Messages in Threads | Sending bite votes and summaries in threads |
+| Manage Threads | Locking threads by day/night, adding/removing members, deleting threads when the game ends |
+
+**Werewolf needs all 7 permissions above.** `/werewolf start` checks before opening a table and reports exactly which permission is missing, instead of starting a game that breaks halfway.
+
+---
+
+## Switching to another server
+
+Change two lines in `.env` and restart the bot:
 
 ```env
-DISCORD_TOKEN=token_bot_mới
-DISCORD_GUILD_ID=id_server_mới
+DISCORD_TOKEN=new_bot_token
+DISCORD_GUILD_ID=new_server_id
 ```
 
 ---
 
 ## Commands
 
-| Lệnh | Mô tả | Quyền |
-|------|-------|-------|
-| `/export` | Export tin nhắn kèm tóm tắt AI | Tất cả |
-| `/activity` | Xem thống kê hoạt động | Tất cả |
-| `/leaderboard` | Top 10 thành viên tích cực | Tất cả |
-| `/report` | Tạo/xem báo cáo tuần | Admin |
-| `/inactive` | Tìm thành viên không hoạt động | Admin |
-| `/config` | Cài đặt server | Admin |
-| `/help` | Xem hướng dẫn | Tất cả |
+| Command | Description | Access |
+|---------|-------------|--------|
+| `/werewolf` | Werewolf game | Everyone |
+| `/duel` | Dice challenge with a point wager | Everyone |
+| `/duel-leaderboard` | Duel leaderboard | Everyone |
+| `/duel-history` | Your duel history | Everyone |
+| `/duel-challenge-all` | Schedule a duel tournament | Admin |
+| `/duel-reset` | Reset all duel points on the server | Admin |
+| `/export` | Export messages with an AI summary | Everyone |
+| `/roast` | AI roasts a member | Everyone |
+| `/addcom` | Add a keyword command | Admin |
+| `/delcom` | Delete a keyword command | Admin |
+| `/listcom` | List keyword commands | Everyone |
+| `/addtopic` | Add a topic for the bot to write about periodically | Admin |
+| `/deltopic` | Delete an AI topic | Admin |
+| `/listtopic` | List AI topics | Everyone |
+| `/posttopic` | Post an AI piece on any topic right now | Admin |
+| `/help` | Show help (`lang:vi` or `lang:en`) | Everyone |
 
-### Chi tiết `/export`
+### `/werewolf` details
+
+```
+/werewolf start                                  # open a table
+/werewolf start reveal-on-death:false            # don't reveal roles on death
+/werewolf start custom-roles:true                # pick the count of each role
+/werewolf status                                 # show the running game
+/werewolf leave                                  # leave the game
+/werewolf force-stop                             # cancel the game (Admin)
+```
+
+- **5–20 players.** Each channel runs one game at a time; multiple channels can run in parallel.
+- **11 roles:** Villager, Werewolf, Seer, Doctor, Witch, Hunter, Wolf Cub, Cursed Wolf, Traitor, Saboteur, Cupid.
+- `reveal-on-death` (default `true`): whether the dead player's role is announced. It also affects the role list shown in night announcements.
+- `custom-roles` (default `false`): the host picks the count of each role in a dedicated panel. This mode does **not** check balance: you can skew heavily toward one side.
+- See `/help werewolf` for each role and the win conditions.
+
+### `/export` details
 
 ```
 /export type:recent hours:24 language:vi
-/export type:date_range from:"2025-01-01" end:"2025-01-07"
-/export type:date_range from:"2025-01-01"
+/export type:date_range from:"2026-01-01" end:"2026-01-07"
+/export type:since_last
 ```
 
-- `type`: `recent` hoặc `date_range`
-- `hours`: Số giờ nhìn lại (1–168, mặc định 1) — dùng khi `type:recent`
-- `from`: Ngày bắt đầu `YYYY-MM-DD` hoặc `YYYY-MM-DD HH:MM` — dùng khi `type:date_range`
-- `end`: Ngày kết thúc (mặc định: hiện tại)
-- `language`: `vi` (mặc định) hoặc `en`
+- `type`: `recent`, `date_range`, or `since_last`
+- `hours`: how many hours to look back; used with `type:recent`
+- `from` / `end`: `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`; used with `type:date_range` (`end` defaults to now)
+- `language`: `vi` (default) or `en`
+- `public`: `true` to post publicly instead of only visible to you
 
-### Chi tiết `/config`
-
-Cấu hình server sau khi bot đã vào:
+### `/addcom` details
 
 ```
-/config set reports_channel:#channel-name
-/config set active_role:Tích Cực
-/config set inactivity_days:14
-/config set timezone:Asia/Ho_Chi_Minh
+/addcom keyword:gei response:"cái đồ đáng iu" image:<file>
 ```
+
+Then typing `/gei` in the channel makes the bot reply.
+
+Images are **stored in the database**, not as links. Discord attachment links carry a signature that expires after a few hours and cannot be renewed; the old version stored links, so images disappeared after a short while. Maximum 8 MB per image.
 
 ---
 
 ## Environment Variables
 
-| Biến | Bắt buộc | Mặc định | Mô tả |
-|------|----------|---------|-------|
-| `DISCORD_TOKEN` | ✅ | — | Token của Discord bot |
-| `DISCORD_GUILD_ID` | ✅ | — | ID của server Discord |
-| `OPENAI_API_KEY` | ✅* | — | API key OpenAI (*không cần nếu `MOCK_GPT_API=true`) |
-| `DB_HOST` | ✅ | `localhost` | Host MySQL |
-| `DB_PORT` | | `3306` | Port MySQL |
-| `DB_USER` | ✅ | — | User MySQL |
-| `DB_PASSWORD` | ✅ | — | Password MySQL |
-| `DB_NAME` | ✅ | — | Tên database |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DISCORD_TOKEN` | ✅ | — | Discord bot token |
+| `DISCORD_GUILD_ID` | ✅ | — | Discord server ID |
+| `OPENAI_API_KEY` | ✅* | — | OpenAI API key (*not needed if `MOCK_GPT_API=true`) |
+| `DB_HOST` | | `localhost` | MySQL host |
+| `DB_PORT` | | `3306` | MySQL port |
+| `DB_USER` | | `superbot` | MySQL user |
+| `DB_PASSWORD` | | *(empty)* | MySQL password |
+| `DB_NAME` | | `superbot_dev` | Database name |
 | `APP_ENV` | | `development` | `development` / `staging` / `production` |
 | `LOG_LEVEL` | | `info` | `debug` / `info` / `warn` / `error` |
-| `PORT` | | `8080` | Port HTTP health check |
-| `TIMEZONE` | | `UTC` | Timezone (vd: `Asia/Ho_Chi_Minh`) |
-| `GPT_MODEL` | | `gpt-4-turbo-preview` | Model OpenAI |
-| `GPT_MAX_TOKENS` | | `4096` | Số token tối đa |
-| `GPT_DAILY_BUDGET_USD` | | `10.0` | Ngân sách GPT mỗi ngày (USD) |
-| `GPT_MAX_CONCURRENT_REQUESTS` | | `5` | Số request GPT chạy song song |
-| `RATE_LIMIT_EXPORT_PER_HOUR` | | `3` | Số lần dùng `/export` mỗi giờ |
-| `MOCK_GPT_API` | | `false` | `true` để test không cần OpenAI key |
-| `DEBUG_MODE` | | `false` | Bật debug mode |
+| `PORT` | | `8080` | HTTP health check port |
+| `TIMEZONE` | | `UTC` | Timezone (for example `Asia/Ho_Chi_Minh`) |
+| `GPT_MODEL` | | `gpt-4o-mini` | OpenAI model |
+| `GPT_MAX_TOKENS` | | `4096` | Maximum tokens |
+| `GPT_DAILY_BUDGET_USD` | | `0.034` | Daily GPT budget (USD) |
+| `GPT_MAX_CONCURRENT_REQUESTS` | | `5` | Concurrent GPT requests |
+| `GPT_REQUEST_TIMEOUT_SECONDS` | | `90` | Timeout per GPT request (seconds) |
+| `RATE_LIMIT_EXPORT_PER_HOUR` | | `3` | `/export` uses per hour |
+| `MOCK_GPT_API` | | `false` | `true` to test without an OpenAI key |
+| `DEBUG_MODE` | | `false` | Enable debug mode |
+
+All `DB_*` variables have dev defaults, but you **must override them in production**. `GPT_DAILY_BUDGET_USD` defaults very low (`0.034`); raise it if you use AI commands heavily, otherwise the bot stops calling GPT once the day's budget is spent.
 
 ---
 
 ## Database Migrations
 
-Migration chạy tự động khi bot khởi động. Nếu cần chạy thủ công:
+Migrations run automatically at startup, reading the SQL files in `scripts/migrations/`
+in filename order. To run them manually:
 
 ```bash
-# Áp dụng tất cả migration
-./bot migrate up
-
-# Rollback migration gần nhất
-./bot migrate down
+./bot migrate up        # apply pending migrations
+./bot migrate down      # roll back the latest migration
+./bot migrate version   # show the current version
 ```
+
+Werewolf game state lives **only in memory**: restarting the bot mid-game loses that game. On startup the bot unlocks channels that were locked when it went down.
 
 ---
 
 ## Background Tasks
 
-Các tác vụ tự động chạy theo lịch:
+| Task | Schedule | Description |
+|------|----------|-------------|
+| AI posts | Every minute | Checks for due topics (`/addtopic`) and posts |
 
-| Tác vụ | Lịch | Mô tả |
-|--------|------|-------|
-| Trao role tích cực | Thứ Hai 00:00 | Top 5 thành viên hoạt động nhất |
-| Báo cáo tuần | Thứ Hai 00:05 | Gửi báo cáo lên channel đã cấu hình |
-| Đồng bộ username | Mỗi ngày 03:00 | Cập nhật username/avatar từ Discord |
-| Lưu trữ dữ liệu | Mỗi ngày 02:00 | Archive data cũ hơn 90 ngày |
-| Dọn dẹp | Mỗi ngày 04:00 | Xóa vĩnh viễn dữ liệu đã soft-delete |
+Duel tournaments scheduled with `/duel-challenge-all` run in memory, not through the scheduler, so they are also lost on restart.
 
 ---
 
 ## Health Check
 
-Bot expose các endpoint tại port 8080:
+The bot exposes endpoints on port 8080:
 
 ```
-GET /health   # Trạng thái tổng thể (database + Discord + GPT)
+GET /health   # Overall status (database + Discord + GPT)
 GET /ready    # Readiness check
 GET /live     # Liveness check
 ```
 
 ---
 
-## Cấu trúc project
+## Project structure
 
 ```
 .
 ├── cmd/bot/              # Entry point
 ├── internal/
-│   ├── discord/          # Discord client & commands
-│   ├── gpt/              # Tích hợp OpenAI
+│   ├── discord/
+│   │   ├── commands/     # One file per slash command; werewolf split by phase
+│   │   └── events/       # MESSAGE_CREATE handler (keyword commands)
+│   ├── gpt/              # OpenAI integration
 │   ├── services/         # Business logic
 │   ├── scheduler/        # Background tasks
-│   ├── storage/          # Database layer
-│   ├── config/           # Cấu hình
+│   ├── storage/          # Database layer + migrator
+│   ├── config/           # Configuration
 │   └── models/           # Data models
 ├── pkg/logger/           # Logging
 ├── scripts/migrations/   # SQL migrations
