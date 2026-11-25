@@ -202,7 +202,7 @@ No license file has been added to this repository yet, so all rights are reserve
 
 ## Contact
 
-Phuc Truong Hoang - [@phuc16](https://github.com/phuc16)
+Phuc Truong Hoang - [@phuc16](https://github.com/phuc16) - [LinkedIn](https://www.linkedin.com/in/phuc-truong-hoang-33559a232)
 
 Project Link: [https://github.com/phuc16/super-bot](https://github.com/phuc16/super-bot)
 
@@ -212,6 +212,11 @@ Project Link: [https://github.com/phuc16/super-bot](https://github.com/phuc16/su
 
 * [Best-README-Template](https://github.com/othneildrew/Best-README-Template)
 * [discordgo](https://github.com/bwmarrin/discordgo)
+* [Gin](https://github.com/gin-gonic/gin)
+* [GORM](https://gorm.io)
+* [zerolog](https://github.com/rs/zerolog)
+* [OpenAI API](https://platform.openai.com/docs)
+* [Discord Developer Docs](https://discord.com/developers/docs)
 * [Shields.io](https://shields.io)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
